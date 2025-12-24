@@ -1,0 +1,23 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+
+# Configuration files with sensitive information
+providers.ini
+config.yaml
+
+# logs
+logs/
+
+# data
+data/
+
+# test file
+test.py
