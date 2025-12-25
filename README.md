@@ -8,7 +8,7 @@
 
 **GlyphKeeper** 是一个混合代理 AI 系统，旨在主持复杂的桌面角色扮演游戏。当前正在开发中。
 
-传统的"提示词工程"式 AI 往往强迫单个 LLM 同时扮演"创造性的叙事者"和"严谨的数据库"两个角色，导致逻辑冲突和记忆错乱。本项目受 **Google DeepMind Concordia** 框架与 **ChatRPG v2** 论文启发，通过**关注点分离（Separation of Concerns）**，将 GM 的职责拆分为多个协同工作的专业代理，并基于**单一事实来源（Single Source of Truth）**的持久化数据库构建。
+传统的"提示词工程"式 AI 往往强迫单个 LLM 同时扮演"创造性的叙事者"和"严谨的数据库"两个角色，导致逻辑冲突和记忆错乱。本项目受 **Google DeepMind Concordia** 框架与 **ChatRPG v2** 论文启发，通过**关注点分离（Separation of Concerns）**，将 GM 的职责拆分为多个协同工作的专业代理，并基于单一事实来源（Single Source of Truth）的持久化数据库构建。
 
 ##  核心痛点与解决方案
 
@@ -172,7 +172,7 @@
 
 ### 1. 环境准备
 
-`bash
+```bash
 # 安装 uv（Python 包管理器）
 pip install uv
 
@@ -184,30 +184,30 @@ cp template/config.yaml.template config.yaml
 cp template/providers.ini.template providers.ini
 
 # 编辑配置文件，填入你的 LLM API 密钥和数据库连接信息
-`
+```
 
 ### 2. 初始化数据库
 
-`bash
-# 运行数据库初始化脚本
+```bash
+#### 运行数据库初始化脚本
 uv run python scripts/init_db.py
-`
+```
 
 ### 3. 运行系统
 
-`bash
+```bash
 # CLI 模式
 uv run python src/interfaces/cli_runner.py
 
 # API 服务模式
 uv run python src/interfaces/api_server.py
-`
+```
 
 ---
 
 ##  项目结构
 
-`
+```
 GlyphKeeper/
  config.yaml              # 主配置文件（分级模型、向量存储）
  providers.ini            # LLM 提供商配置
@@ -245,7 +245,7 @@ GlyphKeeper/
     init_db.py          # 数据库初始化脚本
  tests/                  # 单元测试
  data/                   # 数据文件（图谱、日志）
-`
+```
 
 ---
 
