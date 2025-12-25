@@ -1,0 +1,64 @@
+# ============================================
+# 项目基础配置
+# ============================================
+project:
+  # 项目名，会用于创建数据库用户和数据库名，唯一
+  name: "GlyphKeeper"
+  # 调试模式
+  debug: true
+  # 是否开启模型额度使用统计
+  # 若开启，需要在分级模型配置中配置不同模型的价格，以 人民币/M Tokens 为单位
+  model_cost_tracking: false
+
+# ============================================
+# 分级模型配置
+# ============================================
+# provider 对应 providers.ini 中的配置节名称
+model_tiers:
+  # 快速模型：用于简单任务、快速响应
+  fast:
+    provider: "SILKFLOW"
+    model_name: "deepseek-ai/DeepSeek-V3.2"
+    temperature: 0.3
+    max_tokens: 512
+    input_cost: 2
+    output_cost: 3
+    
+  # 标准模型：平衡性能和质量
+  standard:
+    provider: "SILKFLOW"
+    model_name: "deepseek-ai/DeepSeek-V3.2"
+    temperature: 0.7
+    max_tokens: 2048
+    input_cost: 2
+    output_cost: 3
+    
+  # 智能模型：用于复杂推理、重要决策
+  smart:
+    provider: "SILKFLOW"
+    model_name: "deepseek-ai/DeepSeek-V3.2"
+    temperature: 0.8
+    max_tokens: 4096
+    input_cost: 2
+    output_cost: 3
+
+# ============================================
+# 向量数据库配置
+# ============================================
+vector_store:
+  provider: "SILKFLOW"  # 嵌入模型提供商 (对应 providers.ini)
+  embedding_model_name: "Pro/BAAI/bge-m3"
+  chunk_size: 500
+  chunk_overlap: 50
+  embedding_dim: 1024 # 嵌入向量维度
+  input_cost: 0.07
+  output_cost: 0.07
+
+# ============================================
+# LightRAG 配置
+# ============================================
+lightrag:
+  # 默认查询模式: local / global / hybrid / mix / naive
+  default_query_mode: "hybrid"
+  # 查询返回的相关文档数量
+  default_top_k: 60

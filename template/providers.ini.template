@@ -1,0 +1,33 @@
+# ============================================
+# 数据库配置
+# ============================================
+[DATABASE]
+# PostgreSQL 配置
+host = localhost
+port = 5432
+password = your_password
+
+# PostgreSQL 管理员配置 (仅用于 init_db.py 初始化)
+admin_user = postgres
+admin_password = your_password
+
+# ============================================
+# OpenAI 配置
+# ============================================
+[OPENAI]
+base_url = https://api.openai.com/v1
+api_key = your_openai_api_key
+
+# ============================================
+# DeepSeek 配置
+# ============================================
+[DEEPSEEK]
+base_url = https://api.deepseek.com
+api_key = your_deepseek_api_key
+
+# ============================================
+# SiliconFlow 配置
+# ============================================
+[SILKFLOW]
+base_url = https://api.siliconflow.cn/v1
+api_key = your_silkflow_api_key
