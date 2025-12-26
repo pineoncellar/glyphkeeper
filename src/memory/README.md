@@ -22,21 +22,21 @@ Memory 模块是 GlyphKeeper 的核心组件，负责维护游戏世界的**持�
 
 ```mermaid
 graph TD
-    A[Agent (Narrator/Archivist)] -->|CRUD| B(Repositories)
-    A -->|Query/Insert| C(Episodic/Semantic Memory)
+    A["Agent (Narrator/Archivist)"] -->|CRUD| B(Repositories)
+    A -->|Query/Insert| C("Episodic/Semantic Memory")
     
-    subgraph Structured Memory [左脑：结构化记忆]
-        B -->|SQLAlchemy| D[(PostgreSQL)]
+    subgraph Structured Memory ["左脑：结构化记忆"]
+        B -->|SQLAlchemy| D[("PostgreSQL")]
         D -->|Tables| E[Locations]
         D -->|Tables| F[Entities]
         D -->|Tables| G[GameSession]
     end
     
-    subgraph Unstructured Memory [右脑：非结构化记忆]
+    subgraph Unstructured Memory ["右脑：非结构化记忆"]
         C -->|RAG Engine| H[LightRAG]
-        H -->|Vector| I[(PGVector)]
-        H -->|KV| J[(PostgreSQL KV)]
-        H -->|Graph| K[NetworkX/Neo4j]
+        H -->|Vector| I[("PGVector")]
+        H -->|KV| J[("PostgreSQL KV")]
+        H -->|Graph| K["NetworkX/Neo4j"]
     end
 ```
 
