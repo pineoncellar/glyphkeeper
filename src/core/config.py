@@ -24,7 +24,8 @@ class ProjectConfig(BaseModel):
 
 class DatabaseConfig(BaseModel):
     """数据库配置"""
-    url: str = Field(description="数据库连接 URL")
+    host: Optional[str] = Field(None, description="数据库主机")
+    port: Optional[str] = Field(None, description="数据库端口")
     username: Optional[str] = Field(None, description="数据库用户名")
     password: Optional[str] = Field(None, description="数据库密码")
     project_name: Optional[str] = Field(None, description="项目名称，与项目基础配置中的名称保持一致")
@@ -156,20 +157,18 @@ class Settings(BaseModel):
                     
                     # 数据库
                     if section_lower == 'database':
-                        # 优先读取 url，如果没有则尝试从 host/port 构建
-                        url = config.get(section, 'url', fallback=None)
-                        if not url:
-                            host = config.get(section, 'host', fallback=None)
-                            port = config.get(section, 'port', fallback='5432')
-                            if host:
-                                url = f"{host}:{port}"
-
-                        if url:
-                            result['database'] = DatabaseConfig(
-                                url=url,
-                                username=config.get(section, 'username', fallback=None),
-                                password=config.get(section, 'password', fallback=None)
-                            )
+                        # 读取基本配置
+                        host = config.get(section, 'host', fallback=None)
+                        port = config.get(section, 'port', fallback=None)
+                        username = config.get(section, 'username', fallback=None)
+                        password = config.get(section, 'password', fallback=None)
+                        
+                        result['database'] = DatabaseConfig(
+                            host=host,
+                            port=port,
+                            username=username,
+                            password=password
+                        )
                     
                     # AI提供方配置
                     else:

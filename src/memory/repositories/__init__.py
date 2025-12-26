@@ -1,16 +1,14 @@
-"""
-Repositories 模块
+from .entity_repo import EntityRepository
+from .location_repo import LocationRepository
+from .knowledge_repo import KnowledgeRepository
+from .session_repo import SessionRepository
+from .interactable_repo import InteractableRepository
 
-仓库模式封装，提供统一的数据访问接口：
-- EntityRepository: 实体/角色数据操作
-- LocationRepository: 地点数据操作
-- ClueRepository: 线索/物品数据操作（待实现）
-- RelationshipRepository: 关系数据操作（待实现）
+__all__ = [
+    "EntityRepository",
+    "LocationRepository",
+    "KnowledgeRepository",
+    "SessionRepository",
+    "InteractableRepository",
+]
 
-用法示例：
-    from .repositories import EntityRepository, LocationRepository
-    
-    async with get_db() as session:
-        entity_repo = EntityRepository(session)
-        entity = await entity_repo.get_entity_by_id(1)
-"""

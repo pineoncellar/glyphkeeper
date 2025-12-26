@@ -1,21 +1,28 @@
-"""
-Entity 仓库模块
+from typing import List, Optional
+from uuid import UUID
+from sqlalchemy import select
+from ..models import Entity
+from .base_repo import TaggableRepository
 
-封装实体/NPC/角色相关的 CRUD 操作：
+class EntityRepository(TaggableRepository[Entity]):
+    """
+    实体数据仓库
+    负责 Entity 表的 CRUD 操作。
+    """
+    def __init__(self, session):
+        super().__init__(session, Entity)
 
-查询操作：
-- get_entity_by_id(entity_id) -> Entity
-- get_entity_by_name(name) -> Entity
-- list_entities(filters) -> List[Entity]
-- search_entities_by_tag(tag) -> List[Entity]
+    async def create(self, name: str, tags: List[str] = None, stats: dict = None, location_id: Optional[UUID] = None) -> Entity:
+        """创建新实体"""
+        entity = Entity(name=name, tags=tags or [], stats=stats or {}, location_id=location_id)
+        return await self._save(entity)
 
-修改操作：
-- create_entity(data) -> Entity
-- update_entity(entity_id, data) -> Entity
-- delete_entity(entity_id) -> bool
-- update_entity_location(entity_id, location_id)
+    async def update_location(self, entity_id: UUID, location_id: UUID) -> Optional[Entity]:
+        """更新实体的位置"""
+        entity = await self.get_by_id(entity_id)
+        if entity:
+            entity.location_id = location_id
+            await self.session.commit()
+            await self.session.refresh(entity)
+        return entity
 
-关系操作：
-- get_entity_relationships(entity_id)
-- add_relationship(entity1_id, entity2_id, relation_type)
-"""

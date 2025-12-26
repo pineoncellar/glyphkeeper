@@ -89,7 +89,9 @@ def get_postgres_url() -> str:
     settings = get_settings()
     database_config = settings.get_database_config()
 
-    url = database_config.url
+    host = database_config.host
+    port = database_config.port or "5432"
+    url = f"{host}:{port}"
     db = database_config.project_name
     user = database_config.username
     password = database_config.password

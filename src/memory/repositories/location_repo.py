@@ -1,22 +1,33 @@
-"""
-Location 仓库模块
+from typing import List, Optional
+from uuid import UUID
+from sqlalchemy import select
+from ..models import Location
+from .base_repo import TaggableRepository
 
-封装游戏地点相关的 CRUD 操作：
+class LocationRepository(TaggableRepository[Location]):
+    """
+    地点数据仓库
+    负责 Location 表的 CRUD 操作。
+    """
+    def __init__(self, session):
+        super().__init__(session, Location)
 
-查询操作：
-- get_location_by_id(location_id) -> Location
-- get_location_by_name(name) -> Location
-- get_location_state(location_id) -> dict
-- list_locations() -> List[Location]
-- get_connected_locations(location_id) -> List[Location]
+    async def get_by_name(self, name: str) -> Optional[Location]:
+        """根据名称获取地点"""
+        result = await self.session.execute(select(Location).where(Location.name == name))
+        return result.scalar_one_or_none()
 
-修改操作：
-- create_location(data) -> Location
-- update_location(location_id, data) -> Location
-- update_location_state(location_id, state) -> Location
-- delete_location(location_id) -> bool
+    async def create(self, name: str, base_desc: str, tags: List[str] = None, exits: dict = None) -> Location:
+        """创建新地点"""
+        location = Location(name=name, base_desc=base_desc, tags=tags or [], exits=exits or {})
+        return await self._save(location)
 
-地点关系：
-- add_location_connection(from_id, to_id, direction)
-- get_location_graph() -> Dict
-"""
+    async def update_tags(self, location_id: UUID, tags: List[str]) -> Optional[Location]:
+        """更新地点的 Tags (覆盖)"""
+        location = await self.get_by_id(location_id)
+        if location:
+            location.tags = tags
+            await self.session.commit()
+            await self.session.refresh(location)
+        return location
+

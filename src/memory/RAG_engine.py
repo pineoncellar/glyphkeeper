@@ -4,6 +4,7 @@ LightRAG 核心引擎
 避免重复加载模型和连接数据库
 """
 import asyncio
+import logging
 from pathlib import Path
 from typing import Optional, Literal
 from lightrag import LightRAG, QueryParam
@@ -14,6 +15,17 @@ from ..llm import create_llm_model_func, create_embedding_func
 from .storage import get_storage_config
 
 logger = get_logger(__name__)
+
+# 统一配置 LightRAG 的日志格式
+# 获取 lightrag 的 logger
+lightrag_logger = logging.getLogger("lightrag")
+# 移除可能存在的默认 handler (如 StreamHandler)，防止格式不统一
+lightrag_logger.handlers.clear()
+# 使用项目的 logger 配置重新初始化，这样就会应用统一的 Formatter
+# 注意：get_logger 内部会检查 handlers 是否为空，所以上面必须先 clear
+get_logger("lightrag", log_level="WARNING")
+# 禁止向上传播，防止根 logger 重复打印或使用默认格式
+lightrag_logger.propagate = False
 
 
 class RAGEngine:
@@ -75,8 +87,8 @@ class RAGEngine:
         os.environ["POSTGRES_USER"] = db_config.username or "postgres"
         os.environ["POSTGRES_PASSWORD"] = db_config.password or ""
         os.environ["POSTGRES_DATABASE"] = db_config.project_name or "postgres"
-        os.environ["POSTGRES_HOST"] = db_config.url.split(":")[0] if ":" in db_config.url else db_config.url
-        os.environ["POSTGRES_PORT"] = db_config.url.split(":")[1] if ":" in db_config.url else "5432"
+        os.environ["POSTGRES_HOST"] = db_config.host
+        os.environ["POSTGRES_PORT"] = db_config.port or "5432"
         
         # 创建 LLM 和 Embedding 函数
         llm_func = create_llm_model_func(tier=llm_tier)
@@ -108,12 +120,18 @@ class RAGEngine:
             logger.error(f"RAG 引擎初始化失败: {e}")
             raise
     
-    async def insert(self, content: str) -> bool:
+    async def insert(self, content: str, **kwargs) -> bool:
         """插入文本内容到知识库"""
         if not self._initialized or self.rag is None:
             raise RuntimeError("RAG 引擎未初始化")
         
         try:
+            # 目前 LightRAG 的 ainsert 方法不支持 metadata 等额外参数
+            # 为了避免 TypeError 和不必要的 try-catch 开销，这里直接忽略 kwargs
+            # 如果未来 LightRAG 更新支持了 metadata，可以重新加上
+            if kwargs:
+                logger.debug(f"忽略不支持的插入参数: {list(kwargs.keys())}")
+            
             await self.rag.ainsert(content)
             logger.debug(f"成功插入文本 (长度: {len(content)})")
             return True
@@ -142,7 +160,8 @@ class RAGEngine:
         question: str,
         mode: Literal["local", "global", "hybrid", "mix", "naive"] = "hybrid",
         top_k: int = 60,
-        user_prompt: Optional[str] = None
+        user_prompt: Optional[str] = None,
+        **kwargs
     ) -> str:
         """查询知识库
 
@@ -169,6 +188,11 @@ class RAGEngine:
         logger.debug(f"RAG 查询: question={question[:50]}..., mode={mode}")
         
         try:
+            # 目前 LightRAG 的 aquery 方法不支持 filters 等额外参数
+            # 为了避免 TypeError 和不必要的 try-catch 开销，这里直接忽略 kwargs
+            if kwargs:
+                logger.debug(f"忽略不支持的查询参数: {list(kwargs.keys())}")
+
             result = await self.rag.aquery(question, param=param)
             return result
         except Exception as e:
