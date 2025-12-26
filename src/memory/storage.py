@@ -56,7 +56,7 @@ class StorageConfig(BaseModel):
 def get_storage_config(working_dir: Optional[str] = None) -> Dict[str, Any]:
     """获取存储配置字典，供 Core 层初始化 LightRAG 使用"""
     if working_dir is None:
-        working_dir = str(PROJECT_ROOT / "data")
+        working_dir = str(PROJECT_ROOT / "data" / "modules")
     
     # 确保工作目录存在
     Path(working_dir).mkdir(parents=True, exist_ok=True)

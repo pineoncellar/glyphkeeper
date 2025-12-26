@@ -52,7 +52,14 @@ class RAGEngine:
         settings = get_settings()
         
         # 获取工作目录
-        working_dir = PROJECT_ROOT / "data"
+        data_dir = PROJECT_ROOT / "data"
+        
+        # 确保基础目录结构存在
+        (data_dir / "raw_sources").mkdir(parents=True, exist_ok=True)
+        (data_dir / "intermediate").mkdir(parents=True, exist_ok=True)
+        
+        # LightRAG 工作目录设置为 modules
+        working_dir = data_dir / "modules"
         working_dir.mkdir(parents=True, exist_ok=True)
         
         # 获取存储配置

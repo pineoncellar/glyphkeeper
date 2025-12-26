@@ -195,7 +195,7 @@ class Settings(BaseModel):
     
     def _ensure_directories(self):
         """确保必要的目录存在"""
-        for name in ("logs", "data", "data/modules"):
+        for name in ("logs", "data", "data/modules", "data/raw_sources", "data/intermediate"):
             (PROJECT_ROOT / name).mkdir(parents=True, exist_ok=True)
     
     def get_model_config(self, tier: str) -> ModelConfig:
