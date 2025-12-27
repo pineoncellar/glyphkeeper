@@ -53,7 +53,7 @@ class StorageConfig(BaseModel):
     ] = Field(default="JsonDocStorage", description="文档存储类型")
 
 
-def get_storage_config(working_dir: Optional[str] = None) -> Dict[str, Any]:
+def get_storage_config(working_dir: Optional[str] = None, schema: str = "public") -> Dict[str, Any]:
     """获取存储配置字典，供 Core 层初始化 LightRAG 使用"""
     if working_dir is None:
         working_dir = str(PROJECT_ROOT / "data" / "modules")
@@ -62,7 +62,7 @@ def get_storage_config(working_dir: Optional[str] = None) -> Dict[str, Any]:
     Path(working_dir).mkdir(parents=True, exist_ok=True)
     
     # 使用混合存储策略: PG + NetworkX
-    db_url = get_postgres_url()
+    db_url = get_postgres_url(schema=schema)
     settings = get_settings()
     
     config = {
@@ -84,7 +84,7 @@ def get_storage_config(working_dir: Optional[str] = None) -> Dict[str, Any]:
     return config
 
 
-def get_postgres_url() -> str:
+def get_postgres_url(schema: str = "public") -> str:
     """获取 PostgreSQL 连接 URL"""
     settings = get_settings()
     database_config = settings.get_database_config()
@@ -96,7 +96,7 @@ def get_postgres_url() -> str:
     user = database_config.username
     password = database_config.password
     
-    return f"postgresql://{user}:{password}@{url}/{db}"
+    return f"postgresql://{user}:{password}@{url}/{db}?options=-csearch_path%3D{schema}"
 
 
 # ============================================

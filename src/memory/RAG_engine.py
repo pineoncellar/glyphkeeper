@@ -30,25 +30,27 @@ lightrag_logger.propagate = False
 
 class RAGEngine:
     """RAG 引擎单例类"""
-    _instance: Optional["RAGEngine"] = None
+    _instances: dict[str, "RAGEngine"] = {}
     _lock = asyncio.Lock()
     
-    def __init__(self):
+    def __init__(self, domain: str):
         self.rag: Optional[LightRAG] = None
         self._initialized = False
+        self.domain = domain
     
     @classmethod
     async def get_instance(
         cls,
+        domain: str = "world",
         llm_tier: str = "standard",
         force_reinit: bool = False # 是否强制初始化
     ) -> "RAGEngine":
-        """获取 RAG 引擎单例实例"""
+        """获取 RAG 引擎实例"""
         async with cls._lock:
-            if cls._instance is None or force_reinit:
-                cls._instance = cls()
-                await cls._instance._initialize(llm_tier)
-            return cls._instance
+            if domain not in cls._instances or force_reinit:
+                cls._instances[domain] = cls(domain)
+                await cls._instances[domain]._initialize(llm_tier)
+            return cls._instances[domain]
     
     async def _initialize(
         self,
@@ -56,27 +58,42 @@ class RAGEngine:
     ):
         """初始化 LightRAG 实例"""
         if self._initialized:
-            logger.warning("RAG 引擎已初始化，跳过重复初始化")
+            logger.warning(f"RAG 引擎 ({self.domain}) 已初始化，跳过重复初始化")
             return
         
-        logger.info(f"正在初始化 RAG 引擎: llm_tier={llm_tier}")
+        logger.info(f"正在初始化 RAG 引擎 ({self.domain}): llm_tier={llm_tier}")
         
         settings = get_settings()
-        
-        # 获取工作目录
         data_dir = PROJECT_ROOT / "data"
         
-        # 确保基础目录结构存在
+        # 确定工作目录和数据库 Schema
+        if self.domain == "rules":
+            working_dir = data_dir / "rules"
+            schema = "rag_rules"
+        else:
+            # world domain
+            active_world = settings.project.active_world
+            working_dir = data_dir / "worlds" / active_world
+            schema = f"world_{active_world}"
+
+        # 确保目录存在
+        working_dir.mkdir(parents=True, exist_ok=True)
         (data_dir / "raw_sources").mkdir(parents=True, exist_ok=True)
         (data_dir / "intermediate").mkdir(parents=True, exist_ok=True)
         
-        # LightRAG 工作目录设置为 modules
-        working_dir = data_dir / "modules"
-        working_dir.mkdir(parents=True, exist_ok=True)
-        
+        # 确保 Schema 存在
+        from sqlalchemy import text
+        from .database import db_manager
+        try:
+            async with db_manager.engine.begin() as conn:
+                await conn.execute(text(f"CREATE SCHEMA IF NOT EXISTS {schema}"))
+        except Exception as e:
+            logger.warning(f"尝试创建 Schema {schema} 失败 (可能已存在或权限不足): {e}")
+
         # 获取存储配置
         storage_config = get_storage_config(
-            working_dir=str(working_dir)
+            working_dir=str(working_dir),
+            schema=schema
         )
         
         # 设置环境变量,满足 LightRAG 对 PGKVStorage 的要求
@@ -114,10 +131,10 @@ class RAGEngine:
             await self.rag.initialize_storages()
             
             self._initialized = True
-            logger.debug("RAG 引擎初始化完成")
+            logger.debug(f"RAG 引擎 ({self.domain}) 初始化完成")
             
         except Exception as e:
-            logger.error(f"RAG 引擎初始化失败: {e}")
+            logger.error(f"RAG 引擎 ({self.domain}) 初始化失败: {e}")
             raise
     
     async def insert(self, content: str, **kwargs) -> bool:
