@@ -70,12 +70,50 @@ class Entity(Base):
     name: Mapped[str] = mapped_column(String, nullable=False)
     location_id: Mapped[Optional[uuid.UUID]] = mapped_column(ForeignKey("locations.id"), nullable=True)
     tags: Mapped[List[str]] = mapped_column(ARRAY(Text), default=list)
-    stats: Mapped[dict] = mapped_column(JSONB, default=dict)
+    stats: Mapped[dict] = mapped_column(JSONB, default=dict) # 数值、db等属性，如果是玩家技能和san啥的也在这
     attacks: Mapped[list] = mapped_column(JSONB, default=list) # 战斗方式
 
     location: Mapped[Optional["Location"]] = relationship(back_populates="entities")
     inventory: Mapped[List["Interactable"]] = relationship(back_populates="carrier") # 关联关键物品
     dialogue_links: Mapped[List["ClueDiscovery"]] = relationship(back_populates="entity", cascade="all, delete-orphan") # 关联对话/观察线索
+
+    # 与调查员档案一对一关系，扩展调查员特有的信息
+    profile: Mapped[Optional["InvestigatorProfile"]] = relationship(
+        back_populates="entity", 
+        uselist=False,
+        cascade="all, delete-orphan"
+    )
+
+class InvestigatorProfile(Base):
+    """
+    规则层：调查员档案
+    仅作为 Entity 的扩展，存储纯文本档案和非数值逻辑。
+    """
+    __tablename__ = "investigator_profiles"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    
+    # 关联回 Entity
+    entity_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("entities.id"), unique=True, nullable=False)
+    
+    # 基础信息
+    player_name: Mapped[str] = mapped_column(String, nullable=True) # 玩家名
+    occupation: Mapped[str] = mapped_column(String, default="Unknown") # 职业
+    age: Mapped[int] = mapped_column(Integer, default=25)
+    gender: Mapped[str] = mapped_column(String, default="Unknown")
+    residence: Mapped[str] = mapped_column(String, nullable=True)
+    birthplace: Mapped[str] = mapped_column(String, nullable=True)
+
+    # 背景故事：形象描述、思想与信念、重要之人、意义非凡之地、宝贵之物、特质、伤口和疤痕、恐惧症和躁狂症
+    # 姑且也在数据库存一份，不过主要是靠rag查询
+    backstory: Mapped[dict] = mapped_column(JSONB, default=dict)
+
+    # 资产
+    # 具体的信用等级可以放 Entity.stats，但复杂的资产描述放这里
+    assets_detail: Mapped[str] = mapped_column(Text, nullable=True)
+
+    # 反向关系
+    entity: Mapped["Entity"] = relationship(back_populates="profile")
 
 class Knowledge(Base):
     """
