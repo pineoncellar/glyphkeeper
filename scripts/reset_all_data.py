@@ -17,10 +17,12 @@ logger = get_logger("db_cleanup")
 async def cleanup_database():
     parser = argparse.ArgumentParser(description="GlyphKeeper 数据库清理工具")
     parser.add_argument("--force", action="store_true", help="跳过确认提示直接执行")
+    parser.add_argument("--target", choices=["all", "world", "rules"], default="all", help="清理目标: all(全部), world(当前世界), rules(规则库)")
     args = parser.parse_args()
 
     print("=== GlyphKeeper 数据库清理工具 ===")
-    print("警告: 此操作将清空所有项目数据！")
+    print(f"目标: {args.target}")
+    print("警告: 此操作将不可逆地删除数据！")
     
     if not args.force:
         confirm = input("请输入 'DELETE' 确认执行清理: ")
@@ -32,69 +34,53 @@ async def cleanup_database():
 
     print("\n[1] 正在连接数据库...")
     db_manager = DatabaseManager()
+    settings = get_settings()
+    active_world = settings.project.active_world
+    world_schema = f"world_{active_world}"
     
     try:
         async with db_manager.engine.begin() as conn:
-            # 1. 清空所有业务表
-            print("[2] 正在清空业务数据表...")
             
-            # 方案 A: 删除并重建所有表 (最彻底)
-            print("    -> 删除所有 SQLAlchemy 定义的表...")
-            await conn.run_sync(Base.metadata.drop_all)
-            
-            # 方案 B: 显式删除 LightRAG 表
-            # 注意：PostgreSQL 中未引用的标识符通常是小写的。
-            # 我们使用 CASCADE 来处理依赖关系。
-            lightrag_tables = [
-                "lightrag_doc_chunks", 
-                "lightrag_doc_status", 
-                "lightrag_doc_full",
-                "lightrag_entity_chunks",
-                "lightrag_full_entities",
-                "lightrag_full_relations",
-                "lightrag_llm_cache",
-                "lightrag_relation_chunks",
-                "lightrag_vdb_chunks", 
-                "lightrag_vdb_entity", 
-                "lightrag_vdb_relation",
-                "entities",
-                "events",
-                "game_session",
-                "interactables",
-                "knowledge_registry",
-                "lightrag_doc_full",
-                "locations"
-            ]
-            
-            for table in lightrag_tables:
-                try:
-                    # 尝试删除 (不带引号，让 PG 处理大小写)
-                    print(f"    -> 尝试删除 LightRAG 表: {table}")
-                    await conn.execute(text(f"DROP TABLE IF EXISTS {table} CASCADE"))
-                except Exception as e:
-                    print(f"       (忽略) 删除 {table} 失败: {e}")
+            # === 清理世界数据 ===
+            if args.target in ["all", "world"]:
+                print(f"\n[2] 正在清理世界数据 (Schema: {world_schema})...")
+                
+                # 1. 删除数据库 Schema
+                print(f"    -> 删除 Schema {world_schema}...")
+                await conn.execute(text(f"DROP SCHEMA IF EXISTS {world_schema} CASCADE"))
+                
+                # 2. 重新创建 Schema 和表结构
+                print(f"    -> 重建 Schema 和业务表...")
+                await conn.execute(text(f"CREATE SCHEMA IF NOT EXISTS {world_schema}"))
+                # 临时设置 search_path 以便 create_all 在正确的位置创建表
+                await conn.execute(text(f"SET search_path TO {world_schema}, public"))
+                await conn.run_sync(Base.metadata.create_all)
+                
+                # 3. 清理本地文件
+                print(f"    -> 清理本地文件...")
+                world_dir = PROJECT_ROOT / "data" / "worlds" / active_world
+                if world_dir.exists():
+                    shutil.rmtree(world_dir)
+                world_dir.mkdir(parents=True, exist_ok=True)
+                print("    世界数据清理完成。")
 
-            print("    -> 重新创建业务表结构...")
-            await conn.run_sync(Base.metadata.create_all)
-            
-        print("    数据库清理完成。")
-
-        # 2. 清理本地文件存储 (LightRAG 的 GraphML 等)
-        print("\n[3] 正在清理本地数据文件...")
-        data_dir = PROJECT_ROOT / "data"
-        modules_dir = data_dir / "modules"
-        
-        if modules_dir.exists():
-            print(f"    -> 删除目录: {modules_dir}")
-            try:
-                shutil.rmtree(modules_dir)
-                # 重新创建空目录
-                modules_dir.mkdir(parents=True, exist_ok=True)
-                print("    本地文件清理完成。")
-            except Exception as e:
-                print(f"    清理本地文件失败: {e}")
-        else:
-            print("    目录不存在，无需清理。")
+            # === 清理规则库数据 ===
+            if args.target in ["all", "rules"]:
+                print(f"\n[3] 正在清理规则库数据 (Schema: rag_rules)...")
+                
+                # 1. 删除数据库 Schema
+                print(f"    -> 删除 Schema rag_rules...")
+                await conn.execute(text("DROP SCHEMA IF EXISTS rag_rules CASCADE"))
+                # 重建空 Schema，等待 LightRAG 初始化时自动填充
+                await conn.execute(text("CREATE SCHEMA IF NOT EXISTS rag_rules"))
+                
+                # 2. 清理本地文件
+                print(f"    -> 清理本地文件...")
+                rules_dir = PROJECT_ROOT / "data" / "rules"
+                if rules_dir.exists():
+                    shutil.rmtree(rules_dir)
+                rules_dir.mkdir(parents=True, exist_ok=True)
+                print("    规则库清理完成。")
 
     except Exception as e:
         print(f"\n[!] 清理过程中出错: {e}")
