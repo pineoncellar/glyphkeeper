@@ -6,6 +6,8 @@ project:
   name: "GlyphKeeper"
   # 调试模式
   debug: true
+  # 当前激活的世界/模组名称 (对应数据库 schema: world_{active_world})
+  active_world: "default_world"
   # 是否开启模型额度使用统计
   # 若开启，需要在分级模型配置中配置不同模型的价格，以 人民币/M Tokens 为单位
   model_cost_tracking: false
