@@ -62,7 +62,7 @@ graph TD
     *   `Location`: 地点及其连接关系。
     *   `Entity`: NPC、怪物及其属性，包含战斗数据与虚拟装备。
     *   `Interactable`: 纯粹的物理容器与逻辑锚点，支持持有权转移（在场景中或在角色身上）。
-    *   `ClueDiscovery`: **(新增)** 中间层，连接物理实体与逻辑知识，定义发现条件与情境描述。
+    *   `ClueDiscovery`: 中间层，连接物理实体与逻辑知识，定义发现条件与情境描述。
     *   `Knowledge`: 纯逻辑开关，指向 LightRAG 中的具体内容。
     *   `GameSession`: 全局游戏状态（时间、节拍）。
 *   **Repositories (`repositories/`)**: 数据访问层 (DAO)，提供类型安全的 CRUD 接口。
