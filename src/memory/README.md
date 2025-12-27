@@ -30,6 +30,16 @@ graph TD
         D -->|Tables| E[Locations]
         D -->|Tables| F[Entities]
         D -->|Tables| G[GameSession]
+        D -->|Tables| H[Interactables]
+        D -->|Tables| I[ClueDiscoveries]
+        D -->|Tables| J[Knowledge]
+        
+        E --- H
+        E --- F
+        F --- H
+        H -.-> I
+        F -.-> I
+        I --> J
     end
     
     subgraph Unstructured Memory ["右脑：非结构化记忆"]
@@ -50,13 +60,15 @@ graph TD
 
 *   **Models (`models.py`)**: 定义了数据库表结构。
     *   `Location`: 地点及其连接关系。
-    *   `Entity`: NPC、怪物及其属性。
-    *   `Interactable`: 场景中的可交互物体（如书桌、宝箱）。
+    *   `Entity`: NPC、怪物及其属性，包含战斗数据与虚拟装备。
+    *   `Interactable`: 纯粹的物理容器与逻辑锚点，支持持有权转移（在场景中或在角色身上）。
+    *   `ClueDiscovery`: **(新增)** 中间层，连接物理实体与逻辑知识，定义发现条件与情境描述。
+    *   `Knowledge`: 纯逻辑开关，指向 LightRAG 中的具体内容。
     *   `GameSession`: 全局游戏状态（时间、节拍）。
 *   **Repositories (`repositories/`)**: 数据访问层 (DAO)，提供类型安全的 CRUD 接口。
     *   `BaseRepository`: 通用增删改查。
     *   `TaggableRepository`: 支持 Tag 操作的基类。
-    *   `LocationRepository`, `EntityRepository` 等：特定实体的业务逻辑。
+    *   `LocationRepository`, `EntityRepository`, `ClueDiscoveryRepository` 等：特定实体的业务逻辑。
 
 ### 2. RAG 引擎 (RAG Engine)
 
@@ -87,6 +99,11 @@ LLM 的 Context Window 仅作为"工作记忆"，所有的长期状态必须持�
 Tag 是连接结构化数据与非结构化叙事的桥梁。
 *   **结构化**：Entity 表中有 `tags=["injured"]`。
 *   **非结构化**：RAG 检索时，会将 `injured` 作为上下文注入，检索出"受伤后的行为模式"或"痛苦的呻吟声"等描述。
+
+### 线索发现机制 (Clue Discovery Mechanism)
+放弃了“物品直接包含线索”的一对一模式，引入 `ClueDiscovery` 中间层实现多对多映射。
+*   **复用性**：多个物理载体（如尸体、血字）可指向同一个逻辑真相 (`Knowledge`)。
+*   **情境区分**：同一个真相，从不同来源获取时，拥有不同的检定难度 (`required_check`) 和 发现描述 (`discovery_flavor_text`)。
 
 ---
 
