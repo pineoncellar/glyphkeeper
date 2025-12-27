@@ -12,9 +12,15 @@ class EntityRepository(TaggableRepository[Entity]):
     def __init__(self, session):
         super().__init__(session, Entity)
 
-    async def create(self, name: str, tags: List[str] = None, stats: dict = None, location_id: Optional[UUID] = None) -> Entity:
+    async def create(self, name: str, tags: List[str] = None, stats: dict = None, attacks: list = None, location_id: Optional[UUID] = None) -> Entity:
         """创建新实体"""
-        entity = Entity(name=name, tags=tags or [], stats=stats or {}, location_id=location_id)
+        entity = Entity(
+            name=name, 
+            tags=tags or [], 
+            stats=stats or {}, 
+            attacks=attacks or [],
+            location_id=location_id
+        )
         return await self._save(entity)
 
     async def update_location(self, entity_id: UUID, location_id: UUID) -> Optional[Entity]:

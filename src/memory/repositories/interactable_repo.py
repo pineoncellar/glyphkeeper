@@ -17,12 +17,21 @@ class InteractableRepository(TaggableRepository[Interactable]):
         result = await self.session.execute(select(Interactable).where(Interactable.location_id == location_id))
         return result.scalars().all()
 
-    async def create(self, name: str, location_id: UUID, tags: List[str] = None, linked_clue_id: Optional[UUID] = None) -> Interactable:
+    async def create(self, name: str, tags: List[str] = None, state: str = "default", location_id: Optional[UUID] = None, carrier_id: Optional[UUID] = None) -> Interactable:
         """创建新交互物"""
+        if location_id and carrier_id:
+            raise ValueError("Interactable cannot be in a location and carried by an entity at the same time.")
+            
         interactable = Interactable(
             name=name, 
-            location_id=location_id, 
             tags=tags or [], 
-            linked_clue_id=linked_clue_id
+            state=state,
+            location_id=location_id,
+            carrier_id=carrier_id
         )
         return await self._save(interactable)
+    
+    async def get_by_carrier(self, carrier_id: UUID) -> List[Interactable]:
+        """获取指定实体持有的所有交互物"""
+        result = await self.session.execute(select(Interactable).where(Interactable.carrier_id == carrier_id))
+        return result.scalars().all()

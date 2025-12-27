@@ -45,13 +45,19 @@ class Interactable(Base):
     __tablename__ = "interactables"
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    location_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("locations.id"))
     name: Mapped[str] = mapped_column(String, nullable=False)
-    tags: Mapped[List[str]] = mapped_column(ARRAY(Text), default=list)
-    linked_clue_id: Mapped[Optional[uuid.UUID]] = mapped_column(ForeignKey("knowledge_registry.id"), nullable=True)
-
-    location: Mapped["Location"] = relationship(back_populates="interactables")
-    linked_clue: Mapped[Optional["Knowledge"]] = relationship()
+    tags: Mapped[List[str]] = mapped_column(ARRAY(Text), default=list) # 承载 "block_exit:North", "hidden" 等逻辑
+    state: Mapped[str] = mapped_column(String, default="default") # RAG 检索锚点
+    
+    # 位置互斥：在场景中 或 在某人身上
+    location_id: Mapped[Optional[uuid.UUID]] = mapped_column(ForeignKey("locations.id"), nullable=True)
+    carrier_id: Mapped[Optional[uuid.UUID]] = mapped_column(ForeignKey("entities.id"), nullable=True)
+    # 关系
+    location: Mapped[Optional["Location"]] = relationship(back_populates="interactables")
+    carrier: Mapped[Optional["Entity"]] = relationship(back_populates="inventory")
+    
+    # 关联线索发现
+    clue_links: Mapped[List["ClueDiscovery"]] = relationship(back_populates="interactable", cascade="all, delete-orphan")
 
 class Entity(Base):
     """
@@ -65,8 +71,11 @@ class Entity(Base):
     location_id: Mapped[Optional[uuid.UUID]] = mapped_column(ForeignKey("locations.id"), nullable=True)
     tags: Mapped[List[str]] = mapped_column(ARRAY(Text), default=list)
     stats: Mapped[dict] = mapped_column(JSONB, default=dict)
+    attacks: Mapped[list] = mapped_column(JSONB, default=list) # 战斗方式
 
     location: Mapped[Optional["Location"]] = relationship(back_populates="entities")
+    inventory: Mapped[List["Interactable"]] = relationship(back_populates="carrier") # 关联关键物品
+    dialogue_links: Mapped[List["ClueDiscovery"]] = relationship(back_populates="entity", cascade="all, delete-orphan") # 关联对话/观察线索
 
 class Knowledge(Base):
     """
@@ -77,11 +86,38 @@ class Knowledge(Base):
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     rag_key: Mapped[str] = mapped_column(String, nullable=False)
-    source_type: Mapped[SourceType] = mapped_column(Enum(SourceType), nullable=False)
-    source_id: Mapped[Optional[uuid.UUID]] = mapped_column(UUID(as_uuid=True), nullable=True)
-    required_check: Mapped[dict] = mapped_column(JSONB, default=dict)
     is_known: Mapped[bool] = mapped_column(Boolean, default=False)
     tags_granted: Mapped[List[str]] = mapped_column(ARRAY(Text), default=list)
+    
+    discoveries: Mapped[List["ClueDiscovery"]] = relationship(back_populates="knowledge") # 反向关联
+
+class ClueDiscovery(Base):
+    """
+    中间层：线索映射表
+    连接物理实体/物品与逻辑知识，定义发现条件和情境描述。
+    实现多对多 (N:N) 的逻辑映射。
+    """
+    __tablename__ = "clue_discoveries"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    
+    # 互斥来源：物理物品 或 生物实体
+    interactable_id: Mapped[Optional[uuid.UUID]] = mapped_column(ForeignKey("interactables.id"), nullable=True)
+    entity_id: Mapped[Optional[uuid.UUID]] = mapped_column(ForeignKey("entities.id"), nullable=True)
+    
+    # 指向：核心知识
+    knowledge_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("knowledge_registry.id"), nullable=False)
+    
+    # 逻辑：触发条件
+    required_check: Mapped[dict] = mapped_column(JSONB, default=dict)
+    
+    # 叙事：发现时的情境描述
+    discovery_flavor_text: Mapped[str] = mapped_column(Text, nullable=False)
+
+    # 关系
+    interactable: Mapped[Optional["Interactable"]] = relationship(back_populates="clue_links")
+    entity: Mapped[Optional["Entity"]] = relationship(back_populates="dialogue_links")
+    knowledge: Mapped["Knowledge"] = relationship(back_populates="discoveries")
 
 class GameSession(Base):
     """

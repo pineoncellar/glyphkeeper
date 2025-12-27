@@ -1,7 +1,7 @@
 from typing import List, Optional
 from uuid import UUID
 from sqlalchemy import select
-from ..models import Knowledge, SourceType
+from ..models import Knowledge
 from .base_repo import BaseRepository
 
 class KnowledgeRepository(BaseRepository[Knowledge]):
@@ -17,13 +17,10 @@ class KnowledgeRepository(BaseRepository[Knowledge]):
         result = await self.session.execute(select(Knowledge).where(Knowledge.rag_key == rag_key))
         return result.scalar_one_or_none()
 
-    async def create(self, rag_key: str, source_type: SourceType, source_id: Optional[UUID] = None, required_check: dict = None, tags_granted: List[str] = None) -> Knowledge:
+    async def create(self, rag_key: str, tags_granted: List[str] = None) -> Knowledge:
         """创建新线索"""
         knowledge = Knowledge(
             rag_key=rag_key,
-            source_type=source_type,
-            source_id=source_id,
-            required_check=required_check or {},
             tags_granted=tags_granted or []
         )
         return await self._save(knowledge)
