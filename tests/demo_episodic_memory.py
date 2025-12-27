@@ -6,12 +6,17 @@ import os
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from src.memory.episodic_memory import EpisodicMemory
+from src.core.config import get_settings
 from src.core.logger import get_logger
 
 logger = get_logger("demo_episodic")
 
 async def main():
     print("=== GlyphKeeper 情景记忆 (真实 LLM/DB 调用) 演示 ===")
+    
+    settings = get_settings()
+    active_world = settings.project.active_world
+    print(f"当前激活世界: {active_world}")
     print("注意: 这将消耗实际的 Token 并连接到数据库。")
     
     try:

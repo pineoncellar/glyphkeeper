@@ -5,12 +5,14 @@ import os
 # 将项目根目录添加到 python 路径
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from src.memory.database import DatabaseManager, Base
+from src.memory.database import DatabaseManager, Base, init_db
 from src.memory.repositories.location_repo import LocationRepository
 from src.memory.repositories.entity_repo import EntityRepository
 from src.memory.repositories.knowledge_repo import KnowledgeRepository
 from src.memory.repositories.interactable_repo import InteractableRepository
+from src.memory.repositories.clue_discovery_repo import ClueDiscoveryRepository
 from src.memory.models import Location, Entity, Knowledge, SourceType
+from src.core.config import get_settings
 from src.core.logger import get_logger
 
 logger = get_logger("demo_memory")
@@ -18,16 +20,20 @@ logger = get_logger("demo_memory")
 async def main():
     print("=== GlyphKeeper 记忆模块演示 ===")
     
+    settings = get_settings()
+    active_world = settings.project.active_world
+    print(f"当前激活世界: {active_world}")
+    print(f"对应 Schema: world_{active_world}")
+
     # 1. 初始化数据库管理器
     print("\n[1] 正在初始化数据库连接...")
     db_manager = DatabaseManager()
     
     try:
         # 2. 创建表 (确保架构存在)
-        print("[2] 正在创建数据库表...")
-        async with db_manager.engine.begin() as conn:
-            await conn.run_sync(Base.metadata.create_all)
-        print("表创建成功。")
+        print("[2] 正在初始化数据库表 (Schema + Tables)...")
+        await init_db()
+        print("表结构初始化成功。")
 
         # 3. 执行操作
         print("\n[3] 正在测试仓库操作...")
@@ -37,6 +43,7 @@ async def main():
             entity_repo = EntityRepository(session)
             knowledge_repo = KnowledgeRepository(session)
             interactable_repo = InteractableRepository(session)
+            clue_discovery_repo = ClueDiscoveryRepository(session)
 
             # 创建一个地点
             print("    -> 正在创建地点: '阿卡姆疯人院'")
@@ -97,30 +104,38 @@ async def main():
             print("    -> 正在创建知识: '日记秘密'")
             diary_clue = await knowledge_repo.create(
                 rag_key="diary_entry_001",
-                source_type=SourceType.ITEM,
                 tags_granted=["secret_revealed"]
             )
             print(f"       已创建知识 ID: {diary_clue.id}")
             print(f"       初始状态 (is_known): {diary_clue.is_known}")
 
             # 2. 创建一个关联该知识的交互物 (例如：旧日记本)
-            print("    -> 正在创建交互物: '旧日记本' (关联知识)")
+            print("    -> 正在创建交互物: '旧日记本'")
             diary_item = await interactable_repo.create(
                 name="旧日记本",
                 location_id=asylum.id,
-                tags=["item", "readable"],
-                linked_clue_id=diary_clue.id
+                tags=["item", "readable"]
             )
             print(f"       已创建交互物 ID: {diary_item.id}")
 
-            # 3. 验证关联
-            fetched_item = await interactable_repo.get_by_id(diary_item.id)
-            if fetched_item.linked_clue_id == diary_clue.id:
-                print("    成功: 交互物正确关联了知识。")
+            # 3. 创建线索发现记录 (连接知识与交互物)
+            print("    -> 正在创建线索发现记录 (连接知识与交互物)")
+            discovery = await clue_discovery_repo.create(
+                knowledge_id=diary_clue.id,
+                interactable_id=diary_item.id,
+                discovery_flavor_text="你翻开日记，泛黄的纸页上记录着疯狂的呓语...",
+                required_check={"skill": "Library Use", "difficulty": 50}
+            )
+            print(f"       已创建线索发现 ID: {discovery.id}")
+
+            # 4. 验证关联
+            fetched_discoveries = await clue_discovery_repo.get_by_interactable(diary_item.id)
+            if any(d.knowledge_id == diary_clue.id for d in fetched_discoveries):
+                print("    成功: 交互物正确关联了知识 (通过 ClueDiscovery)。")
             else:
                 print("    失败: 交互物关联知识失败。")
 
-            # 4. 标记知识为已获取 (模拟玩家阅读日记)
+            # 5. 标记知识为已获取 (模拟玩家阅读日记)
             print("    -> 正在标记知识为 '已获取'")
             await knowledge_repo.mark_as_known(diary_clue.id)
             
