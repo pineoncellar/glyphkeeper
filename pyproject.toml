@@ -16,4 +16,5 @@ dependencies = [
     "pydantic-settings>=2.12.0",
     "pyyaml>=6.0.3",
     "sqlalchemy>=2.0.45",
+    "tokenizers>=0.22.1",
 ]
