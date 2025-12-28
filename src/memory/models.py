@@ -1,11 +1,13 @@
 """
 数据模型定义
 定义用于存储游戏世界状态的数据库模型
+还有玩家角色卡和跑团对话记忆的存储结构
 """
 import uuid
 import enum
 from typing import List, Optional
-from sqlalchemy import String, Text, Boolean, Integer, ForeignKey, Enum
+from datetime import datetime
+from sqlalchemy import String, Text, Boolean, Integer, ForeignKey, Enum, DateTime
 from sqlalchemy.dialects.postgresql import UUID, JSONB, ARRAY
 from sqlalchemy.orm import relationship, Mapped, mapped_column
 from .database import Base
@@ -48,7 +50,7 @@ class Interactable(Base):
     name: Mapped[str] = mapped_column(String, nullable=False)
     tags: Mapped[List[str]] = mapped_column(ARRAY(Text), default=list) # 承载 "block_exit:North", "hidden" 等逻辑
     state: Mapped[str] = mapped_column(String, default="default") # RAG 检索锚点
-    
+
     # 位置互斥：在场景中 或 在某人身上
     location_id: Mapped[Optional[uuid.UUID]] = mapped_column(ForeignKey("locations.id"), nullable=True)
     carrier_id: Mapped[Optional[uuid.UUID]] = mapped_column(ForeignKey("entities.id"), nullable=True)
@@ -180,3 +182,51 @@ class Event(Base):
     trigger_condition: Mapped[dict] = mapped_column(JSONB, nullable=False)
     effect_script: Mapped[dict] = mapped_column(JSONB, nullable=False)
 
+
+class DialogueRecord(Base):
+    """
+    最底层的原始对话记录。
+    用于：全量存档、前端展示、以及构建 Sliding Window。
+    """
+    __tablename__ = "dialogue_records"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    # investigator_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("investigators.id"), index=True) # 暂时注释，等待 investigator 表定义
+    investigator_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), index=True, nullable=True) # 临时改为 nullable=True，避免外键报错
+
+    # 序号，确保顺序绝对正确
+    turn_number: Mapped[int] = mapped_column(Integer, index=True) 
+    
+    # 角色: "user" 或 "assistant"
+    role: Mapped[str] = mapped_column(String)
+    
+    # 内容: 原始文本
+    content: Mapped[str] = mapped_column(Text)
+    
+    # 状态标记：这句话是否已经被"总结/固化"进 LightRAG 了？
+    # True = 已归档，可以从 Prompt 中移除了（如果超出窗口）
+    # False = 还在 Buffer 中，必须优先保留
+    is_consolidated: Mapped[bool] = mapped_column(Boolean, default=False)
+    
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+class MemoryTrace(Base):
+    """
+    中层记忆索引。
+    存储对话的摘要，作为 LightRAG 和 原始对话 之间的桥梁。
+    """
+    __tablename__ = "memory_traces"
+    
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    summary: Mapped[str] = mapped_column(Text) # The compressed summary
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    
+    # Range of dialogue turns this trace covers
+    start_turn: Mapped[int] = mapped_column(Integer)
+    end_turn: Mapped[int] = mapped_column(Integer)
+    
+    # Metadata for retrieval/filtering
+    tags: Mapped[List[str]] = mapped_column(ARRAY(Text), default=list)
+    importance_score: Mapped[int] = mapped_column(Integer, default=0)
+
+    
