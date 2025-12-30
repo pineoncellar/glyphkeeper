@@ -3,6 +3,10 @@
 定义用于存储游戏世界状态的数据库模型
 还有玩家角色卡和跑团对话记忆的存储结构
 """
+"""
+TODO:
+- 考虑物品与实体在不同条件下的状态变化与场景联系
+"""
 import uuid
 import enum
 from typing import List, Optional
