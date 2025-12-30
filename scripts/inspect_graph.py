@@ -73,5 +73,5 @@ def inspect_graphml(file_path):
 
 if __name__ == "__main__":
     # 默认路径
-    graph_path = os.path.join(os.path.dirname(__file__), "..", "data", "modules", "graph_chunk_entity_relation.graphml")
+    graph_path = os.path.join(os.path.dirname(__file__), "..", "data", "worlds", "book", "graph_chunk_entity_relation.graphml")
     inspect_graphml(os.path.abspath(graph_path))
