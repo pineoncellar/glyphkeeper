@@ -4,9 +4,11 @@ OpenAI 兼容格式的通用 LLM 适配器
 不依赖 openai 库，使用 aiohttp 独立实现
 """
 import json
-from typing import List, AsyncGenerator
+import time
+from typing import List, AsyncGenerator, Optional, Dict
 import aiohttp
 from ..core import get_logger
+from ..utils import track_tokens
 from .llm_base import LLMBase, Message
 
 logger = get_logger(__name__)
@@ -52,34 +54,97 @@ class OpenAICompatibleLLM(LLMBase):
             **self.kwargs
         }
 
+    def _estimate_tokens(self, text: str) -> int:
+        """粗略估算 token 数（在服务端不返回 usage 时兜底）"""
+        # 经验估算：英文约 4 chars/token；中文会偏差，但用于兜底记录
+        if not text:
+            return 0
+        return max(1, (len(text) + 3) // 4)
+
+    def _estimate_prompt_tokens(self, messages: List[Message]) -> int:
+        joined = "\n".join(
+            f"{m.get('role', '')}: {m.get('content', '')}" for m in messages
+        )
+        return self._estimate_tokens(joined)
+
     async def chat(self, messages: List[Message]) -> AsyncGenerator[str, None]:
         """统一对话接口"""
+        start_time = time.perf_counter()
+        usage_holder: Dict[str, int] = {}
+        generated_text_parts: List[str] = []
         try:
             logger.debug(f"发起 LLM 流式调用: model={self.model_name}, messages_count={len(messages)}")
             
             request_body = self._build_request_body(messages, stream=True)
             
             async with aiohttp.ClientSession() as session:
-                async with session.post(
-                    self.api_url,
-                    headers=self.headers,
-                    json=request_body
-                ) as response:
+                # 尝试开启 stream usage（部分 OpenAI 兼容服务可能不支持，失败则自动回退）
+                request_body_with_usage = dict(request_body)
+                request_body_with_usage["stream_options"] = {"include_usage": True}
+
+                response: Optional[aiohttp.ClientResponse] = None
+                try:
+                    response = await session.post(
+                        self.api_url,
+                        headers=self.headers,
+                        json=request_body_with_usage,
+                    )
+
+                    if response.status == 400:
+                        # 可能是不支持 stream_options，回退到原始请求体
+                        error_text = await response.text()
+                        await response.release()
+                        logger.debug(f"服务端不支持 stream_options，回退无 usage 流式请求: {error_text}")
+                        response = await session.post(
+                            self.api_url,
+                            headers=self.headers,
+                            json=request_body,
+                        )
+
                     if response.status != 200:
                         error_text = await response.text()
                         raise Exception(f"API 返回错误 {response.status}: {error_text}")
-                    
+
                     # 解析 SSE 流并逐块输出
-                    async for chunk in self._parse_sse_stream(response):
+                    async for chunk in self._parse_sse_stream(response, usage_holder):
+                        generated_text_parts.append(chunk)
                         yield chunk
+                finally:
+                    if response is not None:
+                        await response.release()
                         
             logger.debug(f"LLM 流式调用完成: model={self.model_name}")
         except Exception as e:
             error_msg = f"LLM 调用失败 [{self.model_name}]: {e}"
             logger.error(error_msg, exc_info=True)
             raise RuntimeError(error_msg)
+        finally:
+            # 记录 token 与额度：优先使用服务端 usage，其次用本地估算
+            elapsed_ms = int((time.perf_counter() - start_time) * 1000)
+            prompt_tokens = usage_holder.get("prompt_tokens")
+            completion_tokens = usage_holder.get("completion_tokens")
 
-    async def _parse_sse_stream(self, response: aiohttp.ClientResponse) -> AsyncGenerator[str, None]:
+            if prompt_tokens is None:
+                prompt_tokens = self._estimate_prompt_tokens(messages)
+            if completion_tokens is None:
+                completion_tokens = self._estimate_tokens("".join(generated_text_parts))
+
+            try:
+                track_tokens(
+                    model=self.model_name,
+                    prompt_tokens=int(prompt_tokens or 0),
+                    completion_tokens=int(completion_tokens or 0),
+                    operation="chat",
+                )
+                logger.debug(f"已记录模型用量: model={self.model_name}, elapsed_ms={elapsed_ms}")
+            except Exception as log_err:
+                logger.warning(f"记录模型用量失败: {log_err}")
+
+    async def _parse_sse_stream(
+        self,
+        response: aiohttp.ClientResponse,
+        usage_holder: Optional[Dict[str, int]] = None,
+    ) -> AsyncGenerator[str, None]:
         """解析SSE流"""
         buffer = ""
         async for chunk in response.content.iter_any():
@@ -101,6 +166,18 @@ class OpenAICompatibleLLM(LLMBase):
                     try:
                         # 解析 JSON 数据
                         parsed = json.loads(data)
+
+                        # 兼容 OpenAI stream usage：末尾可能会给 usage 对象
+                        if usage_holder is not None and isinstance(parsed, dict):
+                            usage = parsed.get("usage")
+                            if isinstance(usage, dict):
+                                pt = usage.get("prompt_tokens")
+                                ct = usage.get("completion_tokens")
+                                if isinstance(pt, int):
+                                    usage_holder["prompt_tokens"] = pt
+                                if isinstance(ct, int):
+                                    usage_holder["completion_tokens"] = ct
+
                         # 提取 delta 中的内容
                         choices = parsed.get("choices", [])
                         if choices:

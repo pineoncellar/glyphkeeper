@@ -10,7 +10,7 @@ import sys
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from src.memory import get_rag_engine, quick_query
-from src.ingestion import ingest_file, ingest_text
+# from src.ingestion import ingest_file, ingest_text
 from src.agents import SearchAgent, search
 from src.utils import print_token_stats
 
@@ -44,7 +44,8 @@ async def main():
     每个职业都有独特的能力和游戏风格。
     """
     
-    success = await ingest_text(sample_text)
+    # success = await ingest_text(sample_text)
+    success = False
     print(f"   ✅ 文本摄入: {'成功' if success else '失败'}")
     
     # 3. 执行查询

@@ -2,14 +2,16 @@
 Token 追踪器
 用于监控 API 调用成本
 """
+import json
 import time
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional
 from datetime import datetime
 import threading
+from pathlib import Path
 
 from ..core import get_logger
-from ..core.config import get_settings
+from ..core import get_settings
 
 logger = get_logger(__name__)
 
@@ -49,8 +51,29 @@ class TokenTracker:
         self._usage_history: List[TokenUsage] = []
         self._stats = TokenStats()
         self._history_lock = threading.Lock()
+        self._file_lock = threading.Lock()
         self._model_prices: Dict[str, Dict[str, float]] = {}  # 从配置加载的模型价格
+        self._usage_log_enabled: bool = False
+        self._usage_log_path: Optional[Path] = None
+        self._load_logging_config()
         self._load_model_prices()
+
+    def _load_logging_config(self):
+        """从配置加载用量日志写入配置"""
+        try:
+            settings = get_settings()
+            self._usage_log_enabled = bool(getattr(settings.project, "model_usage_logging", True))
+            rel_path = getattr(settings.project, "model_usage_log_path", "logs/llm_usage.jsonl")
+
+            # 统一基于项目根目录解析
+            self._usage_log_path = settings.get_absolute_path(rel_path)
+
+            # 确保目录存在
+            self._usage_log_path.parent.mkdir(parents=True, exist_ok=True)
+        except Exception as e:
+            logger.warning(f"加载模型用量日志配置失败: {e}，将不会写入用量文件")
+            self._usage_log_enabled = False
+            self._usage_log_path = None
     
     def _load_model_prices(self):
         """从配置文件加载模型价格"""
@@ -122,8 +145,34 @@ class TokenTracker:
             f"Token 使用: model={model}, "
             f"tokens={total_tokens}, cost=¥{cost:.6f}"
         )
+
+        self._append_usage_to_file(usage)
         
         return usage
+
+    def _append_usage_to_file(self, usage: TokenUsage) -> None:
+        """将单次用量记录追加写入 JSONL 文件"""
+        if not self._usage_log_enabled or self._usage_log_path is None:
+            return
+
+        record = {
+            "timestamp": usage.timestamp.isoformat(timespec="seconds"),
+            "model": usage.model,
+            "operation": usage.operation,
+            "prompt_tokens": usage.prompt_tokens,
+            "completion_tokens": usage.completion_tokens,
+            "total_tokens": usage.total_tokens,
+            "cost_cny": usage.cost_cny,
+        }
+
+        try:
+            line = json.dumps(record, ensure_ascii=False)
+            with self._file_lock:
+                # 采用追加写入，确保多线程安全
+                with open(self._usage_log_path, "a", encoding="utf-8") as f:
+                    f.write(line + "\n")
+        except Exception as e:
+            logger.warning(f"写入模型用量日志失败: {e}")
     
     def _calculate_cost(
         self,
