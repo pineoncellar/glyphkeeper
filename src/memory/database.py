@@ -6,7 +6,7 @@ from typing import AsyncGenerator
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker, AsyncEngine
 from sqlalchemy.orm import DeclarativeBase
 from sqlalchemy import text
-from src.core.config import get_settings
+from ..core import get_settings
 
 def get_db_url() -> str:
     """构建数据库连接 URL"""
@@ -70,6 +70,12 @@ async def get_db() -> AsyncGenerator[AsyncSession, None]:
 
 async def init_db():
     """初始化数据库表"""
+    # 导入所有模型以确保它们被注册到 Base.metadata
+    from .models import (
+        Location, Interactable, Entity, InvestigatorProfile,
+        Knowledge, ClueDiscovery, GameSession, Event, DialogueRecord, MemoryTrace
+    )
+    
     settings = get_settings()
     active_world = settings.project.active_world
     world_schema = f"world_{active_world}"
