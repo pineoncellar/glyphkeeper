@@ -8,10 +8,16 @@ from .search import (
     search,
     game_search,
 )
+from .archivist import Archivist
+from .narrator import Narrator
 
 __all__ = [
+    # 搜索代理
     "SearchAgent",
     "SearchResult",
     "search",
     "game_search",
+    # 游戏代理
+    "Archivist",
+    "Narrator",
 ]
