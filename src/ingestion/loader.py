@@ -84,6 +84,7 @@ class ModuleLoader:
     async def _ingest_location(self, loc_data: Dict[str, Any]):
         # 左脑：物理结构
         loc_db = Location(
+            key=loc_data.get('key'),
             name=loc_data['name'],
             base_desc=loc_data['base_desc'], # DB 里留一份用于兜底
             tags=loc_data.get('tags', []),
@@ -117,6 +118,7 @@ class ModuleLoader:
 
     async def _ingest_interactable(self, item_data: Dict[str, Any], loc_id: uuid.UUID):
         item_db = Interactable(
+            key=item_data.get('key'),
             name=item_data['name'],
             location_id=loc_id,
             state=item_data.get('state', 'default'),
@@ -132,6 +134,7 @@ class ModuleLoader:
     async def _ingest_entity(self, entity_data: Dict[str, Any], loc_id: uuid.UUID):
         # 左脑：数值
         ent_db = Entity(
+            key=entity_data.get('key'),
             name=entity_data['name'],
             location_id=loc_id,
             stats=entity_data.get('stats', {}),

@@ -35,6 +35,7 @@ class Location(Base):
     __tablename__ = "locations"
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    key: Mapped[str] = mapped_column(String, unique=True, nullable=True)  # 可选唯一key
     name: Mapped[str] = mapped_column(String, nullable=False)
     base_desc: Mapped[str] = mapped_column(Text, nullable=False)
     tags: Mapped[List[str]] = mapped_column(ARRAY(Text), default=list)
@@ -51,6 +52,7 @@ class Interactable(Base):
     __tablename__ = "interactables"
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    key: Mapped[str] = mapped_column(String, unique=True, nullable=True)  # 可选唯一key
     name: Mapped[str] = mapped_column(String, nullable=False)
     tags: Mapped[List[str]] = mapped_column(ARRAY(Text), default=list) # 承载 "block_exit:North", "hidden" 等逻辑
     state: Mapped[str] = mapped_column(String, default="default") # RAG 检索锚点
@@ -73,6 +75,7 @@ class Entity(Base):
     __tablename__ = "entities"
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    key: Mapped[str] = mapped_column(String, unique=True, nullable=True)  # 可选唯一key
     name: Mapped[str] = mapped_column(String, nullable=False)
     location_id: Mapped[Optional[uuid.UUID]] = mapped_column(ForeignKey("locations.id"), nullable=True)
     tags: Mapped[List[str]] = mapped_column(ARRAY(Text), default=list)
