@@ -2,11 +2,15 @@
 数据库管理模块
 负责数据库连接、会话管理及初始化
 """
+import logging
 from typing import AsyncGenerator
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker, AsyncEngine
 from sqlalchemy.orm import DeclarativeBase
 from sqlalchemy import text
 from ..core import get_settings
+
+# 设置 SQLAlchemy 日志级别为 WARNING，减少看不懂的无关日志输出
+logging.getLogger('sqlalchemy.engine').setLevel(logging.WARNING)
 
 def get_db_url() -> str:
     """构建数据库连接 URL"""
