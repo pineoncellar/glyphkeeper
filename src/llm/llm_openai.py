@@ -97,7 +97,7 @@ class OpenAICompatibleLLM(LLMBase):
         tool_calls_buffer: Dict[int, Dict[str, Any]] = {}
 
         try:
-            logger.debug(f"发起 LLM 流式调用: model={self.model_name}, tools={'Yes' if tools else 'No'}")
+            logger.debug(f"发起 LLM 流式调用: model={self.model_name}, tools={'Yes' if tools else 'No'}, messsages={messages}")
             
             request_body = self._build_request_body(messages, stream=True, tools=tools, tool_choice=tool_choice)
             
