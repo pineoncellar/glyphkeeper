@@ -3,7 +3,7 @@
 定义了所有 LLM 实现必须遵守的接口契约
 """
 from abc import ABC, abstractmethod
-from typing import List, Dict, AsyncGenerator, Optional
+from typing import List, Dict, AsyncGenerator, Optional, Union, Any
 from ..core import get_logger
 
 logger = get_logger(__name__)
@@ -31,7 +31,12 @@ class LLMBase(ABC):
         self.kwargs = kwargs
 
     @abstractmethod
-    def chat(self, messages: List[Message]) -> AsyncGenerator[str, None]:
+    async def chat(
+        self, 
+        messages: List[Message],
+        tools: Optional[List[Dict]] = None,
+        tool_choice: Optional[Union[str, Dict]] = None
+    ) -> AsyncGenerator[Union[str, Dict[str, Any]], None]:
         """统一对话接口"""
         pass
 
