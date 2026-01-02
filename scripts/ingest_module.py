@@ -15,12 +15,12 @@ logger = get_logger(__name__)
 async def main():
     parser = argparse.ArgumentParser(description="Ingest module from JSON file.")
     parser.add_argument(
-        "--json_path",
+        "--name",
         type=str,
         help="要摄入的JSON文件路径"
     )
     args = parser.parse_args()
-    book_json_path = Path(args.json_path)
+    book_json_path = Path(f"data/intermediate/{args.name}.json")
     if not book_json_path.exists():
         logger.error(f"找不到文件: {book_json_path}")
         return
