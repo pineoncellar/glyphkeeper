@@ -1,5 +1,11 @@
 ﻿# GlyphKeeper
 
+> **Call of Cthulhu (克苏鲁的呼唤)** is a Trademark of Chaosium Inc.
+>
+> This project is a **Fan Work** created under Chaosium's [Fan Use Policy](https://www.chaosium.com/fan-use-and-licensing/). It is not an official product and is not endorsed by Chaosium Inc.
+>
+> 本项目遵循 Chaosium 的爱好者使用政策。GlyphKeeper 仅提供**跑团辅助系统的代码逻辑**，不自带任何《克苏鲁的呼唤》规则书原文或官方模组数据。使用者需自行导入合法的规则数据。
+
 ### 基于多代理与持久化状态的 AI COC7版规则跑团守密人系统
 
 > **核心理念**：解决LLM在长程叙事中的灾难性上下文遗忘与冲突角色悖论，实现忠于规则书的绝对中立AI守密人
@@ -257,6 +263,6 @@ GlyphKeeper/
 
 ---
 
-**License**: 还没定
+**License**: [Apache 2.0](LICENSE)
 
 **Status**:  开发中
