@@ -237,7 +237,7 @@ graph TD
     Narrator --> RuleKeeper["RuleKeeper<br/>(顶叶)"]
     Narrator --> MemoryManager["MemoryManager<br/>(长期记忆)"]
     
-    Archivist --> Database["Database<br/>(PG/Neo4j)"]
+    Archivist --> Database["Database<br/>(PG/NetworkX)"]
     
     RuleKeeper --> KSRules["KnowledgeService<br/>(rules)"]
     MemoryManager --> KSWorld["KnowledgeService<br/>(world)"]
