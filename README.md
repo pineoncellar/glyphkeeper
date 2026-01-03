@@ -585,7 +585,7 @@ uv run pytest tests/
 
 ## 📄 许可证
 
-本项目采用 [Apache 3.0 License](LICENSE)。
+本项目采用 [Apache 2.0 License](LICENSE)。
 
 ---
 
