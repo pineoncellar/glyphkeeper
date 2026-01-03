@@ -595,6 +595,7 @@ uv run pytest tests/
 - [LightRAG-HKU](https://github.com/HKUDS/LightRAG) - 强大的图谱增强 RAG 引擎
 - [Google DeepMind Concordia](https://github.com/google-deepmind/concordia) - 多智能体架构灵感来源
 - [ChatRPG v2](https://arxiv.org/abs/2210.03620) - 理论基础参考
+- [Google Gemini](https://gemini.google.com/) - 提供代码编写协助与结对编程支持
 
 ---
 
