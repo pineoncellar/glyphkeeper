@@ -10,6 +10,7 @@ from .search import (
 )
 from .archivist import Archivist
 from .narrator import Narrator
+from .rule_keeper import RuleKeeper
 
 __all__ = [
     # 搜索代理
@@ -20,4 +21,5 @@ __all__ = [
     # 游戏代理
     "Archivist",
     "Narrator",
+    "RuleKeeper",
 ]

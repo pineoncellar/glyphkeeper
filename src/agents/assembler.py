@@ -58,6 +58,15 @@ class PromptAssembler:
    - 远距离/城市/安全旅行：使用 `travel_to_location`
    - 检查时：使用 `inspect_target` 获取详细信息
    - 与 NPC 互动：使用 `interact_with_character`
+
+5. **规则裁决 (Rules of the Game)**:
+   - 你不是规则书，不要凭空猜测复杂的规则。
+   - **当发生以下情况时，必须调用 `consult_rulebook` 工具：**
+     1. 玩家要求 **"孤注一掷" (Push the roll)**。
+     2. 进入 **战斗 (Combat)** 或 **追逐 (Chase)**。
+     3. 玩家遭受 **理智 (SAN)** 损失，需要查询疯狂症状表。
+     4. 使用 **魔法** 或 **怪异科技**。
+   - 获取规则建议后，再结合剧情进行描述。
 """
 
     # 状态层

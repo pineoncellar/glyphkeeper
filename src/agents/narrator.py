@@ -7,7 +7,7 @@ import asyncio
 from typing import AsyncGenerator, List, Dict, Any, Optional
 
 from ..core import get_logger
-from ..agents import Archivist
+from ..agents import Archivist, RuleKeeper
 from ..memory import MemoryManager
 from ..llm import LLMFactory
 from .assembler import PromptAssembler, SceneMode
@@ -40,11 +40,13 @@ class Narrator:
         """
         self.llm = LLMFactory.get_llm("smart")
         self.archivist = Archivist()
+        self.rule_keeper = RuleKeeper()
         self.memory = memory_manager
         self.player_name = player_name
         
         # 获取工具定义
         self.tools = self.archivist.get_openai_tools_schema()
+        self.tools.append(self.rule_keeper.get_tool_schema())
         
         logger.info(f"Narrator 初始化完成，玩家: {self.player_name}")
 
@@ -270,6 +272,15 @@ class Narrator:
                     result_str = json.dumps(result_data, ensure_ascii=False)
                     
                     # 保存结果用于下一轮 Prompt 构建
+                    tool_results_for_prompt.append(result_data)
+                
+                # 调用 RuleKeeper 方法
+                elif hasattr(self.rule_keeper, func_name):
+                    method = getattr(self.rule_keeper, func_name)
+                    result_text = await method(**args)
+                    result_data = {"rule_judgment": result_text}
+                    result_str = json.dumps(result_data, ensure_ascii=False)
+                    
                     tool_results_for_prompt.append(result_data)
                 else:
                     result_data = {"error": f"Tool {func_name} not found"}
