@@ -5,7 +5,7 @@ RuleKeeper Agent - 规则裁决者
 import json
 from typing import Dict, Any, Optional
 from ..core import get_logger
-from ..memory.RAG_engine import RAGEngine
+from .tools.knowledge_service import KnowledgeService
 from ..llm import LLMFactory
 
 logger = get_logger(__name__)
@@ -14,31 +14,34 @@ class RuleKeeper:
     """规则裁决者 Agent"""
     def __init__(self):
         self.domain = "rules"
-        self.rag_engine = None # Will be initialized async
-        self.llm = LLMFactory.get_llm("smart") # Use smart model for reasoning
+        self.knowledge_service = KnowledgeService(domain=self.domain)
+        self.llm = LLMFactory.get_llm("standard")
         
     async def initialize(self):
-        """Initialize the RAG engine"""
-        if self.rag_engine is None:
-            self.rag_engine = await RAGEngine.get_instance(domain=self.domain)
-            logger.info("RuleKeeper initialized with RAG domain: rules")
+        """初始化 RuleKeeper 的知识服务"""
+        await self.knowledge_service.initialize()
+        logger.info("RuleKeeper initialized with KnowledgeService")
 
     async def consult_rulebook(self, query: str, context_summary: str = "") -> str:
-        """
-        Consult the rulebook and provide a judgment based on the context.
-        """
-        if not self.rag_engine:
+        """查询规则书并根据上下文提供裁决建议"""
+        if not self.knowledge_service.rag_engine:
             await self.initialize()
             
-        # 1. Retrieve rules
+        # 使用 KnowledgeService 检索规则
         try:
-            # Using hybrid search for rules to catch both specific keywords and general concepts
-            rules_text = await self.rag_engine.query(query, mode="hybrid", top_k=3)
+            # 使用 rule_judge 角色的智能模式以更好地解释规则
+            rules_text = await self.knowledge_service.search(
+                query=query,
+                mode="hybrid",
+                smart_mode=True,
+                persona="rule_judge",
+                top_k=3
+            )
         except Exception as e:
-            logger.error(f"Failed to query rule engine: {e}")
+            logger.error(f"查询规则引擎失败: {e}")
             rules_text = "无法检索到相关规则，请根据通用CoC规则判断。"
         
-        # 2. Interpret with LLM
+        # 使用 LLM 进行解释
         prompt = f"""
         你是一个精通《克苏鲁的呼唤 7版》规则的裁判。
         
@@ -61,7 +64,7 @@ class RuleKeeper:
         return response
 
     def get_tool_schema(self) -> Dict[str, Any]:
-        """Return the tool schema for the Narrator to use."""
+        """返回 Narrator 使用的工具模式"""
         return {
             "type": "function",
             "function": {

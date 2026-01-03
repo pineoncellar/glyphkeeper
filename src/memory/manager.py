@@ -13,13 +13,15 @@ from .models import DialogueRecord, MemoryTrace
 from .strategies import ConsolidationStrategy, TokenCountStrategy
 from .RAG_engine import RAGEngine
 from ..llm.llm_factory import LLMFactory
+from ..agents.tools.knowledge_service import KnowledgeService
 
 logger = get_logger(__name__)
 
 class MemoryManager:
     def __init__(self, investigator_id: Optional[uuid.UUID] = None):
         self.investigator_id = investigator_id
-        self.rag_engine: Optional[RAGEngine] = None
+        self.knowledge_service = KnowledgeService(domain="world")
+        self.rag_engine: Optional[RAGEngine] = None  # 保留用于写入操作
         self.strategies: List[ConsolidationStrategy] = [
             TokenCountStrategy(max_tokens=2000)
         ]
@@ -27,6 +29,7 @@ class MemoryManager:
         self.summarizer_llm = LLMFactory.get_llm("standard") 
 
     async def _get_rag_engine(self) -> RAGEngine:
+        """获取 RAG 引擎用于写入操作"""
         if not self.rag_engine:
             self.rag_engine = await RAGEngine.get_instance()
         return self.rag_engine 
@@ -141,13 +144,20 @@ class MemoryManager:
         """
         构建完整的 Prompt Context
         """
-        # 1. 获取 RAG 知识
+        # 1. 获取 RAG 知识 - 使用 KnowledgeService 获得更好的检索质量
         rag_context = ""
         try:
-            engine = await self._get_rag_engine()
-            rag_context = await engine.query(query, mode="hybrid", top_k=5)
+            # 使用 lore_keeper 人设模板，让检索结果更有氛围感
+            # 启用智能模式选择，自动选择最佳检索模式
+            rag_context = await self.knowledge_service.search(
+                query=query,
+                mode="hybrid",
+                smart_mode=True,
+                persona="lore_keeper",
+                top_k=5
+            )
         except Exception as e:
-            logger.error(f"Failed to query LightRAG: {e}")
+            logger.error(f"Failed to query knowledge service: {e}")
         
         # 2. 获取最近对话 (Runtime Window)
         # 策略：获取最近 N 轮，无论是否固化

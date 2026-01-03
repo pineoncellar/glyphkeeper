@@ -17,7 +17,7 @@ from pydantic import BaseModel, Field
 from ..core import get_logger, get_settings, PROJECT_ROOT
 from ..memory.RAG_engine import RAGEngine, get_rag_engine
 from ..ingestion.loader import ingest_file, ingest_text
-from ..agents.search import SearchAgent, SearchResult
+from ..agents.tools.knowledge_service import KnowledgeService, SearchResult
 
 logger = get_logger(__name__)
 
@@ -147,18 +147,19 @@ async def query_knowledge(request: QueryRequest):
     - **top_k**: 返回的相关文档数量
     """
     try:
-        agent = SearchAgent()
-        result = await agent.query(
-            question=request.question,
+        service = KnowledgeService(domain="world")
+        answer = await service.search(
+            query=request.question,
             mode=request.mode,
-            top_k=request.top_k,
-            prompt_template=request.prompt_template
+            smart_mode=True,
+            persona=request.prompt_template or "chinese",
+            top_k=request.top_k
         )
         
         return QueryResponse(
-            answer=result.answer,
-            mode=result.mode,
-            question=result.question
+            answer=answer,
+            mode=request.mode,
+            question=request.question
         )
         
     except Exception as e:
@@ -251,7 +252,7 @@ async def list_query_modes():
 @app.get("/templates", tags=["系统"])
 async def list_prompt_templates():
     """列出所有可用的提示词模板"""
-    return {"templates": list(SearchAgent.PROMPT_TEMPLATES.keys())}
+    return {"templates": list(KnowledgeService.PROMPT_TEMPLATES.keys())}
 
 
 # ============================================

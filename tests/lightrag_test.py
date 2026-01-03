@@ -51,8 +51,8 @@ async def main():
     # 3. 执行查询
     print("\n🔍 执行查询测试...")
     
-    # 使用 SearchAgent
-    agent = SearchAgent()
+    # 使用 KnowledgeService
+    service = KnowledgeService(domain="world")
     
     questions = [
         "D&D 游戏中有哪些基本属性？",
@@ -61,15 +61,15 @@ async def main():
     
     for q in questions:
         print(f"\n   问题: {q}")
-        result = await agent.query(q, mode="hybrid")
-        if result and result.answer:
-            print(f"   答案: {result.answer[:200]}..." if len(result.answer) > 200 else f"   答案: {result.answer}")
+        answer = await service.search(q, mode="hybrid", smart_mode=True)
+        if answer:
+            print(f"   答案: {answer[:200]}..." if len(answer) > 200 else f"   答案: {answer}")
         else:
             print(f"   答案: (查询失败或无结果)")
     
     # 4. 使用便捷函数
     print("\n🚀 使用快速查询...")
-    answer = await quick_query("什么是 D&D？")
+    answer = await search_world("什么是 D&D？")
     if answer:
         print(f"   答案: {answer[:200]}..." if len(answer) > 200 else f"   答案: {answer}")
     else:
