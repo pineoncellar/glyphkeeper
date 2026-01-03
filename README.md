@@ -1,4 +1,4 @@
-﻿# GlyphKeeper
+﻿# GlyphKeeper（符语者）
 
 > **Call of Cthulhu (克苏鲁的呼唤)** is a Trademark of Chaosium Inc.
 >
@@ -8,261 +8,594 @@
 
 ### 基于多代理与持久化状态的 AI COC7版规则跑团守密人系统
 
-> **核心理念**：解决LLM在长程叙事中的灾难性上下文遗忘与冲突角色悖论，实现忠于规则书的绝对中立AI守密人
+> **核心理念**：通过多智能体协作与双脑式记忆架构，解决 LLM 在长程叙事中的灾难性遗忘与角色悖论问题
 
-##  项目简介
+## 📖 项目简介
 
-**GlyphKeeper** 是一个混合代理 AI 系统，旨在主持复杂的桌面角色扮演游戏。当前正在开发中。
+**GlyphKeeper** 是一个为《克苏鲁的呼唤》桌面角色扮演游戏设计的智能守密人（Keeper）系统。它采用**多智能体协作架构**和**双脑式记忆系统**，通过将 AI 守密人的职责拆解为多个专业化代理，实现了高质量的长程叙事和规则裁决能力。
 
-传统的"提示词工程"式 AI 往往强迫单个 LLM 同时扮演"创造性的叙事者"和"严谨的数据库"两个角色，导致逻辑冲突和记忆错乱。本项目受 **Google DeepMind Concordia** 框架与 **ChatRPG v2** 论文启发，通过**关注点分离**，将 GM 的职责拆分为多个协同工作的专业代理，并基于单一事实来源的持久化数据库构建。
+传统的"单体 LLM + 提示词工程"方案存在根本性矛盾：同一个模型既要发挥创造性进行叙事，又要严格维护游戏状态和规则，这导致了记忆混乱和逻辑冲突。本项目受 **Google DeepMind Concordia** 框架与 **ChatRPG v2** 论文启发，通过**关注点分离** 原则，将守密人的能力分解为协同工作的多个专业代理，并基于**持久化数据库**构建单一事实来源。
 
-##  核心痛点与解决方案
+## 🎯 核心痛点与解决方案
 
-| 痛点 | 传统 LLM 方案 | GlyphKeeper 解决方案 |
+| 痛点 | 传统 LLM 方案的问题 | GlyphKeeper 解决方案 |
 | --- | --- | --- |
-| **记忆错乱** | 依赖有限的 Context Window，随对话变长必然遗忘 | **持久化数据库**：所有状态存储在 PostgreSQL 中，而非 LLM 上下文 |
-| **角色悖论** | 试图让同一个模型既"瞎编"又"严谨" | **代理拆分**：叙事者负责创造，档案员负责维护 |
-| **节奏失控** | 对玩家的每一句闲聊都进行冗长回复 | **协调器路由**：识别意图，过滤无效交互，节省 Token |
-| **模组僵化** | 无法灵活处理玩家偏离预设路线的行为 | **动态逻辑**：基于 ReAct 框架，动态调整剧情 |
-
-##  系统架构：多代理协作
-
-本系统由多个核心代理组成，它们通过 **ReAct** 循环协同工作：
-
-### 1.  协调器 (Orchestrator)  智能路由
-
-* **职责**：接收用户输入，分析意图，路由到合适的子代理
-* **路由策略**：
-  * 游戏叙事请求  Narrator（故事推进、场景描述）
-  * 数据查询请求  Archivist（世界状态、规则检索）
-  * 知识问答请求  Search Agent（RAG 检索）
-  * 混合请求  多代理协作
-
-### 2.  叙事者 (Narrator)  创造性大脑
-
-* **职责**：生成沉浸式的环境描述、NPC 对话与剧情推进
-* **特性**：
-  * 基于 ReAct 框架思考与行动
-  * 通过函数调用向档案员查询或更新世界状态
-  * 使用分级模型配置（fast/standard/smart）优化成本
-
-### 3.  档案员 (Archivist)  逻辑核心
-
-* **职责**：维护游戏世界状态，提供数据 CRUD 接口
-* **核心能力**：
-  * 管理位置、实体、线索、关系等游戏数据
-  * 确保逻辑一致性（如：搜索过的抽屉不会重复掉落物品）
-  * 提供结构化 API 供其他代理调用
-
-### 4.  搜索代理 (Search Agent)  知识检索
-
-* **职责**：基于 RAG 检索游戏规则、背景知识、模组信息
-* **技术栈**：
-  * LightRAG-HKU 实现的高级 RAG 功能
-  * pgvector 向量数据库存储
-  * 支持混合检索（向量 + 关键词）
+| **记忆遗忘** | 依赖有限的 Context Window，随对话变长必然遗忘 | **双脑式记忆架构**：结构化数据存储在 PostgreSQL，非结构化叙事存储在基于 LightRAG 的向量/图数据库 |
+| **角色冲突** | 单个模型既要"创造性叙事"又要"严格维护状态" | **多智能体分工**：Narrator 负责创作，Archivist 负责数据维护，RuleKeeper 负责规则裁决 |
+| **逻辑不一致** | LLM 凭空编造或记忆错乱（如：搜索过的房间重复刷新物品） | **单一事实来源**：所有游戏状态持久化到数据库，LLM 只作为"执行器"而非"存储器" |
+| **规则混淆** | LLM 虚构或混淆 CoC 规则（如：错误的孤注一掷判定） | **RAG 规则检索**：RuleKeeper 通过向量检索查询规则书，提供准确的裁决建议 |
 
 ---
 
-##  数据层：单一事实来源
+## 🏗️ 系统架构
 
-为了彻底解决一致性问题，系统采用 **混合数据存储** 策略。
+### 多智能体协作设计
 
-### 1. 结构化世界状态 (PostgreSQL)
+本系统采用**脑科学隐喻**，将守密人的职责映射到不同的"认知功能区"：
 
-通过 SQLAlchemy ORM 管理游戏世界状态。
+```mermaid
+graph TD
+    A["🎮 玩家输入<br/>(User Input)"]
+    
+    N["🧠 Narrator<br/>前额叶 - 主控制器<br/>━━━━━━━━━━━━━━<br/>• 意图识别<br/>• 叙事生成<br/>• 流程控制<br/>• ReAct 循环"]
+    
+    Arc["📜 Archivist<br/>海马体<br/>━━━━━━━━━━━━━━<br/>• 游戏状态<br/>• CRUD 操作"]
+    
+    RK["⚖️ RuleKeeper<br/>顶叶<br/>━━━━━━━━━━━━━━<br/>• 规则查询<br/>• 裁决建议"]
+    
+    KS["🔍 KnowledgeService<br/>长期记忆<br/>━━━━━━━━━━━━━━<br/>• RAG 检索<br/>• 世界观/剧情"]
+    
+    MEM["💾 Memory Module<br/>(记忆层)"]
+    
+    LEFT["🔷 左脑 - 结构化记忆<br/>PostgreSQL<br/>━━━━━━━━━━━━━━<br/>• Entities<br/>• Locations<br/>• Items"]
+    
+    RIGHT["🔹 右脑 - 非结构化记忆<br/>LightRAG<br/>━━━━━━━━━━━━━━<br/>• 场景描述<br/>• 历史事件<br/>• 背景故事"]
+    
+    A --> N
+    N --> Arc
+    N --> RK
+    N --> KS
+    Arc --> MEM
+    RK --> MEM
+    KS --> MEM
+    MEM --> LEFT
+    MEM --> RIGHT
+    
+    style A fill:#e3f2fd
+    style N fill:#bbdefb,stroke:#1976d2,stroke-width:3px
+    style Arc fill:#fff9c4,stroke:#f57f17
+    style RK fill:#f3e5f5,stroke:#6a1b9a
+    style KS fill:#e8f5e9,stroke:#2e7d32
+    style MEM fill:#ffebee,stroke:#c62828
+    style LEFT fill:#fff8f5,stroke:#d84315
+    style RIGHT fill:#f1f8e9,stroke:#558b2f
+```
 
-**核心数据表**：
-* **Location**：游戏地点（名称、描述、状态、连接关系）
-* **Entity**：玩家/NPC（属性、位置、关系、状态）
-* **Clue**：线索/物品（描述、发现条件、关联实体）
-* **Relationship**：实体间关系（好感度、敌对度）
-* **GameSession**：游戏会话（进度、时间线、状态）
+### 核心代理说明
 
-**数据访问层**：
-* [src/memory/database.py](src/memory/database.py)：异步数据库连接管理
-* [src/memory/repositories/](src/memory/repositories/)：Repository 模式封装的数据访问接口
+#### 1. Narrator - 叙事引擎 🎭
 
-### 2. 向量知识库 (pgvector + LightRAG)
+**文件位置**: [src/agents/narrator.py](src/agents/narrator.py)
 
-通过 [src/memory/vector_store.py](src/memory/vector_store.py) 和 [src/memory/RAG_engine.py](src/memory/RAG_engine.py) 实现。
+**职责**：
+- 作为主控制器，接收玩家输入并解析意图
+- 通过 ReAct（推理-行动-观察）循环进行决策
+- 调用 Archivist、RuleKeeper 等工具获取信息
+- 生成沉浸式的洛夫克拉夫特风格叙事文本
 
-**功能**：
-* 存储模组的风味文本、氛围描述、背景知识
-* 支持图谱增强的 RAG 检索（LightRAG-HKU）
-* 通过向量相似度辅助叙事者生成描写
+**核心能力**：
+- 动态提示词构建（通过 `PromptAssembler`）
+- 流式输出生成（支持异步流）
+- 工具调用编排（OpenAI Function Calling）
+- 场景模式切换（探索/战斗/对话/调查）
+
+#### 2. Archivist - 数据守门人 📜
+
+**文件位置**: [src/agents/archivist.py](src/agents/archivist.py)
+
+**职责**：
+- 封装所有游戏状态的 CRUD 操作为原子化工具
+- 确保数据的一致性和幂等性
+- 提供 LLM 友好的 JSON 格式返回
+
+**核心工具**（部分）：
+```python
+# 实体操作
+move_entity(entity_name, target_location)      # 移动角色/NPC
+get_location_view(entity_name)                 # 获取当前位置信息
+inspect_target(entity_name, target)            # 检查物品/NPC
+
+# 物品交互
+interact_with_interactable(entity, target)     # 与容器/物品互动
+discover_clue(entity, interactable)            # 发现线索
+
+# 知识查询
+recall_knowledge(entity_name, query)           # 回忆已知信息
+```
+
+#### 3. RuleKeeper - 规则裁判 ⚖️
+
+**文件位置**: [src/agents/rule_keeper.py](src/agents/rule_keeper.py)
+
+**职责**：
+- 通过 RAG 检索 CoC 7版规则书内容
+- 结合当前游戏情境给出裁决建议
+- 防止 Narrator 凭空编造或混淆规则
+
+**典型使用场景**：
+- 玩家请求"孤注一掷"（Push the roll）
+- 战斗轮次和伤害计算
+- 理智值检定（SAN check）与疯狂症状
+- 技能成长与角色发展
+
+#### 4. PromptAssembler - 提示词构建器 🏗️
+
+**文件位置**: [src/agents/assembler.py](src/agents/assembler.py)
+
+**职责**：
+- 实现**融合架构 (Fusion Architecture)** 的动态提示词生成
+- 将游戏状态、记忆、历史整合为五层结构
+
+**五层提示词架构**：
+1. **核心层**：AI 人设和基本行为准则
+2. **状态层**：当前时间、地点、环境氛围
+3. **记忆层**：从 RAG 检索的相关世界观和剧情信息
+4. **历史层**：最近 N 轮的对话上下文
+5. **工具结果层**：刚执行的工具调用返回数据
 
 ---
 
-##  工作流示例
+## 💾 记忆系统：双脑架构
 
-### 场景 A：灵活的线索 (The Flexible Diary)
+详细架构请参阅 [src/memory/README.md](src/memory/README.md)
 
-> **目标**：玩家搜索书桌，但关键道具"日记"原定在床垫下。为了奖励玩家合理的探索，系统动态调整剧情。
+### 左脑 - 结构化记忆 (PostgreSQL)
 
-1. **玩家**："我仔细翻找书桌。"
-2. **协调器**：识别为 PLAYER_ACTION_ENV  路由给叙事者
-3. **叙事者 (ReAct)**：
-   * *Think*: 玩家在搜书桌。书桌状态如何？日记在哪？
-   * *Act*: 调用 Archivist.query_world_state('desk') 和 Archivist.query_clue('diary')
-4. **档案员**：返回 desk: {searched: false}，diary: {location: mattress, status: UNDISCOVERED}
-5. **叙事者 (ReAct)**：
-   * *Think*: 书桌没搜过。为了剧情流畅度，我决定把日记移到这里
-   * *Act*: 调用 Archivist.move_clue('diary', 'desk')
-6. **档案员**：更新数据库
-7. **叙事者**：输出 "你在书桌夹层发现了一本日记。"
+负责存储精确的、逻辑严密的游戏数据：
 
-### 场景 B：外部技能检定
+**核心数据模型** ([src/memory/models.py](src/memory/models.py))：
+- **Location**: 地点及其连接关系
+- **Entity**: 玩家、NPC、怪物（包含属性、状态、战斗数据）
+- **Interactable**: 物理容器（箱子、门、尸体等）
+- **ClueDiscovery**: 线索发现的中间层（支持多对多映射）
+- **Knowledge**: 逻辑开关，指向 LightRAG 中的具体知识内容
+- **GameSession**: 全局游戏状态（时间、节拍、存档点）
 
-> **目标**：玩家试图踹门，系统需进行规则判定，而非让 LLM 瞎编结果。
+**数据访问层** ([src/memory/repositories/](src/memory/repositories/))：
+- 基于 Repository 模式封装的类型安全接口
+- 支持标签 (Tag) 系统实现条件性内容解锁
 
-1. **玩家**："我要踹开这扇门！"
-2. **叙事者 (ReAct)**：
-   * *Think*: 需要进行力量检定 (Strength Check)
-   * *Act*: 调用 call_external_skill_check(player='A', skill='Str', dc=15)
-3. **系统/DiceBot**：在聊天频道投骰子  结果：失败 (7 < 15)
-4. **叙事者 (ReAct)**：
-   * *Think*: 检定失败，依据规则应给予惩罚
-   * *Act*: 调用 Archivist.update_entity_state('A', {status: 'pained'})
-5. **叙事者**：输出 "你狠狠踹在门上，门纹丝不动，你的脚踝一阵剧痛。"
+### 右脑 - 非结构化记忆 (LightRAG)
 
----
+负责存储模糊的、联想性的叙事内容：
 
-##  技术栈
+**技术栈**：
+- **LightRAG-HKU**: 图谱增强的 RAG 引擎
+- **pgvector**: PostgreSQL 向量扩展，存储文本嵌入
+- **NetworkX**: 图数据库，存储实体关系网络
 
-### 核心框架
-* **Python 3.12+**：利用现代异步特性实现高并发处理
-* **模块化架构**：严格分离代理层、数据层、接口层，确保系统可维护性和扩展性
-
-### LLM 集成策略
-* **分级模型体系**：根据任务复杂度使用三级模型
-  * Fast 模型：快速意图识别、简单对话响应
-  * Standard 模型：常规叙事生成、场景描述
-  * Smart 模型：复杂推理、关键剧情决策
-* **多提供商架构**：支持灵活切换不同 LLM 提供商
-* **工厂模式**：统一管理 LLM 实例创建与配置，简化模型调用逻辑
-* **成本优化**：通过合理的模型分级与 Token 统计，平衡性能与成本
-
-### 数据存储架构
-* **PostgreSQL + pgvector**：结合关系型数据库的事务特性与向量检索能力
-* **SQLAlchemy 2.0**：异步 ORM 实现，提供类型安全的数据访问
-* **LightRAG 引擎**：图谱增强的 RAG 系统，支持复杂知识关系检索
-* **Repository 模式**：封装数据访问逻辑，提高代码可测试性
-
-### 模组消化策略
-采用**双管道架构**并行处理：
-
-1. **结构化管道**：
-   * PDF 解析提取文本内容
-   * LLM 驱动的结构化信息抽取（实体、位置、关系）
-   * 填充关系型数据库，构建游戏世界图谱
-
-2. **语义管道**：
-   * 提取风味文本、氛围描述、背景故事
-   * 生成文本嵌入向量
-   * 存入向量数据库，支持语义检索
-
-### 接口层设计
-* **REST API**：标准 HTTP 接口，支持 Web 集成
-* **CLI 交互**：命令行界面，便于开发调试与自动化测试
-* **可扩展性**：预留 WebSocket 支持，未来可接入实时聊天系统
-
-### 系统辅助能力
-* **统一配置管理**：集中管理模型参数、数据库连接、系统设置
-* **结构化日志**：完整记录系统运行状态，便于问题追踪与性能分析
-* **Token 使用统计**：实时监控各模型 Token 消耗，支持成本核算
+**核心功能**：
+- **情景记忆** ([src/memory/episodic_memory.py](src/memory/episodic_memory.py))：记录游戏过程中发生的事件
+- **语义记忆** ([src/memory/semantic_memory.py](src/memory/semantic_memory.py))：存储模组的背景故事和设定
+- **元数据注入**：将结构化 Tag 注入到文本中，增强检索相关性
 
 ---
 
-##  快速开始
+## 🛠️ 技术栈
+
+### 核心依赖
+
+| 组件 | 技术 | 说明 |
+|------|------|------|
+| **编程语言** | Python 3.12+ | 利用现代异步特性 |
+| **LLM 集成** | OpenAI-compatible API | 支持 OpenAI / Azure OpenAI / 兼容接口 |
+| **数据库** | PostgreSQL + pgvector | 关系型数据 + 向量检索 |
+| **ORM** | SQLAlchemy 2.0 | 异步 ORM |
+| **RAG 引擎** | LightRAG-HKU | 图谱增强的高级 RAG |
+| **配置管理** | PyYAML + Pydantic | 类型安全的配置系统 |
+| **日志系统** | Python logging | 结构化日志记录 |
+| **包管理** | uv | 快速的现代 Python 包管理器 |
+
+### LLM 分级调用策略
+
+为了平衡性能和成本，系统支持**三级模型配置**：
+
+| 等级 | 用途 | 示例场景 |
+|------|------|----------|
+| **fast** | 快速响应、简单任务 | 意图识别、是/否判断 |
+| **standard** | 常规叙事 | 场景描述、NPC 对话 |
+| **smart** | 复杂推理 | 关键剧情决策、规则裁决 |
+
+配置文件位置：[config.yaml](config.yaml)
+
+---
+
+## 🚀 快速开始
 
 ### 1. 环境准备
 
+**系统要求**：
+- Python 3.12 或更高版本
+- PostgreSQL 16+ (需安装 pgvector 扩展)
+- 4GB+ 可用内存
+
+**安装步骤**：
+
 ```bash
-# 安装 uv（Python 包管理器）
+# 1. 克隆项目
+git clone https://github.com/yourusername/GlyphKeeper.git
+cd GlyphKeeper
+
+# 2. 安装 uv（推荐的包管理器）
 pip install uv
 
-# 安装依赖
+# 3. 安装项目依赖
 uv sync
 
-# 配置文件
+# 4. 配置文件
 cp template/config.yaml.template config.yaml
 cp template/providers.ini.template providers.ini
-
-# 编辑配置文件，填入你的 LLM API 密钥和数据库连接信息
 ```
 
-### 2. 初始化数据库
+### 2. 配置系统
+
+**编辑 `config.yaml`**：
+
+```yaml
+project:
+  name: "GlyphKeeper"
+  active_world: "my_game"        # 当前激活的世界/模组
+  model_usage_logging: true      # 启用 Token 使用统计
+
+database:
+  host: "localhost"
+  port: "5432"
+  username: "your_db_user"
+  password: "your_db_password"
+  project_name: "GlyphKeeper"
+
+model_tiers:
+  fast: "gpt-4o-mini"
+  standard: "gpt-4o"
+  smart: "gpt-4o"
+```
+
+**编辑 `providers.ini`** 填入 LLM API 密钥：
+
+```ini
+[openai]
+base_url = https://api.openai.com/v1
+api_key = sk-your-api-key-here
+```
+
+### 3. 初始化数据库
 
 ```bash
-#### 运行数据库初始化脚本
+# 初始化数据库表结构
 uv run python scripts/init_db.py
+
+# (可选) 查看可用的世界管理命令
+uv run python scripts/manage_worlds.py --help
 ```
 
-### 3. 运行系统
+### 4. 导入模组数据
 
 ```bash
-# CLI 模式
-uv run python src/interfaces/cli_runner.py
+# 导入 PDF 格式的模组文件
+uv run python scripts/ingest_module.py path/to/your_module.pdf
 
-# API 服务模式
-uv run python src/interfaces/api_server.py
+# 或使用交互式导入
+uv run python src/interfaces/cli_runner.py
+```
+
+### 5. 运行系统
+
+**方式 A：命令行交互模式**
+```bash
+uv run python src/interfaces/cli_runner.py
+```
+
+**方式 B：启动 API 服务**
+```bash
+# 启动 FastAPI 服务器（开发中）
+uv run python -m src.interfaces.api_server
 ```
 
 ---
 
-##  项目结构
+## 📁 项目结构
 
 ```
 GlyphKeeper/
- config.yaml              # 主配置文件（分级模型、向量存储）
- providers.ini            # LLM 提供商配置
- pyproject.toml          # 项目依赖管理
- src/
-    agents/             # 核心代理实现
-       orchestrator.py # 路由协调器
-       narrator.py     # 叙事生成器
-       archivist.py    # 数据管理器
-       search.py       # RAG 检索代理
-       tools/          # 代理工具（骰子、数据库操作）
-    memory/             # 数据持久化层
-       database.py     # 数据库连接
-       models.py       # ORM 模型定义
-       RAG_engine.py   # RAG 引擎
-       vector_store.py # 向量存储
-       repositories/   # 数据访问层
-    llm/                # LLM 抽象层
-       llm_factory.py  # LLM 工厂
-       llm_openai.py   # OpenAI 实现
-       llm_lightrag.py # LightRAG 实现
-    ingestion/          # 模组消化管道
-       pdf_parser.py   # PDF 解析
-       structure_extractor.py  # 结构提取
-       loader.py       # 数据加载
-    interfaces/         # 用户接口层
-       api_server.py   # REST API
-       cli_runner.py   # CLI 交互
-    core/               # 核心功能
-       config.py       # 配置管理
-       logger.py       # 日志系统
-    utils/              # 工具函数
-        token_tracker.py # Token 统计
- scripts/
-    init_db.py          # 数据库初始化脚本
- tests/                  # 单元测试
- data/                   # 数据文件（图谱、日志）
+├── config.yaml              # 主配置文件
+├── providers.ini            # LLM 提供商配置
+├── pyproject.toml           # 项目依赖管理
+│
+├── data/                    # 数据目录
+│   ├── worlds/              # 世界/模组存档（每个世界独立子目录）
+│   ├── modules/             # 原始模组文件
+│   ├── rules/               # 规则书数据
+│   └── tmp/                 # 临时文件
+│
+├── logs/                    # 日志目录
+│   └── llm_usage.jsonl      # LLM Token 使用统计
+│
+├── scripts/                 # 工具脚本
+│   ├── init_db.py           # 初始化数据库
+│   ├── manage_worlds.py     # 世界管理（创建/切换/删除）
+│   ├── ingest_module.py     # 导入模组
+│   └── inspect_graph.py     # 检查 RAG 图谱
+│
+├── src/                     # 源代码
+│   ├── agents/              # 多智能体系统
+│   │   ├── narrator.py      # 叙事引擎
+│   │   ├── archivist.py     # 数据守门人
+│   │   ├── rule_keeper.py   # 规则裁判
+│   │   ├── assembler.py     # 提示词构建器
+│   │   └── tools/           # 代理工具集
+│   │       ├── knowledge_service.py  # 知识检索服务
+│   │       └── db_tools.py           # 数据库工具
+│   │
+│   ├── memory/              # 记忆系统
+│   │   ├── models.py        # 数据模型定义
+│   │   ├── database.py      # 数据库连接管理
+│   │   ├── RAG_engine.py    # RAG 引擎封装
+│   │   ├── episodic_memory.py   # 情景记忆
+│   │   ├── semantic_memory.py   # 语义记忆
+│   │   └── repositories/    # 数据访问层
+│   │       ├── entity_repo.py
+│   │       ├── location_repo.py
+│   │       └── ...
+│   │
+│   ├── llm/                 # LLM 集成层
+│   │   ├── llm_factory.py   # LLM 工厂
+│   │   ├── llm_base.py      # 基础接口
+│   │   └── llm_openai.py    # OpenAI 兼容实现
+│   │
+│   ├── ingestion/           # 数据摄入模块
+│   │   ├── loader.py        # 文件加载器
+│   │   ├── pdf_parser.py    # PDF 解析
+│   │   └── structure_extractor.py  # 结构化提取
+│   │
+│   ├── interfaces/          # 接口层
+│   │   ├── cli_runner.py    # 命令行界面
+│   │   └── api_server.py    # REST API 服务（开发中）
+│   │
+│   ├── core/                # 核心功能
+│   │   ├── config.py        # 配置管理
+│   │   └── logger.py        # 日志系统
+│   │
+│   └── utils/               # 工具类
+│       └── token_tracker.py # Token 统计
+│
+├── tests/                   # 测试与演示
+└── template/                # 配置文件模板
+    ├── config.yaml.template
+    └── providers.ini.template
 ```
 
 ---
 
-##  参考项目
+## 💡 工作流示例
 
-1. [**Google DeepMind Concordia**: Generative Social Simulation](https://github.com/google-deepmind/concordia)
-2. [**ChatRPG v2**: Conflict Resolution in RPGs](https://github.com/KarmaKamikaze/ChatRPG)
-3. [**LightRAG**: Graph-Enhanced RAG](https://github.com/HKUDS/LightRAG)
+### 场景 1：动态线索发现
+
+**背景**：玩家搜索书桌，但关键道具"日记"原本放置在床下。系统动态调整剧情，奖励玩家的合理探索。
+
+```
+玩家输入: "我仔细翻找书桌的抽屉。"
+
+[Narrator 内部推理]
+Think: 玩家在搜索书桌，需要查询：
+      1. 书桌的状态（是否被搜索过）
+      2. 日记的位置（预设在床垫下）
+
+Action: 调用 Archivist.get_location_view("玩家")
+        调用 Archivist.inspect_target("玩家", "书桌")
+
+Observation: {
+  "desk": {"searched": false},
+  "diary": {"location": "bed_mattress", "discovered": false}
+}
+
+Think: 书桌尚未搜索过，玩家的行为合理。
+       为了流畅性，可以将日记移到这里。
+
+Action: 调用 Archivist.discover_clue("玩家", "书桌", "diary")
+
+Narrator 输出: 
+"你拉开书桌的第三个抽屉，在一堆陈旧的账本后面，
+发现了一本皮质封面的日记。泛黄的纸页散发出霉味。"
+```
+
+### 场景 2：规则裁决
+
+**背景**：玩家在技能检定失败后请求"孤注一掷"，Narrator 需要查询规则书确认条件。
+
+```
+玩家输入: "我要孤注一掷！重投这个技能检定！"
+
+[Narrator 内部推理]
+Think: 玩家请求 Push the roll，需要确认规则条件
+
+Action: 调用 RuleKeeper.consult_rulebook(
+          query="孤注一掷的使用条件和后果",
+          context="玩家刚在图书馆使用检定失败"
+        )
+
+RuleKeeper 返回:
+"根据 CoC 7版规则，孤注一掷需满足：
+1. 初次检定失败
+2. KP 同意（情境合理）
+3. 失败后果更严重
+当前情境：在图书馆搜索书籍，可以允许，但失败会惊动管理员。"
+
+Think: 规则允许，但需要设置更高风险
+
+Action: 调用 Archivist.update_entity_state(
+          "玩家", 
+          {"status": "pushing_roll", "risk_level": "high"}
+        )
+
+Narrator 输出:
+"你决定孤注一掷。你开始翻找更深层的书架，
+发出了些许声响。请进行第二次图书馆使用检定，
+难度不变，但如果失败，管理员会察觉你的行为。"
+```
 
 ---
 
-**License**: [Apache 2.0](LICENSE)
+## 🔧 常用命令
 
-**Status**:  开发中
+### 世界管理
+
+```bash
+# 列出所有世界
+uv run python scripts/manage_worlds.py list
+
+# 创建新世界
+uv run python scripts/manage_worlds.py create --name "诡宅疑云"
+
+# 切换激活世界
+uv run python scripts/manage_worlds.py switch --name "诡宅疑云"
+
+# 删除世界
+uv run python scripts/manage_worlds.py delete --name "old_world"
+```
+
+### 数据管理
+
+```bash
+# 查看数据库表
+uv run python scripts/create_tables.py
+
+# 检查 RAG 图谱
+uv run python scripts/inspect_graph.py
+
+# 查看 Token 使用统计
+uv run python scripts/print_usage_summary.py
+
+# 重置所有数据（谨慎使用）
+uv run python scripts/reset_all_data.py
+```
+
+### 开发调试
+
+```bash
+# 运行单元测试
+uv run pytest tests/
+
+# 测试 LLM 连接
+uv run python tests/test_llm_tools.py
+
+# 测试记忆系统
+uv run python tests/demo_memory_check.py
+
+# 测试 Narrator
+uv run python tests/demo_narrator.py
+```
+
+---
+
+## 📝 配置说明
+
+### config.yaml 核心配置项
+
+```yaml
+project:
+  name: "GlyphKeeper"
+  active_world: "my_campaign"          # 当前激活的世界
+  model_usage_logging: true            # 启用 Token 统计
+  model_usage_log_path: "logs/llm_usage.jsonl"
+
+database:
+  host: "localhost"
+  port: "5432"
+  username: "postgres"
+  password: "your_password"
+  project_name: "GlyphKeeper"
+
+# 三级模型配置
+model_tiers:
+  fast: "gpt-4o-mini"       # 快速响应
+  standard: "gpt-4o"        # 常规叙事
+  smart: "gpt-4o"           # 复杂推理
+
+# 模型详细配置
+models:
+  gpt-4o-mini:
+    provider: "openai"
+    model_name: "gpt-4o-mini"
+    temperature: 0.7
+    max_tokens: 2000
+
+  gpt-4o:
+    provider: "openai"
+    model_name: "gpt-4o"
+    temperature: 0.8
+    max_tokens: 4000
+
+# RAG 配置
+rag_settings:
+  top_k: 60                  # 检索文档数量
+  mode: "hybrid"             # 检索模式: local/global/hybrid/mix
+  enable_llm: true           # 是否使用 LLM 重排序
+```
+
+---
+
+
+### 开发环境设置
+
+```bash
+# Fork 并克隆仓库
+git clone https://github.com/your-username/GlyphKeeper.git
+cd GlyphKeeper
+
+# 创建开发分支
+git checkout -b feature/your-feature-name
+
+# 安装开发依赖
+uv sync --dev
+
+# 运行测试确保环境正常
+uv run pytest tests/
+```
+
+---
+
+## ⚠️ 免责声明
+
+1. **版权声明**：
+   - 本项目是基于 Chaosium Inc. 的粉丝使用政策创建的爱好者作品
+   - 不包含任何受版权保护的官方内容（规则书原文、模组文本等）
+   - 用户需自行获取合法的规则书和模组资料
+
+2. **使用限制**：
+   - 本软件仅供个人学习和非商业用途
+   - 请勿用于任何商业活动或盈利目的
+   - 遵守当地法律法规
+
+3. **免责条款**：
+   - 软件按"原样"提供，不提供任何明示或暗示的保证
+   - 作者不对使用本软件造成的任何损失负责
+   - 用户需自行承担使用风险
+
+---
+
+## 📄 许可证
+
+本项目采用 [Apache 3.0 License](LICENSE)。
+
+---
+
+## 🙏 致谢
+
+- [Chaosium Inc.](https://www.chaosium.com/) - 创造了精彩的 Call of Cthulhu 游戏
+- [LightRAG-HKU](https://github.com/HKUDS/LightRAG) - 强大的图谱增强 RAG 引擎
+- [Google DeepMind Concordia](https://github.com/google-deepmind/concordia) - 多智能体架构灵感来源
+- [ChatRPG v2](https://arxiv.org/abs/2210.03620) - 理论基础参考
+
+---
+
+**⭐ 如果本项目对你有帮助，欢迎 Star 支持！**
