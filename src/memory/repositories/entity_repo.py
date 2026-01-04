@@ -116,22 +116,24 @@ class EntityRepository(TaggableRepository[Entity]):
         保存对实体的修改
         Archivist 在修改完 entity.stats 后应调用此方法。
         """
-        self.session.add(entity)
-        await self.session.commit()
-        await self.session.refresh(entity)
-        return entity
+        try:
+            await self.session.commit()
+            await self.session.refresh(entity)
+            return entity
+        except Exception as e:
+            logger.error(f"保存实体失败: {e}")
+            raise
     
-    async def update_stat(self, entity_id: UUID, stat_key: str, delta: int) -> Optional[Entity]:
+    async def update_stat(self, entity_id: UUID, stat_key: str, target_value: int) -> Optional[Entity]:
         """更新实体的单个属性值"""
         entity = await self.get_by_id(entity_id)
         if not entity:
             return None
         
         stats = dict(entity.stats or {})
-        stats[stat_key] = delta
+        stats[stat_key] = target_value
         entity.stats = stats
 
-        await self.session.commit()
-        await self.session.refresh(entity)
+        await self.save(entity)
         return entity
 
