@@ -13,20 +13,26 @@ from .models import DialogueRecord, MemoryTrace
 from .strategies import ConsolidationStrategy, TokenCountStrategy
 from .RAG_engine import RAGEngine
 from ..llm.llm_factory import LLMFactory
-from ..agents.tools.knowledge_service import KnowledgeService
 
 logger = get_logger(__name__)
 
 class MemoryManager:
     def __init__(self, investigator_id: Optional[uuid.UUID] = None):
         self.investigator_id = investigator_id
-        self.knowledge_service = KnowledgeService(domain="world")
+        self.knowledge_service = None  # 延迟初始化，避免循环导入
         self.rag_engine: Optional[RAGEngine] = None  # 保留用于写入操作
         self.strategies: List[ConsolidationStrategy] = [
             TokenCountStrategy(max_tokens=2000)
         ]
         # 使用 standard 等级模型进行总结，如果配置了 fast 等级也可以使用 fast
-        self.summarizer_llm = LLMFactory.get_llm("standard") 
+        self.summarizer_llm = LLMFactory.get_llm("standard")
+    
+    def _get_knowledge_service(self):
+        """延迟导入并获取 KnowledgeService（避免循环导入）"""
+        if self.knowledge_service is None:
+            from ..agents.tools.knowledge_service import KnowledgeService
+            self.knowledge_service = KnowledgeService(domain="world")
+        return self.knowledge_service
 
     async def _get_rag_engine(self) -> RAGEngine:
         """获取 RAG 引擎用于写入操作"""
@@ -149,7 +155,8 @@ class MemoryManager:
         try:
             # 使用 lore_keeper 人设模板，让检索结果更有氛围感
             # 启用智能模式选择，自动选择最佳检索模式
-            rag_context = await self.knowledge_service.search(
+            knowledge_service = self._get_knowledge_service()
+            rag_context = await knowledge_service.search(
                 query=query,
                 mode="hybrid",
                 smart_mode=True,
