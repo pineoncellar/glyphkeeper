@@ -133,7 +133,6 @@ class Knowledge(Base):
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     rag_key: Mapped[str] = mapped_column(String, nullable=False)
-    is_known: Mapped[bool] = mapped_column(Boolean, default=False)
     tags_granted: Mapped[List[str]] = mapped_column(ARRAY(Text), default=list)
     
     discoveries: Mapped[List["ClueDiscovery"]] = relationship(back_populates="knowledge") # 反向关联

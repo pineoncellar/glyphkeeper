@@ -107,7 +107,6 @@ async def main():
                 tags_granted=["secret_revealed"]
             )
             print(f"       已创建知识 ID: {diary_clue.id}")
-            print(f"       初始状态 (is_known): {diary_clue.is_known}")
 
             # 2. 创建一个关联该知识的交互物 (例如：旧日记本)
             print("    -> 正在创建交互物: '旧日记本'")
@@ -134,20 +133,6 @@ async def main():
                 print("    成功: 交互物正确关联了知识 (通过 ClueDiscovery)。")
             else:
                 print("    失败: 交互物关联知识失败。")
-
-            # 5. 标记知识为已获取 (模拟玩家阅读日记)
-            print("    -> 正在标记知识为 '已获取'")
-            await knowledge_repo.mark_as_known(diary_clue.id)
-            
-            updated_clue = await knowledge_repo.get_by_id(diary_clue.id)
-            print(f"       更新后状态 (is_known): {updated_clue.is_known}")
-            
-            if updated_clue.is_known:
-                print("    成功: 知识状态已更新。")
-            else:
-                print("    失败: 知识状态更新失败。")
-
-                print("    失败: 标签未添加。")
 
     except Exception as e:
         print(f"\n[!] 演示过程中出错: {e}")

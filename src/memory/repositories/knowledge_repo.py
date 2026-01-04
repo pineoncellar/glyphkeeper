@@ -24,12 +24,3 @@ class KnowledgeRepository(BaseRepository[Knowledge]):
             tags_granted=tags_granted or []
         )
         return await self._save(knowledge)
-
-    async def mark_as_known(self, knowledge_id: UUID) -> Optional[Knowledge]:
-        """标记线索为已获取"""
-        knowledge = await self.get_by_id(knowledge_id)
-        if knowledge:
-            knowledge.is_known = True
-            await self.session.commit()
-            await self.session.refresh(knowledge)
-        return knowledge
