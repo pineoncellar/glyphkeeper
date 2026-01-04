@@ -120,4 +120,18 @@ class EntityRepository(TaggableRepository[Entity]):
         await self.session.commit()
         await self.session.refresh(entity)
         return entity
+    
+    async def update_stat(self, entity_id: UUID, stat_key: str, delta: int) -> Optional[Entity]:
+        """更新实体的单个属性值"""
+        entity = await self.get_by_id(entity_id)
+        if not entity:
+            return None
+        
+        stats = dict(entity.stats or {})
+        stats[stat_key] = delta
+        entity.stats = stats
+
+        await self.session.commit()
+        await self.session.refresh(entity)
+        return entity
 
