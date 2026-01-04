@@ -3,6 +3,9 @@ from uuid import UUID
 from sqlalchemy import select
 from ..models import Interactable
 from .base_repo import TaggableRepository
+from ...core import get_logger
+
+logger = get_logger(__name__)
 
 class InteractableRepository(TaggableRepository[Interactable]):
     """

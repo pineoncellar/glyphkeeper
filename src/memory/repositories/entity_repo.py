@@ -4,6 +4,9 @@ from sqlalchemy import select
 from sqlalchemy.orm import selectinload
 from ..models import Entity, InvestigatorProfile
 from .base_repo import TaggableRepository
+from ...core import get_logger
+
+logger = get_logger(__name__)
 
 class EntityRepository(TaggableRepository[Entity]):
     """
@@ -53,7 +56,7 @@ class EntityRepository(TaggableRepository[Entity]):
         profile_data: dict = None,
         key: str = None,
     ) -> Entity:
-        """创建实体并关联调查员档案，支持 key"""
+        """创建实体并关联调查员档案，支持 key"""
         entity = await self.create(name, tags, stats, attacks, location_id, key=key)
         
         # 如果提供了profile数据，创建对应的InvestigatorProfile
@@ -92,7 +95,7 @@ class EntityRepository(TaggableRepository[Entity]):
         if len(candidates) == 1:
             return candidates[0]
         elif len(candidates) > 1:
-            print(f"[Warning] Ambiguous name '{name}'. Found: {[e.name for e in candidates]}")
+            logger.warning(f"Ambiguous name '{name}'. Found: {[e.name for e in candidates]}")
             return None
 
         # Tag 匹配（昵称/别名）
