@@ -7,7 +7,8 @@ import asyncio
 from typing import AsyncGenerator, List, Dict, Any, Optional
 
 from ..core import get_logger
-from ..agents import Archivist, RuleKeeper
+from .archivist import Archivist
+from .rule_keeper import RuleKeeper
 from ..memory import MemoryManager
 from ..llm import LLMFactory
 from .assembler import PromptAssembler, SceneMode
