@@ -64,7 +64,6 @@ class ModuleLoader:
             else:
                 db_record = Knowledge(
                     rag_key=rag_key, 
-                    is_known=False,
                     tags_granted=k.get('tags_granted', [])
                 )
                 self.db.add(db_record)
