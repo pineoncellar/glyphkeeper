@@ -20,6 +20,7 @@ from ..memory.repositories import InteractableRepository
 from ..memory.repositories import ClueDiscoveryRepository
 from ..memory.repositories import KnowledgeRepository
 from ..memory.repositories import SessionRepository
+from ..memory.repositories import InvestigatorProfileRepository
 from ..memory import RAGEngine
 from ..memory.database import db_manager
 
@@ -43,7 +44,7 @@ class Archivist:
             results = await engine.query(query, mode="hybrid", top_k=3)
             
             if not results:
-                return {"ok": True, "results": "你努力回忆，但脑海中一片模糊（没有找到相关记忆）。"}
+                return {"ok": True, "results": "没有找到相关记忆。"}
                 
             return {
                 "ok": True, 
@@ -54,12 +55,12 @@ class Archivist:
             logger.error(f"Recall failed: {e}")
             return {"ok": False, "error": str(e)}
 
-    # --- 感知 ---
-    async def get_location_view(self, entity_name: str) -> Dict[str, Any]:
-        """获取指定实体当前视野的描述。"""
+    async def get_location_stat(self, entity_name: str) -> Dict[str, Any]:
+        """获取指定实体当前场景的完整信息（包括物品、NPC、线索等）"""
         async with self.db_manager.session_factory() as session:
             entity_repo = EntityRepository(session)
             location_repo = LocationRepository(session)
+            interactable_repo = InteractableRepository(session)
             
             # 找人
             entity = await entity_repo.get_by_name(entity_name)
@@ -72,27 +73,102 @@ class Archivist:
                     "ok": True, 
                     "location_name": "Unknown", 
                     "description": "你在一片虚空之中。", 
-                    "exits": []
+                    "exits": [],
+                    "interactables": [],
+                    "entities": [],
+                    "environment_tags": []
                 }
                 
             location = await location_repo.get_by_id(entity.location_id)
             if not location:
                 return {"ok": False, "reason": "Location data corruption."}
 
-            # 构造视野数据
-            # 这里暂时只返回基础描述，后续可扩充 items 和 npcs
+            # 获取当前地点的所有物品/可交互对象
+            interactables = await interactable_repo.get_by_location(entity.location_id)
+            interactables_info = []
+            for item in interactables:
+                interactables_info.append({
+                    "name": item.name,
+                    "key": item.key,
+                    "short_desc": item.short_desc,
+                    "tags": item.tags or [],
+                    "visible": item.visible
+                })
+            
+            # 获取当前地点的所有其他实体（NPC 或其他角色）
+            all_entities = await entity_repo.get_by_location(entity.location_id)
+            entities_info = []
+            for ent in all_entities:
+                # 排除查询者自己
+                if ent.name != entity_name:
+                    entities_info.append({
+                        "name": ent.name,
+                        "tags": ent.tags or [],
+                        "stats": ent.stats or {}
+                    })
+
+            # 构造完整场景数据
             return {
                 "ok": True,
                 "entity": entity.name,
+                "location_id": str(location.id),
+                "location_key": location.key,
                 "location_name": location.name,
-                "description": location.base_desc, # 对应 models.py 的 base_desc
-                "exits": list(location.exits.keys()) if location.exits else [], # 将 dict keys 转为 list
-                "environment_tags": location.tags
+                "description": location.base_desc,
+                "exits": list(location.exits.keys()) if location.exits else [],
+                "exits_detail": location.exits or {},  # 包含完整的出口映射
+                "environment_tags": location.tags or [],
+                "interactables": interactables_info,  # 当前场景的所有物品
+                "entities": entities_info,  # 当前场景的所有其他实体
+                "system_note": f"场景中有 {len(interactables_info)} 个可交互对象和 {len(entities_info)} 个其他实体，请特别注意物品是否直接可见。"
             }
 
     async def inspect_target(self, viewer_name: str, target_name: str) -> Dict[str, Any]:
-        """详细检查目标，可能触发线索发现。"""
-        raise NotImplementedError
+        """详细检查目标物品，可能触发线索发现。"""
+        async with self.db_manager.session_factory() as session:
+            entity_repo = EntityRepository(session)
+            investigator_profile_repo = InvestigatorProfileRepository(session)
+            interactable_repo = InteractableRepository(session)
+            clue_discovery_repo = ClueDiscoveryRepository(session)
+            clue_repo = KnowledgeRepository(session)
+            
+            viewer = await entity_repo.get_by_name(viewer_name)
+            viewer_profile = await investigator_profile_repo.get_by_entity_id(viewer.id) if viewer else None
+            if not viewer_profile:
+                return {"ok": False, "reason": f"找不到观察者: {viewer_name}"}
+            
+            # 获取目标
+            target = await interactable_repo.get_by_name(target_name)
+            if not target:
+                return {"ok": False, "reason": f"找不到目标: {target_name}"}
+            
+            # 检查目标是否在观察者当前地点
+            if target.location_id != viewer.location_id:
+                return {"ok": False, "reason": f"{target_name} 不在你当前所在的地点。"}
+            
+            clue_list = []
+            
+            # 获取所有关联的线索发现逻辑
+            related_clue = await clue_discovery_repo.get_by_interactable(target.id)
+            if related_clue:
+                for clue in related_clue:
+                    # 取线索自身属性
+                    raw_clue = await clue_repo.get_by_id(clue.knowledge_id)
+                    clue_list.append({
+                        "id": raw_clue.tags_granted,
+                        "required_check": clue.required_check or {},
+                        "discovery_flavor_text": clue.discovery_flavor_text
+                    })
+            
+            # 返回检查结果
+            return {
+                "ok": True,
+                "target_name": target.name,
+                "state": target.state,
+                "tags": target.tags or [],
+                "clue_discovered": clue_list,
+                "system_note": "这是对目标的详细检查结果，请据此生成后续剧情。若发现了线索，请特别注意触发条件。"
+            }
 
     async def get_entity_status(self, entity_name: str) -> Dict[str, Any]:
         """返回实体的属性值，用于决策判断。"""
@@ -125,9 +201,8 @@ class Archivist:
                 "system_note": "以上是实体的当前状态。"
             }
 
-    # --- 交互 ---
     async def move_entity(self, entity_name: str, direction: str) -> Dict[str, Any]:
-        """尝试移动实体。"""
+        """短距离移动实体，受地图连接状态影响"""
         async with self.db_manager.session_factory() as session:
             entity_repo = EntityRepository(session)
             location_repo = LocationRepository(session)
@@ -143,7 +218,7 @@ class Archivist:
             target_ref = None # 可能是 Name，也可能是 Key
             direction_key = None
             
-            # 遍历 exits (忽略大小写匹配方向)
+            # 遍历exits
             for exit_dir, target in (current_loc.exits or {}).items():
                 if exit_dir.lower() == direction.lower():
                     direction_key = exit_dir
@@ -153,7 +228,7 @@ class Archivist:
             if not target_ref:
                 return {"ok": False, "reason": f"方向 '{direction}' 没有路。"}
 
-            # 先尝试 Key 查找 (loc_neighborhood)
+            # 先尝试 Key 查找
             target_loc = await location_repo.get_by_key(target_ref)
             
             # 如果没找到，再尝试当做中文名查找
@@ -169,15 +244,12 @@ class Archivist:
 
             # 返回新地点的视野
             # 这样 Narrator 可以在一轮对话中完成 "移动+描述"
-            new_view = await self.get_location_view(entity_name)
+            new_view = await self.get_location_stat(entity_name)
             new_view["system_note"] = f"已成功向 {direction_key} 移动到 {target_loc.name}。"
             return new_view
 
     async def travel_to_location(self, entity_name: str, target_ref: str) -> Dict[str, Any]:
-        """
-        [叙事旅行] 计算路径并自动移动。
-        :param target_ref: 目标地点的中文名 (如 "图书馆") 或 Key (如 "loc_library")
-        """
+        """长距离移动实体，计算路径并自动移动"""
         async with self.db_manager.session_factory() as session:
             entity_repo = EntityRepository(session)
             location_repo = LocationRepository(session)
@@ -277,7 +349,7 @@ class Archivist:
             final_loc_node = graph[final_loc_id]
             
             # 获取标准视野
-            view = await self.get_location_view(entity_name)
+            view = await self.get_location_stat(entity_name)
             
             # 注入旅行摘要
             path_desc = " -> ".join(travel_log)
@@ -290,9 +362,54 @@ class Archivist:
 
     async def transfer_item(self, item_name: str, from_container: str, to_container: str) -> Dict[str, Any]:
         """在携带者/地点之间转移物品。"""
-        raise NotImplementedError
+        async with self.db_manager.session_factory() as session:
+            entity_repo = EntityRepository(session)
+            location_repo = LocationRepository(session)
+            interactable_repo = InteractableRepository(session)
+            
+            # 查找物品
+            item = await interactable_repo.get_by_name(item_name)
+            if not item:
+                return {"ok": False, "reason": f"物品不存在: {item_name}"}
+            
+            # 解析来源容器
+            from_entity = await entity_repo.get_by_name(from_container)
+            from_location = await location_repo.get_by_name(from_container) if not from_entity else None
+            
+            if not from_entity and not from_location:
+                return {"ok": False, "reason": f"来源容器不存在: {from_container}"}
+            
+            # 验证物品当前位置
+            if from_entity and item.carrier_id != from_entity.id:
+                return {"ok": False, "reason": f"{item_name} 不在 {from_container} 的物品栏中。"}
+            if from_location and item.location_id != from_location.id:
+                return {"ok": False, "reason": f"{item_name} 不在 {from_container} 中。"}
+            
+            # 解析目标容器
+            to_entity = await entity_repo.get_by_name(to_container)
+            to_location = await location_repo.get_by_name(to_container) if not to_entity else None
+            
+            if not to_entity and not to_location:
+                return {"ok": False, "reason": f"目标容器不存在: {to_container}"}
+            
+            # 执行转移
+            if to_entity:
+                item.carrier_id = to_entity.id
+                item.location_id = None
+            elif to_location:
+                item.location_id = to_location.id
+                item.carrier_id = None
+            
+            await interactable_repo.save(item)
+            
+            return {
+                "ok": True,
+                "item": item_name,
+                "from": from_container,
+                "to": to_container,
+                "system_note": f"已将 {item_name} 从 {from_container} 转移到 {to_container}。"
+            }
 
-    # --- 生理 ---
     async def update_entity_resource(self, entity_name: str, resource: str, delta: int) -> Dict[str, Any]:
         """
         改变通用资源（HP、SAN、MP）。
@@ -303,13 +420,16 @@ class Archivist:
             
             resource_key = resource.lower()
             if resource_key not in {"hp", "mp", "san"}:
-                return {"ok": False, "reason": f"Unsupported resource: {resource}"}
+                return {"ok": False, "reason": f"资源不存在: {resource}"}
 
             entity = await entity_repo.get_by_name(entity_name)
             if not entity:
-                return {"ok": False, "reason": f"Entity not found: {entity_name}"}
-
+                return {"ok": False, "reason": f"实体不存在: {entity_name}"}
             stats = dict(entity.stats or {})
+            # 如果目标没有该资源，则设默认值hp=10, mp=5, san=50
+            if resource_key not in stats:
+                default_values = {"hp": 10, "mp": 5, "san": 50}
+                stats[resource_key] = default_values.get(resource_key)
             before = int(stats.get(resource_key, 0))
             # mp 扣减时判断是否足够
             if resource_key == "mp" and delta < 0 and before < abs(delta):
@@ -325,21 +445,46 @@ class Archivist:
                 }
             after = before + delta
             stats[resource_key] = after
+            tags = entity.tags or []
 
             status_flags: List[str] = []
-            if resource_key == "hp" and after <= 0:
-                stats["status"] = "DEAD"
-                status_flags.append("DEAD")
-            if resource_key == "san" and after <= 0:
-                stats["insanity_state"] = "TEMPORARY_INSANITY"
-                status_flags.append("TEMPORARY_INSANITY")
+            if resource_key == "hp":
+                if after <= 0: # 血量小于0，立即死亡
+                    stats["hp"] = 0
+                    tags.add("DEAD")
+                    status_flags.append("DEAD")
+                elif delta < 0 and abs(delta) >= before / 2: # 受到大于等于最大生命值一半的伤害，进入重伤状态
+                    tags.add("SERIOUSLY_INJURED")
+                    status_flags.append("SERIOUSLY_INJURED")
+                elif delta > 0 and "SERIOUSLY_INJURED" in tags and "DEAD" not in tags: # 得到医学处理，重伤状态解除
+                    # TODO: 这里暂时无法判断是急救还是医学处理，以后再细化
+                    tags.remove("SERIOUSLY_INJURED")
+                    status_flags.append("SERIOUSLY_INJURED_CLEARED")
+
+            if resource_key == "san":
+                if after <= 0: # SAN归零，进入永久疯狂状态
+                    stats["san"] = 0
+                    tags.add("PERMANENT_INSANITY")
+                    status_flags.append("PERMANENT_INSANITY")
+                elif delta < 0 and abs(delta) >= 5: # 受到大于等于5点的精神伤害，进入临时疯狂状态
+                    # TODO: 潜在疯狂判断以后再加
+                    tags.add("TEMPORARY_INSANITY")
+                    status_flags.append("TEMPORARY_INSANITY")
+                else: # 当前san值小于等于最大san值的五分之四，进入不定性疯狂
+                    # TODO: 以后再优化好了
+                    max_san = stats.get("pow") * 5 or stats.get("POW") * 5 or 50
+                    if after <= max_san * 4 / 5 :
+                        tags.add("UNSTABLE_INSANITY")
+                        status_flags.append("UNSTABLE_INSANITY")
+                    elif after > max_san * 4 / 5 and "UNSTABLE_INSANITY" in tags:
+                        tags.remove("UNSTABLE_INSANITY")
+                        status_flags.append("UNSTABLE_INSANITY_CLEARED")
+                
 
             entity.stats = stats
-            try:
-                await entity_repo.save(entity)
-            except Exception as e:
-                logger.error(f"Failed to update entity resource: {e}")
-                return {"ok": False, "reason": "Database error"}
+            entity.tags = tags
+
+            await entity_repo.save(entity)
 
             return {
                 "ok": True,
@@ -351,14 +496,32 @@ class Archivist:
                 "status_flags": status_flags,
             }
 
-    async def set_entity_state(self, entity_name: str, key: str, value: Any) -> Dict[str, Any]:
-        """设置离散状态标记，例如中毒/倒地/隐身。"""
-        raise NotImplementedError
+    async def add_entity_tag(self, entity_name: str, value: list) -> Dict[str, Any]:
+        """添加实体tags，不重复添加，支持批量添加"""
+        async with self.db_manager.session_factory() as session:
+            entity_repo = EntityRepository(session)
+            
+            entity = await entity_repo.get_by_name(entity_name)
+            if not entity:
+                return {"ok": False, "reason": f"实体不存在: {entity_name}"}
+            
+            tags = set(entity.tags or [])
+            initial_tag_count = len(tags)
+            for tag in value:
+                tags.add(tag)
+            entity.tags = list(tags)
+            
+            await entity_repo.save(entity)
 
-    # --- 知识 ---
-    async def recall_knowledge(self, entity_name: str, query: str) -> Dict[str, Any]:
-        """回忆解锁的知识并进行范围限制的 LightRAG 检索。"""
-        raise NotImplementedError
+            added_count = len(tags) - initial_tag_count
+            return {
+                "ok": True,
+                "entity": entity.name,
+                "added_tags": value,
+                "current_tags": entity.tags,
+                "total_tags": len(tags),
+                "new_tags_added": added_count,
+            }
 
     # --- 工具模式生成 ---
     def get_openai_tools_schema(self) -> List[dict]:
@@ -367,7 +530,7 @@ class Archivist:
             {
                 "type": "function",
                 "function": {
-                    "name": "get_location_view",
+                    "name": "get_location_stat",
                     "description": "获取当前房间的描述和可见的物品。",
                     "parameters": {
                         "type": "object",
@@ -472,16 +635,19 @@ class Archivist:
             {
                 "type": "function",
                 "function": {
-                    "name": "set_entity_state",
-                    "description": "为实体设置离散状态标记。",
+                    "name": "add_entity_tag",
+                    "description": "为实体添加状态标签（tags），支持批量添加，自动去重。用于添加持久状态标记如'中毒'、'隐身'、'知识解锁'等。",
                     "parameters": {
                         "type": "object",
                         "properties": {
-                            "entity_name": {"type": "string"},
-                            "key": {"type": "string"},
-                            "value": {"description": "任意 JSON 可序列化的值。"},
+                            "entity_name": {"type": "string", "description": "实体的名称"},
+                            "value": {
+                                "type": "array",
+                                "items": {"type": "string"},
+                                "description": "要添加的标签列表，如 ['poisoned', 'Sprawled']"
+                            },
                         },
-                        "required": ["entity_name", "key", "value"],
+                        "required": ["entity_name", "value"],
                     },
                 },
             },
