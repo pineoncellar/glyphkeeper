@@ -78,3 +78,13 @@ class InteractableRepository(TaggableRepository[Interactable]):
             pass
 
         return None
+    
+    async def save(self, interactable: Interactable) -> Interactable:
+        """保存对交互物的修改"""
+        try:
+            await self.session.commit()
+            await self.session.refresh(interactable)
+            return interactable
+        except Exception as e:
+            logger.error(f"保存交互物失败: {e}")
+            raise
