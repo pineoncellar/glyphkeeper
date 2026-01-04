@@ -8,11 +8,13 @@ import logging
 from pathlib import Path
 from typing import Optional, Literal
 from lightrag import LightRAG, QueryParam
+from sqlalchemy import text
 
 from ..core.config import get_settings, PROJECT_ROOT
 from ..core.logger import get_logger
 from ..llm import create_llm_model_func, create_embedding_func
 from .storage import get_storage_config
+from .database import db_manager
 
 logger = get_logger(__name__)
 
@@ -82,8 +84,6 @@ class RAGEngine:
         (data_dir / "intermediate").mkdir(parents=True, exist_ok=True)
         
         # 确保 Schema 存在
-        from sqlalchemy import text
-        from .database import db_manager
         try:
             async with db_manager.engine.begin() as conn:
                 await conn.execute(text(f"CREATE SCHEMA IF NOT EXISTS {schema}"))

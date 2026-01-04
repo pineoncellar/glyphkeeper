@@ -84,6 +84,43 @@ def get_storage_config(working_dir: Optional[str] = None, schema: str = "public"
     return config
 
 
+def get_rules_storage_config() -> Dict[str, Any]:
+    """
+    获取规则数据专用存储配置
+    用于存储跨世界的COC7th规则书
+    - Schema: coc7th_rules（独立）
+    - 工作目录: data/rules（独立图谱文件）
+    - 与世界数据完全隔离，便于版本管理和共享
+    """
+    working_dir = str(PROJECT_ROOT / "data" / "rules")
+    
+    # 确保工作目录存在
+    Path(working_dir).mkdir(parents=True, exist_ok=True)
+    
+    # 使用独立的 schema 和 LightRAG 工作目录
+    db_url = get_postgres_url(schema="coc7th_rules")
+    settings = get_settings()
+    
+    config = {
+        "working_dir": working_dir,
+        "graph_storage": "NetworkXStorage",
+        "vector_storage": "PGVectorStorage",
+        "vector_db_storage_cls_kwargs": {
+            "cosine_better_than_threshold": 0.2,
+            "embedding_dim": settings.vector_store.embedding_dim
+        },
+        "kv_storage": "PGKVStorage",
+        "doc_status_storage": "PGDocStatusStorage",
+        "addon_params": {
+            "db_url": db_url,
+            "use_jsonb": True
+        }
+    }
+    
+    logger.info(f"规则数据存储配置: schema=coc7th_rules, working_dir={working_dir}")
+    return config
+
+
 def get_postgres_url(schema: str = "public") -> str:
     """获取 PostgreSQL 连接 URL"""
     settings = get_settings()

@@ -64,6 +64,47 @@ class DatabaseManager:
 # 全局单例
 db_manager = DatabaseManager()
 
+
+class RulesDatabaseManager:
+    """
+    规则数据库管理器（独立 schema：coc7th_rules）
+    用于管理跨世界的共享规则数据，与世界特定数据隔离
+    """
+    def __init__(self):
+        self._engine: AsyncEngine | None = None
+        self._session_factory: async_sessionmaker | None = None
+
+    @property
+    def engine(self) -> AsyncEngine:
+        if self._engine is None:
+            settings = get_settings()
+            # 固定使用 coc7th_rules schema，不受 active_world 影响
+            self._engine = create_async_engine(
+                get_db_url(), 
+                echo=settings.project.debug,
+                connect_args={
+                    "server_settings": {
+                        "search_path": "coc7th_rules,public"
+                    }
+                }
+            )
+        return self._engine
+
+    @property
+    def session_factory(self) -> async_sessionmaker:
+        if self._session_factory is None:
+            self._session_factory = async_sessionmaker(
+                bind=self.engine,
+                class_=AsyncSession,
+                expire_on_commit=False
+            )
+        return self._session_factory
+
+
+# 全局单例
+rules_db_manager = RulesDatabaseManager()
+
+
 class Base(DeclarativeBase):
     pass
 

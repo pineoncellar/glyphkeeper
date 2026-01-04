@@ -5,7 +5,7 @@ RuleKeeper Agent - 规则裁决者
 import json
 from typing import Dict, Any, Optional
 from ..core import get_logger
-from .tools.knowledge_service import KnowledgeService
+from ..memory import get_rule_service
 from ..llm import LLMFactory
 
 logger = get_logger(__name__)
@@ -13,30 +13,30 @@ logger = get_logger(__name__)
 class RuleKeeper:
     """规则裁决者 Agent"""
     def __init__(self):
-        self.domain = "rules"
-        self.knowledge_service = KnowledgeService(domain=self.domain)
+        self.rule_service = get_rule_service()
         self.llm = LLMFactory.get_llm("standard")
+        logger.info("RuleKeeper initialized with RuleService")
         
     async def initialize(self):
-        """初始化 RuleKeeper 的知识服务"""
-        await self.knowledge_service.initialize()
-        logger.info("RuleKeeper initialized with KnowledgeService")
+        """初始化 RuleKeeper（保持接口兼容性）"""
+        # RuleService 使用延迟初始化，无需显式初始化
+        logger.debug("RuleKeeper initialization check (using lazy-loaded RuleService)")
 
     async def consult_rulebook(self, query: str, context_summary: str = "") -> str:
         """查询规则书并根据上下文提供裁决建议"""
-        if not self.knowledge_service.rag_engine:
-            await self.initialize()
-            
-        # 使用 KnowledgeService 检索规则
+        # 使用 RuleService 检索规则
         try:
-            # 使用 rule_judge 角色的智能模式以更好地解释规则
-            rules_text = await self.knowledge_service.search(
-                query=query,
+            # 使用混合模式查询规则，top_k=60 获取更全面的规则上下文
+            rules_text = await self.rule_service.query_rule(
+                question=query,
                 mode="hybrid",
-                smart_mode=True,
-                persona="rule_judge",
-                top_k=3
+                top_k=60,
+                user_prompt=(
+                    "你是一位公正的规则裁判。"
+                    "请引用规则原文，并给出简明的判定依据。"
+                )
             )
+            logger.info(f"✓ 规则查询成功: {query[:50]}...")
         except Exception as e:
             logger.error(f"查询规则引擎失败: {e}")
             rules_text = "无法检索到相关规则，请根据通用CoC规则判断。"
