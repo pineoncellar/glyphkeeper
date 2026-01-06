@@ -29,12 +29,17 @@ from .knowledge_service import (
     search_rules,
 )
 from .assembler import PromptAssembler, SceneMode
+from .schemas import NarratorInput
 
 __all__ = [
+    # 知识检索服务
     "KnowledgeService",
     "SearchResult",
     "search_world",
     "search_rules",
+    # prompt 组装器
     "PromptAssembler",
     "SceneMode",
+    # 叙事者输入结构
+    "NarratorInput",
 ]
