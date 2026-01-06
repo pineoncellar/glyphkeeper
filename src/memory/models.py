@@ -214,7 +214,7 @@ class DialogueRecord(Base):
     # False = 还在 Buffer 中，必须优先保留
     is_consolidated: Mapped[bool] = mapped_column(Boolean, default=False)
     
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now)
 
 class MemoryTrace(Base):
     """
@@ -225,7 +225,7 @@ class MemoryTrace(Base):
     
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     summary: Mapped[str] = mapped_column(Text) # The compressed summary
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now)
     
     # Range of dialogue turns this trace covers
     start_turn: Mapped[int] = mapped_column(Integer)

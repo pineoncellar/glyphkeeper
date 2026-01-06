@@ -57,7 +57,7 @@ class Narrator:
         record = {
             "trace_id": trace_id,
             "stage": stage,
-            "timestamp": datetime.utcnow().isoformat() + "Z",
+            "timestamp": datetime.now().isoformat(),
             **payload,
         }
 
