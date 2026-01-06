@@ -8,7 +8,7 @@ import os
 # 添加项目根目录到 Python 路径
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
-from agents.assembler import PromptAssembler, SceneMode
+from src.agents.tools.assembler import PromptAssembler, SceneMode
 
 
 def test_basic_prompt_build():
@@ -18,7 +18,7 @@ def test_basic_prompt_build():
     print("=" * 60)
     
     prompt = PromptAssembler.build(
-        player_name="威廉·道格拉斯",
+        actor="威廉·道格拉斯",
         game_state={
             "location": "金博尔宅 - 书房",
             "time_slot": "深夜",
@@ -77,7 +77,7 @@ def test_tool_results_integration():
     ]
     
     prompt = PromptAssembler.build(
-        player_name="调查员",
+        actor="调查员",
         game_state={
             "location": "书房",
             "time_slot": "下午",
@@ -110,7 +110,7 @@ def test_empty_context_handling():
     print("=" * 60)
     
     prompt = PromptAssembler.build(
-        player_name="调查员",
+        actor="调查员",
         game_state={
             "location": "街道",
             "time_slot": "未知",
@@ -141,7 +141,7 @@ def test_simple_build():
     print("=" * 60)
     
     prompt = PromptAssembler.build_simple(
-        player_name="调查员",
+        actor="调查员",
         current_location="街道",
         user_input="我问路人时间"
     )
@@ -168,7 +168,7 @@ def test_mode_instructions():
     
     for mode in modes:
         prompt = PromptAssembler.build(
-            player_name="调查员",
+            actor="调查员",
             game_state={"location": "测试", "time_slot": "测试", "environment": "测试", "environment_tags": []},
             rag_context={"semantic": "", "episodic": "", "keeper_notes": ""},
             history_str="",
