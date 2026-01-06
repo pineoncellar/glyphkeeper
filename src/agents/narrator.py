@@ -18,7 +18,7 @@ from .archivist import Archivist
 from .rule_keeper import RuleKeeper
 from ..memory import MemoryManager
 from ..llm import LLMFactory
-from .assembler import PromptAssembler, SceneMode
+from tools import PromptAssembler, SceneMode
 
 logger = get_logger(__name__)
 

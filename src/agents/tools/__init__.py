@@ -28,10 +28,13 @@ from .knowledge_service import (
     search_world,
     search_rules,
 )
+from .assembler import PromptAssembler, SceneMode
 
 __all__ = [
     "KnowledgeService",
     "SearchResult",
     "search_world",
     "search_rules",
+    "PromptAssembler",
+    "SceneMode",
 ]
