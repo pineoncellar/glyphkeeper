@@ -18,7 +18,7 @@ from .archivist import Archivist
 from .rule_keeper import RuleKeeper
 from ..memory import MemoryManager
 from ..llm import LLMFactory
-from tools import PromptAssembler, SceneMode
+from .tools import NarratorInput, PromptAssembler, SceneMode
 
 logger = get_logger(__name__)
 
@@ -28,21 +28,13 @@ class Narrator:
 
     def __init__(
         self, 
-        memory_manager: MemoryManager,
-        player_name: str = "调查员"
+        memory_manager: MemoryManager
     ):
-        """
-        初始化 Narrator
-        
-        Args:
-            memory_manager: 记忆管理器实例
-            player_name: 玩家角色名称，默认为"调查员"
-        """
+        self.default_player_name = "调查员"
         self.llm = LLMFactory.get_llm("smart")
         self.archivist = Archivist()
         self.rule_keeper = RuleKeeper()
         self.memory = memory_manager
-        self.player_name = player_name
         settings = get_settings()
         self.trace_log_path: Path = settings.get_absolute_path("logs/llm_traces.jsonl")
         
@@ -50,7 +42,7 @@ class Narrator:
         self.tools = self.archivist.get_openai_tools_schema()
         self.tools.append(self.rule_keeper.get_tool_schema())
         
-        logger.info(f"Narrator 初始化完成，玩家: {self.player_name}")
+        logger.info(f"Narrator 初始化完成")
 
     def _log_llm_trace(self, trace_id: str, stage: str, payload: Dict[str, Any]):
         """将调用上下文写入日志记录"""
@@ -68,39 +60,51 @@ class Narrator:
         except Exception as e:
             logger.warning(f"写入 LLM trace 失败: {e}")
 
-    async def _get_game_state(self) -> Dict[str, Any]:
-        """
-        获取当前游戏状态
-        
-        Returns:
-            游戏状态字典，包含 location, time_slot, environment 等
-        """
+    async def _get_game_stat(self, session_id: str, player_name: str) -> Dict[str, Any]:
+        """获取当前游戏状态"""
         try:
-            # 从 Archivist 获取玩家当前位置
-            location_info = await self.archivist.get_entity_location(self.player_name)
+            # 获取完整全局状态信息
+            game_session_stat = await self.archivist.get_game_session_stat(session_id)
             
-            if location_info.get("status") == "success":
-                current_location = location_info.get("location", "未知地点")
-                
-                # 获取地点详细信息（包含环境标签）
-                location_detail = await self.archivist.get_location_details(current_location)
-                
-                environment_tags = location_detail.get("tags", [])
-                time_slot = location_detail.get("time_slot", "未知时间")
-                
-                # 构建环境描述
-                environment_desc = self._format_environment(environment_tags)
-                
-                return {
-                    "location": current_location,
-                    "time_slot": time_slot,
-                    "environment": environment_desc,
-                    "environment_tags": environment_tags,
-                    "special_conditions": location_detail.get("special_conditions")
-                }
+            if game_session_stat.get("ok"):
+                time_slot = game_session_stat.get("time_slot", "未知时间")
+                active_global_tags = game_session_stat.get("active_global_tags", [])
+                beat_counter = game_session_stat.get("beat_counter", 0) if game_session_stat.get("beat_counter", 0) >=5  else 0
             else:
-                logger.warning(f"无法获取玩家位置: {location_info}")
+                logger.warning(f"无法获取全局状态信息: {game_session_stat}")
                 return self._default_game_state()
+            
+            # 获取调查员名称列表
+            investigator_list_stat = await self.archivist.list_investigators(session_id)
+            if investigator_list_stat.get("ok"):
+                global_investigator_list = investigator_list_stat.get("investigators", [])
+            else:
+                logger.warning(f"无法获取调查员列表: {investigator_list_stat}")
+                global_investigator_list = []
+            
+            # 获取地点状态
+            location_stat = await self.archivist.get_location_stat(player_name)
+            if location_stat.get("ok"):
+                location_stat.pop("ok")
+            else:
+                logger.warning(f"无法获取地点状态信息: {location_stat}")
+                location_stat = {
+                    "location_name": "Unknown", 
+                    "description": "你在一片虚空之中。", 
+                    "exits": [],
+                    "interactables": [],
+                    "entities": [],
+                    "environment_tags": []
+                }
+            
+            return {
+                "time_slot": time_slot,
+                "active_global_tags": active_global_tags,
+                "beat_counter": beat_counter,
+                "global_investigator_list": global_investigator_list,
+                "location_stat": location_stat,
+                "player_condition": "健康"
+            }
                 
         except Exception as e:
             logger.error(f"获取游戏状态失败: {e}")
@@ -109,62 +113,25 @@ class Narrator:
     def _default_game_state(self) -> Dict[str, Any]:
         """返回默认游戏状态"""
         return {
-            "location": "未知地点",
-            "time_slot": "未知时间",
-            "environment": "未知",
-            "environment_tags": [],
-            "special_conditions": None
-        }
-
-    def _format_environment(self, tags: List[str]) -> str:
-        """
-        将环境标签格式化为可读描述
-        
-        Args:
-            tags: 环境标签列表
-        
-        Returns:
-            格式化后的环境描述
-        """
-        if not tags:
-            return "平静"
-        
-        # 简单的标签映射
-        tag_map = {
-            "dark": "昏暗",
-            "rainy": "雨天",
-            "foggy": "多雾",
-            "cold": "寒冷",
-            "hot": "炎热",
-            "noisy": "嘈杂",
-            "quiet": "寂静",
-            "danger": "危险",
-            "safe": "安全"
-        }
-        
-        descriptions = [tag_map.get(tag, tag) for tag in tags]
-        return ", ".join(descriptions)
+                "time_slot": "未知时间",
+                "active_global_tags": [],
+                "beat_counter": 0,
+                "location_stat": {},
+                "player_condition": "Unknown"
+            }
 
     async def _build_rag_context(self, user_input: str) -> Dict[str, str]:
-        """
-        构建三段式 RAG 上下文
-        
-        Args:
-            user_input: 用户输入
-        
-        Returns:
-            包含 semantic, episodic, keeper_notes 的字典
-        """
+        """构建三段式 RAG 上下文"""
         try:
             # 调用 MemoryManager 的上下文构建方法
-            context_str = await self.memory.build_prompt_context(user_input)
+            # manager.py 中的 build_prompt_context 现在直接返回包含三段内容的字典
+            rag_context = await self.memory.build_prompt_context(user_input)
             
-            # 解析返回的上下文字符串（假设有特定格式）
-            # 这里简化处理，实际可能需要更复杂的解析
+            # 确保返回字典包含所需的键
             return {
-                "semantic": context_str,  # 世界知识
-                "episodic": "",           # 情景记忆（如果单独提供）
-                "keeper_notes": ""        # KP 笔记（如果单独提供）
+                "semantic": rag_context.get("semantic", ""),
+                "episodic": rag_context.get("episodic", ""),
+                "keeper_notes": rag_context.get("keeper_notes", "")
             }
         except Exception as e:
             logger.error(f"构建 RAG 上下文失败: {e}")
@@ -174,74 +141,68 @@ class Narrator:
                 "keeper_notes": ""
             }
 
-    async def _get_recent_history(self, limit: int = 10) -> str:
-        """
-        获取最近对话历史
-        
-        Args:
-            limit: 获取最近 N 条对话
-        
-        Returns:
-            格式化的对话历史字符串
-        """
-        try:
-            # 从记忆中获取最近对话
-            # 这里假设 MemoryManager 有获取对话历史的方法
-            # 如果没有，可以简化为空字符串
-            return ""  # 待实现
-        except Exception as e:
-            logger.error(f"获取对话历史失败: {e}")
-            return ""
-
     async def chat(
         self, 
-        user_input: str,
+        user_input: NarratorInput,
         forced_scene_mode: Optional[SceneMode] = None
     ) -> AsyncGenerator[str, None]:
         """
-        Narrator 主对话循环
-        
-        Args:
-            user_input: 用户输入
-            forced_scene_mode: 强制指定场景模式（可选）
-        
-        Yields:
-            str: 流式文本片段（包含思考过程和最终剧情）
+        Narrator 主对话函数，基于 ReAct 模式生成叙事
+        目前仅支持单人模式
         """
-        logger.info(f"Narrator 收到输入: {user_input}")
+        # 兼容性处理：如果传入的是字符串，尝试包装 (仅用于简单的单人测试兼容)
+        if isinstance(user_input, str):
+            user_input = NarratorInput(
+                session_id=str(uuid.uuid4()),
+                character_name=self.default_player_name,
+                content=user_input
+            )
+
+        active_char = user_input.character_name
+        content_text = user_input.content
+        
+        logger.debug(f"Narrator 收到输入: [{active_char}] {content_text}")
 
         trace_id = f"narrator-{uuid.uuid4().hex}"
 
-        # 1. 记录用户发言到记忆
-        await self.memory.add_dialogue("user", user_input)
+        # 记录用户发言到记忆
+        # 加上角色名前缀以便在历史中区分
+        await self.memory.add_dialogue("user", f"[{active_char}] {content_text}")
 
-        # 2. 收集数据：游戏状态 + RAG 上下文 + 对话历史
-        game_state = await self._get_game_state()
-        rag_context = await self._build_rag_context(user_input)
-        history_str = await self._get_recent_history()
+        # 收集数据：游戏状态 + RAG 上下文 + 对话历史
+        game_state = await self._get_game_stat(user_input.session_id, active_char)
+        rag_context = await self._build_rag_context(content_text)
+        history_list = await self.memory.get_recent_context()
+        
+        # 排除最后一条（即本次的输入），避免 Prompt 中重复
+        past_history = history_list[:-1] if history_list else []
+        
+        # 格式化对话历史
+        history_str = "\n".join([f"[{r.role}]: {r.content}" for r in past_history])
 
-        # 3. 使用 PromptAssembler 构建系统 Prompt
+        # 构建第一轮prompt
         system_prompt = PromptAssembler.build(
-            player_name=self.player_name,
+            player_name=active_char,
             game_state=game_state,
             rag_context=rag_context,
             history_str=history_str,
-            user_input=user_input,
+            user_input=content_text,
             tool_results=None,  # 第一轮没有工具结果
             scene_mode=forced_scene_mode
         )
 
-        # 4. 构造消息列表
+        # 构造消息列表
+        user_message_content = f"[Actor: {active_char}] {content_text}"
         messages = [
             {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_input}
+            {"role": "user", "content": user_message_content}
         ]
 
         self._log_llm_trace(
             trace_id,
             "llm_request_primary",
             {
-                "player_name": self.player_name,
+                "actor": active_char,
                 "scene_mode": forced_scene_mode.name if forced_scene_mode else None,
                 "game_state": game_state,
                 "rag_context": rag_context,
@@ -251,7 +212,7 @@ class Narrator:
             },
         )
 
-        # 5. 第一轮：推理与意图识别
+        # 第一轮：推理与意图识别
         full_response_content = ""
         tool_calls = []
 
@@ -275,10 +236,10 @@ class Narrator:
             },
         )
 
-        # 6. 判断是否需要调用工具
+        # 判断是否需要调用工具
         if not tool_calls:
             # 没有工具调用，直接结束
-            logger.info("无需调用工具，对话结束")
+            logger.debug("无需调用工具，对话结束")
             await self.memory.add_dialogue("assistant", full_response_content)
             self._log_llm_trace(
                 trace_id,
@@ -287,8 +248,8 @@ class Narrator:
             )
             return
 
-        # 7. 进入 ReAct 循环：执行工具
-        logger.info(f"检测到 {len(tool_calls)} 个工具调用")
+        # 有工具调用，进入 ReAct 循环，执行工具
+        logger.debug(f"检测到 {len(tool_calls)} 个工具调用")
         
         # 将第一轮 LLM 的响应加入历史
         messages.append({
@@ -306,8 +267,8 @@ class Narrator:
             call_id = tool_call["id"]
 
             # 输出工具执行提示
-            yield f"\n\n[System] 正在执行: {func_name}...\n\n"
-            logger.info(f"执行工具: {func_name}")
+            # yield f"\n\n[System] 正在执行: {func_name}...\n\n"
+            logger.debug(f"执行工具: {func_name}")
 
             try:
                 args = json.loads(args_str)
@@ -352,16 +313,16 @@ class Narrator:
             {"tool_results": tool_results_for_prompt},
         )
 
-        # 8. 第二轮：基于工具结果重新构建 Prompt + 生成最终叙事
+        # 第二轮：基于工具结果重新构建 Prompt + 生成最终叙事
         logger.debug("开始第二轮 LLM 调用（叙事生成）...")
         
         # 重新构建 Prompt，这次包含工具结果
         system_prompt_with_results = PromptAssembler.build(
-            player_name=self.player_name,
+            player_name=active_char,
             game_state=game_state,
             rag_context=rag_context,
             history_str=history_str,
-            user_input=user_input,
+            user_input=content_text,
             tool_results=tool_results_for_prompt,
             scene_mode=forced_scene_mode
         )
@@ -386,7 +347,7 @@ class Narrator:
                 final_narrative += chunk
                 yield chunk
 
-        # 9. 记录最终叙事到记忆
+        # 记录最终叙事到记忆
         await self.memory.add_dialogue("assistant", final_narrative)
         self._log_llm_trace(
             trace_id,

@@ -1,44 +1,29 @@
 """
 Narrator Prompt 动态构建器
-实现模块化、动态化和高上下文感知的 Prompt 生成
+采用 XML 结构化上下文与强制思维链 (CoT)，专为中文 TRPG 体验优化
 """
 from typing import Dict, List, Optional, Any
 from enum import Enum
 import json
 
-
 class SceneMode(Enum):
     """场景模式：用于动态调整 Prompt 的详略程度"""
-    EXPLORATION = "exploration"  # 探索模式：强调感官细节
-    COMBAT = "combat"            # 战斗/逃跑模式：强调紧迫感和动作
-    DIALOGUE = "dialogue"        # 对话模式：强调角色互动
-    INVESTIGATION = "investigation"  # 调查模式：强调线索和推理
-
+    EXPLORATION = "exploration"      # 探索
+    COMBAT = "combat"                # 战斗
+    DIALOGUE = "dialogue"            # 对话
+    INVESTIGATION = "investigation"  # 调查
 
 class PromptAssembler:
-    """
-    Narrator Prompt 的模块化构建器
-    
-    结构遵循五层架构：
-    1. 核心层 (Core): 人设与法则
-    2. 状态层 (State): 谁? 何时? 何地?
-    3. 记忆层 (Memory): RAG 检索结果
-    4. 历史层 (History): 最近对话窗口
-    5. 工具结果层 (Tool Results): 工具执行结果
-    """
+    # ------------------------------------------------------------------
+    # 1. 系统指令层 (System Header) - 确立 KP 身份与核心法则
+    # ------------------------------------------------------------------
+    SYSTEM_HEADER = """
+你现在是《克苏鲁的呼唤》(Call of Cthulhu) 桌面角色扮演游戏的**守密人 (Keeper/KP)**。
+你的目标是为玩家 **"{player_name}"** 创造一个沉浸式、充满洛夫克拉夫特风格的恐怖叙事体验。
 
-    # 核心层
-    CORE_ROLE = """### 身份与角色
-你是《克苏鲁的呼唤》桌面角色扮演游戏的**秘密守护者 (KP)**。
-你的使命是为玩家提供一个沉浸式的、洛夫克拉夫特式的恐怖体验。
-
-玩家的角色是**"{player_name}"**。
-在调用工具时，必须使用"{player_name}"作为 `entity_name` 参数。
-"""
-
-    PRIME_DIRECTIVES = """### 核心法则
-
+### 核心法则 (Prime Directives)
 1. **绝对真实**:
+   - `<world_state>` 和 `<observation>` 中的数据是**绝对的物理现实**。
    - 所有客观事实（地点、物品、状态）必须基于工具输出。
    - 如果信息未知，调用工具（例如 `get_location_view`）。绝不凭空捏造重要游戏事实。
    - 如果工具返回"失败"或"被阻挡"，诚实地描述这一挫折。不要为了叙事流畅而强行成功。
@@ -83,80 +68,109 @@ class PromptAssembler:
    - **记住**：洛夫克拉夫特式恐怖的核心在于**未知的恐惧**和**宇宙冷漠**，而非明确的暴力或仇恨。
 """
 
-    # 状态层
-    STATE_TEMPLATE = """### 当前状态
-- **调查员**: {player_name}
-- **地点**: {location}
-- **时间**: {time_slot}
-- **氛围**: {environment}
-{additional_state}
+    # ------------------------------------------------------------------
+    # 2. 上下文层 (Context Layers) - 清晰隔离左右脑
+    # ------------------------------------------------------------------
+    
+    # 左脑：结构化客观事实
+    STATE_SECTION = """
+<world_state>
+    <time_and_beat>时间: {time_slot} | 节拍数: {beat_counter}</time_and_beat>
+    <location_data>
+{location_stat}
+
+    *重要提示*: 
+    请仔细检查上述 `interactables` (物品) 和 `entities` (实体) 中的 `tags` 列表。
+    - 如果带有 `"hidden"`、`"secret"` 或 `"locked"` 等标签，**严禁**直接告诉玩家它们的存在，除非玩家主动执行了调查动作。
+    - 对于非隐藏的、带有线索的可互动物品，可以在环境描写中自然地暗示其存在感（例如反光、异味、突兀的轮廓），但不要像游戏列表一样罗列。
+    </location_data>
+    <player_status>
+        调查员: {player_name}
+        状态: {player_condition}
+    </player_status>
+    <active_tags>{active_global_tags}</active_tags>
+</world_state>
 """
 
-    # 记忆层
-    MEMORY_TEMPLATE = """### 世界知识与秘密
-系统已检索相关信息来丰富你的叙事：
+    # 右脑：非结构化记忆与知识
+    MEMORY_SECTION = """
+<knowledge_base>
+    <lore>
+{semantic_memory}
+    </lore>
+    
+    <story_context>
+{episodic_memory}
+    </story_context>
 
-{world_lore}
-
-{story_so_far}
-
+    <secret_notes>
 {keeper_secrets}
+    </secret_notes>
+</knowledge_base>
 """
 
-    # 历史层
-    HISTORY_TEMPLATE = """### 最近互动
-{history}
+    # ------------------------------------------------------------------
+    # 3. 行动层 (Action Layer) - 历史与观察
+    # ------------------------------------------------------------------
+    
+    HISTORY_SECTION = """
+<chat_history>
+{history_str}
+</chat_history>
 """
 
-    # 工具结果层
-    TOOL_RESULT_TEMPLATE = """### 工具执行结果（客观现实）
-以下数据代表刚发生的**绝对真实**：
+    # 工具执行结果：这是 ReAct 循环中的 "Observation"
+    TOOL_RESULT_SECTION = """
+<observation>
+基于玩家的上一步意图，系统执行了工具。
+以下数据是**刚发生的客观事实** (JSON 格式):
 
-```json
-{tool_results}
-```
+{tool_outputs_json}
 
-**指令**: 
-{mode_instruction}
-将结果中的'观察'、'风味文本'或'描述'融入你的叙事中。
-如果有'标签'（如["上锁"、"古老"]），使用它们来添加氛围细节。
+(如果结果显示 "failure" 或 "empty"，请务必在叙述中体现这种挫折感)
+</observation>
 """
 
-    NO_TOOL_INSTRUCTION = """### 任务
-未执行工具。根据用户输入：
-- 如果玩家想执行动作（移动、查看、互动），确定应使用的工具。
-- 如果是问题或对话，直接用叙事或对话回应。
+    # ------------------------------------------------------------------
+    # 4. 指令层 (Instruction Layer) - 强制 CoT 与 模式指导
+    # ------------------------------------------------------------------
+    
+    FINAL_INSTRUCTION = """
+<task>
+请分析 `<observation>` (如果有) 和 `<world_state>`，然后生成对玩家的回应。
 
-**指令**: 
-{mode_instruction}
+当前场景模式: **{mode_name}**
+模式指导: {mode_guidance}
+
+**必须执行的思考步骤 (Thinking Process)**:
+在生成叙事之前，你必须先在 `<thinking>` 标签中进行逻辑推演：
+1. **事实核对**: 工具执行成功了吗？如果不成功，怎么描述这种阻碍？
+2. **冲突检测**: `<world_state>` (事实) 和 `<knowledge_base>` (传说/记忆) 有冲突吗？如果有，以事实为准，可以把传说描述为“错误的传言”。
+3. **氛围定调**: 这是一个安全的探索时刻，还是紧迫的战斗时刻？
+4. **秘密判定**: 玩家的行为是否触发了 `<secret_notes>` 中的线索？
+
+**输出格式要求**:
+请严格按照以下格式输出：
+
+<thinking>
+在此处写下你的推理过程...
+1. 工具结果分析: ...
+2. 状态检查: ...
+3. 叙事策略: ...
+</thinking>
+
+<narrative>
+在此处输出给玩家的最终剧情描述...
+</narrative>
+</task>
 """
 
-    # 场景模式指令
-    MODE_INSTRUCTIONS = {
-        SceneMode.EXPLORATION: """
-关注**感官沉浸**：
-- 生动地描述视觉、声音、气味、质感等细节。
-- 缓慢建立氛围。让环境讲述它的故事。
-- 使用环境叙事（例如，门上的抓痕、布料上的污渍）。
-""",
-        SceneMode.COMBAT: """
-关注**紧迫感和动作**：
-- 保持描述简洁而动态。
-- 强调即时威胁和发自内心的反应。
-- 优先说明后果的清晰性（命中/未命中、伤害、位置变化）。
-""",
-        SceneMode.DIALOGUE: """
-关注**角色互动**：
-- 给予 NPC 独特的声音和肢体语言。
-- 通过对话而非说教来展现角色。
-- 使用停顿、犹豫和言外之意来建立张力。
-""",
-        SceneMode.INVESTIGATION: """
-关注**线索和推理**：
-- 清晰但微妙地呈现证据。
-- 允许玩家自己做出连接。
-- 用额外细节奖励仔细观察。
-"""
+    # 针对中文语境优化的模式指导
+    MODE_GUIDANCE = {
+        SceneMode.EXPLORATION: "重点描写环境氛围（光影、声音、气味）。节奏缓慢，建立悬疑感。",
+        SceneMode.COMBAT: "节奏紧凑。短句为主。重点描写动作的后果和肉体的痛楚。",
+        SceneMode.DIALOGUE: "通过语言展现 NPC 的性格。不要过度热心，NPC 应该有自己的动机和隐瞒。",
+        SceneMode.INVESTIGATION: "强调细节。根据 `<observation>` 中的数据，精确地描述线索，但不要直接给出结论，让玩家自己推理。"
     }
 
     @staticmethod
@@ -180,51 +194,23 @@ class PromptAssembler:
             return SceneMode.INVESTIGATION
         
         # 检查游戏状态中的标签
-        env_tags = game_state.get("environment_tags", [])
-        if "combat" in env_tags or "danger" in env_tags:
+        active_tags = game_state.get("active_global_tags", [])
+        if "combat" in active_tags or "danger" in active_tags:
             return SceneMode.COMBAT
         
         # 默认为探索模式
         return SceneMode.EXPLORATION
 
     @staticmethod
-    def _format_memory_context(rag_context: Dict[str, str]) -> str:
-        """格式化三段式记忆内容"""
-        sections = []
-        
-        # 语义记忆 (世界知识)
-        semantic = rag_context.get("semantic", "").strip()
-        if semantic:
-            sections.append(f"**[世界知识]** (来自语义记忆)\n{semantic}")
-        else:
-            sections.append("**[世界知识]** (来自语义记忆)\n[未找到相关世界知识]")
-        
-        # 情景记忆 (故事进展)
-        episodic = rag_context.get("episodic", "").strip()
-        if episodic:
-            sections.append(f"**[故事进展]** (来自情景记忆)\n{episodic}")
-        else:
-            sections.append("**[故事进展]** (来自情景记忆)\n[未记录先前行动]")
-        
-        # KP 秘密 (隐藏线索)
-        keeper_notes = rag_context.get("keeper_notes", "").strip()
-        if keeper_notes:
-            sections.append(f"**[KP信息]** (隐藏线索)\n{keeper_notes}")
-        else:
-            sections.append("**[KP信息]**\n[本场景暂无特殊秘密]")
-        
-        return "\n\n".join(sections)
-
-    @staticmethod
-    def _format_tool_results(tool_results: List[Dict]) -> str:
-        """格式化工具执行结果为 JSON 字符串"""
-        formatted_results = []
-        
-        for idx, result in enumerate(tool_results, 1):
-            formatted_results.append(f"// Result {idx}")
-            formatted_results.append(json.dumps(result, ensure_ascii=False, indent=2))
-        
-        return "\n".join(formatted_results)
+    def _format_dict_to_yaml(data: Any, indent: int = 4) -> str:
+        """辅助函数：将字典格式化为对 LLM 友好的伪 YAML 字符串"""
+        if isinstance(data, str):
+            try:
+                parsed = json.loads(data)
+                return json.dumps(parsed, ensure_ascii=False, indent=2)
+            except:
+                return " " * indent + data
+        return json.dumps(data, ensure_ascii=False, indent=2)
 
     @classmethod
     def build(
@@ -237,93 +223,51 @@ class PromptAssembler:
         tool_results: Optional[List[Dict]] = None,
         scene_mode: Optional[SceneMode] = None
     ) -> str:
-        """
-        构建完整的 Narrator System Prompt
         
-        Args:
-            player_name: 玩家角色名称
-            game_state: 游戏状态字典，包含：
-                - location: 当前地点
-                - time_slot: 时间段 (如 "深夜")
-                - environment: 环境描述 (如 "雷雨")
-                - environment_tags: 环境标签列表 (如 ["dark", "rainy"])
-            rag_context: RAG 检索结果，包含：
-                - semantic: 语义记忆 (世界知识)
-                - episodic: 情景记忆 (故事进展)
-                - keeper_notes: KP 笔记 (隐藏线索)
-            history_str: 最近的对话历史字符串
-            user_input: 用户当前输入 (用于场景模式检测)
-            tool_results: 工具执行结果列表 (可选)
-            scene_mode: 强制指定场景模式 (可选，默认自动检测)
-        
-        Returns:
-            完整的系统 Prompt 字符串
-        """
-        prompt_sections = []
-        
-        # 核心层
-        prompt_sections.append(cls.CORE_ROLE.format(player_name=player_name))
-        prompt_sections.append(cls.PRIME_DIRECTIVES)
-        
-        # 状态层
-        additional_state = ""
-        if game_state.get("special_conditions"):
-            additional_state = f"- **特殊条件**: {game_state['special_conditions']}"
-        
-        prompt_sections.append(cls.STATE_TEMPLATE.format(
-            player_name=player_name,
-            location=game_state.get("location", "未知"),
-            time_slot=game_state.get("time_slot", "未知"),
-            environment=game_state.get("environment", "未知"),
-            additional_state=additional_state
-        ))
-        
-        # 记忆层
-        formatted_memory = cls._format_memory_context(rag_context)
-        prompt_sections.append(cls.MEMORY_TEMPLATE.format(
-            world_lore="",  # 已经在 _format_memory_context 中处理
-            story_so_far="",
-            keeper_secrets=formatted_memory
-        ))
-        
-        # 历史层
-        if history_str.strip():
-            prompt_sections.append(cls.HISTORY_TEMPLATE.format(history=history_str))
-        else:
-            prompt_sections.append(cls.HISTORY_TEMPLATE.format(
-                history="[这是会话的开始]"
-            ))
-        
-        # 动作层
-        # 自动检测场景模式
+        # 1. 默认模式处理
         if scene_mode is None:
             scene_mode = cls._detect_scene_mode(user_input, game_state)
         
-        mode_instruction = cls.MODE_INSTRUCTIONS[scene_mode]
-        
-        if tool_results:
-            formatted_results = cls._format_tool_results(tool_results)
-            prompt_sections.append(cls.TOOL_RESULT_TEMPLATE.format(
-                tool_results=formatted_results,
-                mode_instruction=mode_instruction
-            ))
-        else:
-            prompt_sections.append(cls.NO_TOOL_INSTRUCTION.format(
-                mode_instruction=mode_instruction
-            ))
-        
-        # 添加思考提示
-        prompt_sections.append("""
----
-**回答之前**，简要思考：
-1. 工具结果（或当前情况）如何与KP信息相关？
-2. 什么样的感官细节会增强恐怖氛围？
-3. 什么信息现在应该保持神秘？
+        parts = []
 
-然后提供你的叙事回应。
-""")
-        
-        return "\n".join(prompt_sections)
+        # 2. 组装 Header
+        parts.append(cls.SYSTEM_HEADER.format(player_name=player_name))
+
+        # 3. 组装左脑 (State)
+        loc_data = game_state.get("location_stat", {})
+        parts.append(cls.STATE_SECTION.format(
+            time_slot=game_state.get("time_slot", "未知"),
+            beat_counter=game_state.get("beat_counter", 0),
+            location_stat=cls._format_dict_to_yaml(loc_data),
+            player_name=player_name,
+            player_condition=str(game_state.get("player_condition", "健康")), 
+            active_global_tags=", ".join(game_state.get("active_global_tags", []))
+        ))
+
+        # 4. 组装右脑 (Memory)
+        parts.append(cls.MEMORY_SECTION.format(
+            semantic_memory=rag_context.get("semantic", "暂无相关传说。"),
+            episodic_memory=rag_context.get("episodic", "暂无近期记忆。"),
+            keeper_secrets=rag_context.get("keeper_notes", "此处无特殊秘密。")
+        ))
+
+        # 5. 组装历史
+        parts.append(cls.HISTORY_SECTION.format(
+            history_str=history_str if history_str else "[会话开始]"
+        ))
+
+        # 6. 组装工具结果 (Observation)
+        if tool_results:
+            formatted_tools = json.dumps(tool_results, ensure_ascii=False, indent=2)
+            parts.append(cls.TOOL_RESULT_SECTION.format(tool_outputs_json=formatted_tools))
+
+        # 7. 组装最终指令
+        parts.append(cls.FINAL_INSTRUCTION.format(
+            mode_name=scene_mode.value,
+            mode_guidance=cls.MODE_GUIDANCE[scene_mode]
+        ))
+
+        return "\n".join(parts)
 
     @classmethod
     def build_simple(
@@ -336,9 +280,11 @@ class PromptAssembler:
         return cls.build(
             player_name=player_name,
             game_state={
-                "location": current_location,
+                "location_stat": {"description": current_location},
                 "time_slot": "Unknown",
-                "environment": "Unknown"
+                "active_global_tags": [],
+                "beat_counter": 0,
+                "player_condition": "Unknown"
             },
             rag_context={
                 "semantic": "",
