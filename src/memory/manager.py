@@ -24,7 +24,7 @@ class MemoryManager:
         self.strategies: List[ConsolidationStrategy] = [
             TokenCountStrategy(max_tokens=2000)
         ]
-        # 使用 standard 等级模型进行总结，如果配置了 fast 等级也可以使用 fast
+        # 默认使用 standard 等级模型进行总结
         self.summarizer_llm = LLMFactory.get_llm("standard")
     
     def _get_knowledge_service(self):
@@ -41,9 +41,7 @@ class MemoryManager:
         return self.rag_engine 
 
     async def add_dialogue(self, role: str, content: str):
-        """
-        添加一条新的对话记录
-        """
+        """添加一条新的对话记录"""
         async with db_manager.session_factory() as session:
             # 获取当前最大的 turn_number
             stmt = select(DialogueRecord.turn_number).order_by(desc(DialogueRecord.turn_number)).limit(1)
@@ -62,8 +60,7 @@ class MemoryManager:
             
             # 检查是否需要固化
             # 注意：这里传入 session 可能会有问题，因为 _check_and_consolidate 内部可能需要长时间运行 LLM
-            # 最好是提交当前事务后，再开启新的流程，或者在后台任务中运行
-            # 为简单起见，这里在同一个流程中执行，但要注意 session 的生命周期
+            # TODO: 主流程编写后，再丢到主流程去定时调用
             await self._check_and_consolidate()
 
     async def _check_and_consolidate(self):
@@ -92,15 +89,15 @@ class MemoryManager:
         if not buffer:
             return
 
-        logger.info(f"Triggering memory consolidation for {len(buffer)} records.")
+        logger.info(f"正在固化 {len(buffer)} 条记录。")
 
-        # 1. 总结
+        # 总结
         text_to_summarize = "\n".join([f"{r.role}: {r.content}" for r in buffer])
         prompt = f"请总结以下跑团对话，提取关键线索与决策，保持简洁：\n\n{text_to_summarize}"
         
         summary = await self._get_llm_response(prompt)
         
-        # 2. 存储 MemoryTrace
+        # 存储 MemoryTrace
         start_turn = buffer[0].turn_number
         end_turn = buffer[-1].turn_number
         
@@ -112,20 +109,20 @@ class MemoryManager:
         )
         session.add(trace)
         
-        # 3. 存储 LightRAG
+        # 存储 LightRAG
         engine = await self._get_rag_engine()
         try:
             # 注意：RAGEngine.insert 目前忽略 metadata，但接口保留以备未来扩展
             await engine.insert(summary, metadata={"start_turn": start_turn, "end_turn": end_turn})
         except Exception as e:
-            logger.error(f"Failed to insert summary into LightRAG: {e}")
+            logger.error(f"插入 LightRAG 失败: {e}")
         
-        # 4. 标记已固化
+        # 标记已固化
         record_ids = [r.id for r in buffer]
         stmt = update(DialogueRecord).where(DialogueRecord.id.in_(record_ids)).values(is_consolidated=True)
         await session.execute(stmt)
         await session.commit()
-        logger.info("Memory consolidation complete.")
+        logger.info("固化完成。")
 
     async def _get_llm_response(self, prompt: str) -> str:
         """辅助函数：获取 LLM 完整响应"""
