@@ -17,16 +17,16 @@ async def main():
     parser.add_argument(
         "--name",
         type=str,
-        help="要摄入的JSON文件路径"
+        help="要摄入的JSON文件名（不含扩展名）"
     )
     args = parser.parse_args()
-    book_json_path = Path(f"data/intermediate/{args.name}.json")
-    if not book_json_path.exists():
-        logger.error(f"找不到文件: {book_json_path}")
+    module_json_path = Path(f"data/intermediate/{args.name}.json")
+    if not module_json_path.exists():
+        logger.error(f"找不到文件: {module_json_path}")
         return
 
-    logger.info(f"开始摄入: {book_json_path}")
-    success = await load_module_from_json(book_json_path)
+    logger.info(f"开始摄入: {module_json_path}")
+    success = await load_module_from_json(module_json_path)
     
     if success:
         logger.info("摄入成功！")
