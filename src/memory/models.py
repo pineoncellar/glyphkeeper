@@ -176,6 +176,8 @@ class GameSession(Base):
     time_slot: Mapped[TimeSlot] = mapped_column(Enum(TimeSlot), default=TimeSlot.MORNING)
     beat_counter: Mapped[int] = mapped_column(Integer, default=0)
     active_global_tags: Mapped[List[str]] = mapped_column(ARRAY(Text), default=list)
+    # 调查员列表：存储参与本次会话的调查员 Entity ID
+    investigator_ids: Mapped[List[str]] = mapped_column(ARRAY(Text), default=list)
 
 class Event(Base):
     """

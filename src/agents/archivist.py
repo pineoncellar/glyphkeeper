@@ -32,6 +32,47 @@ class Archivist:
 
     def __init__(self):
         self.db_manager = db_manager
+    
+    async def get_game_session_stat(self, session_id: UUID) -> Dict[str, Any]:
+        """获取当前游戏会话的状态摘要"""
+        async with self.db_manager.session_factory() as session:
+            session_repo = SessionRepository(session)
+            game_session = await session_repo.get_by_id(session_id)
+            if not game_session:
+                return {"ok": False, "reason": f"找不到会话: {session_id}"}
+            
+            return {
+                "ok": True,
+                "session_id": str(game_session.id),
+                "time_slot": game_session.time_slot.value,
+                "beat_counter": game_session.beat_counter,
+                "active_global_tags": game_session.active_global_tags or [],
+            }
+    
+    async def list_investigators(self, session_id: UUID) -> Dict[str, Any]:
+        """列出当前游戏会话中的所有调查员名称"""
+        async with self.db_manager.session_factory() as session:
+            session_repo = SessionRepository(session)
+            entity_repo = EntityRepository(session)
+            
+            game_session = await session_repo.get_by_id(session_id)
+            if not game_session:
+                return {"ok": False, "reason": f"找不到会话: {session_id}"}
+            
+            investigator_names = []
+            for inv_id_str in game_session.investigator_ids:
+                try:
+                    inv_id = UUID(inv_id_str)
+                    entity = await entity_repo.get_by_id(inv_id)
+                    if entity:
+                        investigator_names.append(entity.name)
+                except Exception as e:
+                    logger.warning(f"Invalid investigator ID in session: {inv_id_str} ({e})")
+            
+            return {
+                "ok": True,
+                "investigators": investigator_names
+            }
 
     async def recall_knowledge(self, entity_name: str, query: str) -> Dict[str, Any]:
         """回忆以前解锁的知识、剧情或模组背景。"""
