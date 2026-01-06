@@ -1,12 +1,19 @@
 """
 Narrator Agent - 基于融合架构的叙事引擎
-实现模块化、动态化和高上下文感知的 Prompt 生成
+核心职责：
+1. 接收用户输入，构建动态 Prompt
+2. 通过 ReAct 模式调用 Archivist 工具和 RuleKeeper 工具
+3. 生成沉浸式的克苏鲁风格叙事
+4. 管理记忆的读写
 """
 import json
 import asyncio
+import uuid
+from datetime import datetime
+from pathlib import Path
 from typing import AsyncGenerator, List, Dict, Any, Optional
 
-from ..core import get_logger
+from ..core import get_logger, get_settings
 from .archivist import Archivist
 from .rule_keeper import RuleKeeper
 from ..memory import MemoryManager
@@ -17,15 +24,7 @@ logger = get_logger(__name__)
 
 
 class Narrator:
-    """
-    Narrator 叙事引擎
-    
-    核心职责：
-    1. 接收用户输入，构建动态 Prompt
-    2. 通过 ReAct 模式调用 Archivist 工具
-    3. 生成沉浸式的 Lovecraftian 叙事
-    4. 管理记忆的读写
-    """
+    """Narrator 叙事引擎"""
 
     def __init__(
         self, 
@@ -44,12 +43,30 @@ class Narrator:
         self.rule_keeper = RuleKeeper()
         self.memory = memory_manager
         self.player_name = player_name
+        settings = get_settings()
+        self.trace_log_path: Path = settings.get_absolute_path("logs/llm_traces.jsonl")
         
         # 获取工具定义
         self.tools = self.archivist.get_openai_tools_schema()
         self.tools.append(self.rule_keeper.get_tool_schema())
         
         logger.info(f"Narrator 初始化完成，玩家: {self.player_name}")
+
+    def _log_llm_trace(self, trace_id: str, stage: str, payload: Dict[str, Any]):
+        """将调用上下文写入日志记录"""
+        record = {
+            "trace_id": trace_id,
+            "stage": stage,
+            "timestamp": datetime.utcnow().isoformat() + "Z",
+            **payload,
+        }
+
+        try:
+            self.trace_log_path.parent.mkdir(parents=True, exist_ok=True)
+            with open(self.trace_log_path, "a", encoding="utf-8") as f:
+                f.write(json.dumps(record, ensure_ascii=False) + "\n")
+        except Exception as e:
+            logger.warning(f"写入 LLM trace 失败: {e}")
 
     async def _get_game_state(self) -> Dict[str, Any]:
         """
@@ -193,6 +210,8 @@ class Narrator:
         """
         logger.info(f"Narrator 收到输入: {user_input}")
 
+        trace_id = f"narrator-{uuid.uuid4().hex}"
+
         # 1. 记录用户发言到记忆
         await self.memory.add_dialogue("user", user_input)
 
@@ -218,6 +237,20 @@ class Narrator:
             {"role": "user", "content": user_input}
         ]
 
+        self._log_llm_trace(
+            trace_id,
+            "llm_request_primary",
+            {
+                "player_name": self.player_name,
+                "scene_mode": forced_scene_mode.name if forced_scene_mode else None,
+                "game_state": game_state,
+                "rag_context": rag_context,
+                "history": history_str,
+                "messages": messages,
+                "tools": self.tools,
+            },
+        )
+
         # 5. 第一轮：推理与意图识别
         full_response_content = ""
         tool_calls = []
@@ -233,11 +266,25 @@ class Narrator:
                 # 收到工具调用请求
                 tool_calls = chunk["tool_calls"]
 
+        self._log_llm_trace(
+            trace_id,
+            "llm_response_primary",
+            {
+                "raw_content": full_response_content,
+                "tool_calls": tool_calls,
+            },
+        )
+
         # 6. 判断是否需要调用工具
         if not tool_calls:
             # 没有工具调用，直接结束
             logger.info("无需调用工具，对话结束")
             await self.memory.add_dialogue("assistant", full_response_content)
+            self._log_llm_trace(
+                trace_id,
+                "llm_session_complete",
+                {"final_narrative": full_response_content},
+            )
             return
 
         # 7. 进入 ReAct 循环：执行工具
@@ -299,6 +346,12 @@ class Narrator:
                 "content": result_str
             })
 
+        self._log_llm_trace(
+            trace_id,
+            "tool_results",
+            {"tool_results": tool_results_for_prompt},
+        )
+
         # 8. 第二轮：基于工具结果重新构建 Prompt + 生成最终叙事
         logger.debug("开始第二轮 LLM 调用（叙事生成）...")
         
@@ -316,6 +369,16 @@ class Narrator:
         # 更新系统消息
         messages[0] = {"role": "system", "content": system_prompt_with_results}
 
+        self._log_llm_trace(
+            trace_id,
+            "llm_request_final",
+            {
+                "messages": messages,
+                "tools": None,
+                "tool_results": tool_results_for_prompt,
+            },
+        )
+
         # 第二轮调用（不再传 tools，避免无限循环）
         final_narrative = ""
         async for chunk in self.llm.chat(messages, tools=None):
@@ -325,6 +388,14 @@ class Narrator:
 
         # 9. 记录最终叙事到记忆
         await self.memory.add_dialogue("assistant", final_narrative)
+        self._log_llm_trace(
+            trace_id,
+            "llm_session_complete",
+            {
+                "final_narrative": final_narrative,
+                "tool_results": tool_results_for_prompt,
+            },
+        )
         
         logger.info("Narrator 回合结束")
 
