@@ -145,38 +145,55 @@ class MemoryManager:
             result = await session.execute(stmt)
             records = result.scalars().all()
             return sorted(records, key=lambda r: r.turn_number) # 返回正序
-
-    async def build_prompt_context(self, query: str) -> str:
-        """
-        构建完整的 Prompt Context
-        """
-        # 1. 获取 RAG 知识 - 使用 KnowledgeService 获得更好的检索质量
-        rag_context = ""
+    
+    async def build_prompt_context(self, query: str) -> Dict[str, str]:
+        """为 Narrator 构建三段式上下文"""
+        knowledge_service = self._get_knowledge_service()
+        
+        # 单次检索，要求结构化输出
         try:
-            # 使用 lore_keeper 人设模板，让检索结果更有氛围感
-            # 启用智能模式选择，自动选择最佳检索模式
-            knowledge_service = self._get_knowledge_service()
-            rag_context = await knowledge_service.search(
+            full_response = await knowledge_service.search(
                 query=query,
                 mode="hybrid",
                 smart_mode=True,
-                persona="lore_keeper",
-                top_k=5
+                persona="kp_context",
+                top_k=50
             )
         except Exception as e:
-            logger.error(f"Failed to query knowledge service: {e}")
-        
-        # 2. 获取最近对话 (Runtime Window)
-        # 策略：获取最近 N 轮，无论是否固化
-        recent_records = await self.get_recent_context(limit=10) 
-        recent_context = "\n".join([f"{r.role}: {r.content}" for r in recent_records])
-        
-        # 3. 组装
-        context = f"""
-[World Knowledge]
-{rag_context}
+            logger.error(f"Retrieval failed: {e}")
+            full_response = ""
 
-[Recent Context]
-{recent_context}
-"""
+        # 解析输出
+        context = {
+            "semantic": "",
+            "episodic": "",
+            "keeper_notes": ""
+        }
+        
+        # 简单解析器
+        current_section = None
+        lines = full_response.split('\n')
+        sections = {"lore": [], "memory": [], "secret": []}
+        
+        for line in lines:
+            stripped = line.strip()
+            # 兼容有些模型可能输出 ## [Lore] 或者 **[Lore]**
+            if "[Lore]" in stripped and ("#" in stripped or "**" in stripped):
+                current_section = "lore"
+                continue
+            elif "[Memory]" in stripped and ("#" in stripped or "**" in stripped):
+                current_section = "memory"
+                continue
+            elif "[Secret]" in stripped and ("#" in stripped or "**" in stripped):
+                current_section = "secret"
+                continue
+            
+            if current_section and stripped:
+                sections[current_section].append(line)
+        
+        context["semantic"] = "\n".join(sections["lore"]).strip() or "暂无相关设定。"
+        context["episodic"] = "\n".join(sections["memory"]).strip() or "暂无相关记忆。"
+        # Keeper notes can be empty
+        context["keeper_notes"] = "\n".join(sections["secret"]).strip() or ""
+        
         return context
