@@ -2,12 +2,12 @@
 规则查询服务
 提供 COC7th 规则数据的查询接口，与世界数据隔离
 """
-from typing import Optional, Dict, Any, Literal
-from lightrag import LightRAG, QueryParam
-from ..memory.storage import get_rules_storage_config
+from typing import Optional, Dict, Any, Literal, TYPE_CHECKING
+if TYPE_CHECKING: # 编译运行时会跳过这行，这行只是给IDE用
+    from ..memory.RAG_engine import RAGEngine
+
 from ..memory.database import rules_db_manager
-from ..core import get_logger, get_settings
-from ..llm import create_llm_model_func, create_embedding_func
+from ..core import get_logger
 
 logger = get_logger(__name__)
 
@@ -15,15 +15,13 @@ logger = get_logger(__name__)
 class RuleService:
     """
     规则查询服务
-    - 使用 rules workspace（跨世界共享）
-    - 使用 RAGEngine 统一管理
-    - 与世界数据完全隔离
-    - 所有世界都可以访问相同的规则数据
+    使用 rules workspace
+    与世界数据完全隔离
+    所有世界都可以访问相同的规则数据
     """
     
     def __init__(self, llm_tier: str = "standard"):
-        self._rag: Optional[LightRAG] = None
-        self._initialized = False
+        self._engine: Optional["RAGEngine"] = None
         self.llm_tier = llm_tier
     
     async def _ensure_initialized(self):
@@ -33,16 +31,19 @@ class RuleService:
         
         logger.info(f"初始化规则数据 RAG 引擎 (llm_tier={self.llm_tier})...")
         
+        # 延迟导入避免循环依赖
+        from ..memory.RAG_engine import RAGEngine
+        
         # 使用 RAGEngine 获取 rules domain 的实例
         self._engine = await RAGEngine.get_instance(
-            domain="rules",  # 关键：使用 rules domain，对应 workspace="rules"
+            domain="rules",
             llm_tier=self.llm_tier
         )
         
         logger.info("规则数据 RAG 引擎初始化完成")
     
     @property
-    def engine(self) -> RAGEngine:
+    def engine(self) -> "RAGEngine":
         """获取 RAG 引擎实例（同步属性，仅用于已初始化的场景）"""
         if self._engine is None:
             raise RuntimeError("RuleService 未初始化，请先调用 await rule_service._ensure_initialized()")
@@ -57,12 +58,8 @@ class RuleService:
     ) -> str:
         """
         查询 COC7th 规则
-        
-        Args:
-            question: 查询问题
-            mode: 查询模式 (hybrid/naive/local/global/mix)
-            top_k: 返回 top_k 个结果
-            user_prompt: 自定义提示词（可选）
+        mode: 查询模式 (hybrid/naive/local/global/mix)
+        user_prompt: 自定义提示词（可选）
         """
         await self._ensure_initialized()
         logger.info(f"查询规则: {question} (mode={mode})")
@@ -88,11 +85,11 @@ class RuleService:
         try:
             success = await self.engine.insert(content)
             if success:
-                logger.info(f"✓ 规则文档插入成功")
+                logger.info(f"规则文档插入成功")
             else:
-                logger.error(f"✗ 规则文档插入失败")
+                logger.error(f"规则文档插入失败")
         except Exception as e:
-            logger.error(f"✗ 规则文档插入失败: {e}")
+            logger.error(f"规则文档插入失败: {e}")
             raise
     
     async def insert_batch(self, contents: list[str]) -> int:
