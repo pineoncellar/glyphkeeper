@@ -44,16 +44,18 @@ class DatabaseManager:
                 get_db_url(), 
                 echo=settings.project.debug,
                 # 连接池配置，避免长时间操作时连接超时
-                pool_size=10,  # 连接池大小
-                max_overflow=20,  # 最大溢出连接数
+                pool_size=5,  # 连接池大小（减少以避免连接过多）
+                max_overflow=10,  # 最大溢出连接数
                 pool_pre_ping=True,  # 检查连接是否有效
-                pool_recycle=3600,  # 连接回收时间（秒）
+                pool_recycle=1800,  # 连接回收时间（秒）- 30分钟
+                pool_timeout=30,  # 从池获取连接的超时时间
                 connect_args={
                     "server_settings": {
                         "search_path": f"{world_schema},public"
                     },
-                    "timeout": 30,  # 连接超时
-                    "command_timeout": 60,  # 命令超时
+                    "timeout": 30,  # 连接超时（秒）
+                    "command_timeout": 120,  # 命令超时（秒）- 适应LLM长时间操作
+                    "ssl": "prefer",  # SSL 模式：优先使用SSL，但如果不可用则降级
                 }
             )
         return self._engine
