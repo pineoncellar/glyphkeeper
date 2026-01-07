@@ -53,8 +53,18 @@ class StorageConfig(BaseModel):
     ] = Field(default="JsonDocStorage", description="文档存储类型")
 
 
-def get_storage_config(working_dir: Optional[str] = None, schema: str = "public") -> Dict[str, Any]:
-    """获取存储配置字典，供 Core 层初始化 LightRAG 使用"""
+def get_storage_config(
+    working_dir: Optional[str] = None,
+    schema: str = "public",
+    workspace: Optional[str] = None
+) -> Dict[str, Any]:
+    """获取存储配置字典，供 Core 层初始化 LightRAG 使用
+    
+    Args:
+        working_dir: LightRAG 工作目录
+        schema: PostgreSQL schema 名称（虽然使用 workspace 隔离，但仍可指定 schema）
+        workspace: LightRAG workspace 名称，用于数据隔离（推荐用世界名称）
+    """
     if working_dir is None:
         working_dir = str(PROJECT_ROOT / "data" / "modules")
     
@@ -80,6 +90,11 @@ def get_storage_config(working_dir: Optional[str] = None, schema: str = "public"
             "use_jsonb": True
         }
     }
+    
+    # 添加 workspace 参数实现数据隔离
+    if workspace:
+        config["workspace"] = workspace
+        logger.info(f"使用 workspace 进行数据隔离: {workspace}")
 
     return config
 
@@ -88,21 +103,22 @@ def get_rules_storage_config() -> Dict[str, Any]:
     """
     获取规则数据专用存储配置
     用于存储跨世界的COC7th规则书
-    - Schema: coc7th_rules（独立）
+    - Workspace: rules（数据隔离）
     - 工作目录: data/rules（独立图谱文件）
-    - 与世界数据完全隔离，便于版本管理和共享
+    - 与世界数据通过 workspace 字段完全隔离，便于版本管理和共享
     """
     working_dir = str(PROJECT_ROOT / "data" / "rules")
     
     # 确保工作目录存在
     Path(working_dir).mkdir(parents=True, exist_ok=True)
     
-    # 使用独立的 schema 和 LightRAG 工作目录
-    db_url = get_postgres_url(schema="coc7th_rules")
+    # 使用 public schema + workspace 隔离
+    db_url = get_postgres_url(schema="public")
     settings = get_settings()
     
     config = {
         "working_dir": working_dir,
+        "workspace": "rules",  # 使用 workspace 隔离规则数据
         "graph_storage": "NetworkXStorage",
         "vector_storage": "PGVectorStorage",
         "vector_db_storage_cls_kwargs": {
@@ -117,7 +133,7 @@ def get_rules_storage_config() -> Dict[str, Any]:
         }
     }
     
-    logger.info(f"规则数据存储配置: schema=coc7th_rules, working_dir={working_dir}")
+    logger.info(f"规则数据存储配置: schema=rules, working_dir={working_dir}")
     return config
 
 

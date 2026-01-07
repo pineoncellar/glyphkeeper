@@ -47,7 +47,10 @@ class RAGEngine:
         llm_tier: str = "standard",
         force_reinit: bool = False # 是否强制初始化
     ) -> "RAGEngine":
-        """获取 RAG 引擎实例"""
+        """
+        获取 RAG 引擎实例
+        domain: "world" 或 "rules"
+        """
         async with cls._lock:
             if domain not in cls._instances or force_reinit:
                 cls._instances[domain] = cls(domain)
@@ -68,32 +71,26 @@ class RAGEngine:
         settings = get_settings()
         data_dir = PROJECT_ROOT / "data"
         
-        # 确定工作目录和数据库 Schema
+        # 确定工作目录和 workspace
         if self.domain == "rules":
             working_dir = data_dir / "rules"
-            schema = "rag_rules"
+            workspace = "rules"
         else:
             # world domain
             active_world = settings.project.active_world
             working_dir = data_dir / "worlds" / active_world
-            schema = f"world_{active_world}"
+            workspace = active_world  # 使用世界名称作为 workspace
 
         # 确保目录存在
         working_dir.mkdir(parents=True, exist_ok=True)
         (data_dir / "raw_sources").mkdir(parents=True, exist_ok=True)
         (data_dir / "intermediate").mkdir(parents=True, exist_ok=True)
-        
-        # 确保 Schema 存在
-        try:
-            async with db_manager.engine.begin() as conn:
-                await conn.execute(text(f"CREATE SCHEMA IF NOT EXISTS {schema}"))
-        except Exception as e:
-            logger.warning(f"尝试创建 Schema {schema} 失败 (可能已存在或权限不足): {e}")
 
-        # 获取存储配置
+        # 获取存储配置（使用 workspace 进行数据隔离）
         storage_config = get_storage_config(
             working_dir=str(working_dir),
-            schema=schema
+            schema="public",  # 统一使用 public schema
+            workspace=workspace  # 通过 workspace 隔离不同世界的数据
         )
         
         # 设置环境变量,满足 LightRAG 对 PGKVStorage 的要求

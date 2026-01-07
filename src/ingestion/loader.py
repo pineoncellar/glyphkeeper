@@ -78,7 +78,13 @@ class ModuleLoader:
             Related Tags: {', '.join(k.get('tags_granted', []))}
             """
             # 这里的 insert 是向 LightRAG 插入文档
-            await self.rag.insert(doc_text)
+            try:
+                await self.rag.insert(doc_text)
+                # 刷新 session 避免连接过期
+                await self.db.execute(select(1))
+            except Exception as e:
+                logger.error(f"RAG 插入失败 (knowledge: {rag_key}): {e}")
+                raise
 
     async def _ingest_location(self, loc_data: Dict[str, Any]):
         # 左脑：物理结构
@@ -105,7 +111,13 @@ class ModuleLoader:
         # 将 UUID 拼接到文本中，以便检索时能关联
         rag_text += f"\nDB_UUID: {str(loc_db.id)}"
         
-        await self.rag.insert(rag_text)
+        try:
+            await self.rag.insert(rag_text)
+            # 刷新 session 避免连接过期
+            await self.db.execute(select(1))
+        except Exception as e:
+            logger.error(f"RAG 插入失败 (location: {loc_data['name']}): {e}")
+            raise
         
         # 处理物体
         for item in loc_data.get('interactables', []):
@@ -158,7 +170,13 @@ class ModuleLoader:
             for d in dialogues:
                 role_play_text += f"- {d.get('flavor_text')}\n"
 
-        await self.rag.insert(role_play_text)
+        try:
+            await self.rag.insert(role_play_text)
+            # 刷新 session 避免连接过期
+            await self.db.execute(select(1))
+        except Exception as e:
+            logger.error(f"RAG 插入失败 (entity: {entity_data['name']}): {e}")
+            raise
 
         # 处理线索 (对话)
         for clue in dialogues:
@@ -207,15 +225,20 @@ async def load_module_from_json(file_path: Union[str, Path]):
         logger.error(f"读取 JSON 失败: {e}")
         return False
 
-    db_manager = DatabaseManager()
+    logger.info("初始化 RAG 引擎...")
     rag_engine = await get_rag_engine()
-
-    # 确保数据库连接已初始化
-    _ = db_manager.engine
-
+    
+    # 使用独立的数据库 session
+    db_manager = DatabaseManager()
+    _ = db_manager.engine  # 确保连接池已创建
+    
     async_session_factory = db_manager.session_factory
-        
+    
+    # 使用 expire_on_commit=False 避免 session 关闭后无法访问对象
     async with async_session_factory() as session:
+        # 设置较长的超时时间
+        await session.execute(select(1))  # 预热连接
+        
         loader = ModuleLoader(session, rag_engine)
         try:
             await loader.ingest_module(data)
@@ -225,6 +248,8 @@ async def load_module_from_json(file_path: Union[str, Path]):
         except Exception as e:
             await session.rollback()
             logger.error(f"模组摄入失败，回滚事务: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
             return False
 
 

@@ -43,10 +43,17 @@ class DatabaseManager:
             self._engine = create_async_engine(
                 get_db_url(), 
                 echo=settings.project.debug,
+                # 连接池配置，避免长时间操作时连接超时
+                pool_size=10,  # 连接池大小
+                max_overflow=20,  # 最大溢出连接数
+                pool_pre_ping=True,  # 检查连接是否有效
+                pool_recycle=3600,  # 连接回收时间（秒）
                 connect_args={
                     "server_settings": {
                         "search_path": f"{world_schema},public"
-                    }
+                    },
+                    "timeout": 30,  # 连接超时
+                    "command_timeout": 60,  # 命令超时
                 }
             )
         return self._engine
