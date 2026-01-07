@@ -131,9 +131,8 @@ class Archivist:
                 interactables_info.append({
                     "name": item.name,
                     "key": item.key,
-                    "short_desc": item.short_desc,
-                    "tags": item.tags or [],
-                    "visible": item.visible
+                    "state": item.state,
+                    "tags": item.tags or []
                 })
             
             # 获取当前地点的所有其他实体（NPC 或其他角色）
