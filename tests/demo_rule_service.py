@@ -1,6 +1,6 @@
 """
 规则查询服务使用示例
-演示如何使用独立的规则数据库和 LightRAG 实例
+演示如何使用 rules workspace（跨世界共享）
 """
 import asyncio
 import sys
@@ -103,21 +103,21 @@ async def demo_comparison():
     
     print(f"\n问题: {question}\n")
     
-    print("【世界数据】查询 (world_{active_world} schema):")
+    print(f"【世界数据】查询 (workspace={active_world}):")
     try:
         world_answer = await world_rag.query(question, mode="hybrid")
         print(f"答案: {world_answer}\n")
     except Exception as e:
         print(f"查询失败: {e}\n")
     
-    print("【规则数据】查询 (coc7th_rules schema):")
+    print("【规则数据】查询 (workspace=rules，跨世界共享):")
     try:
         rule_answer = await rule_service.query_rule(question)
         print(f"答案: {rule_answer}\n")
     except Exception as e:
         print(f"查询失败: {e}\n")
     
-    print("两个数据源完全独立，互不影响！")
+    print("两个 workspace 完全独立，互不影响！")
     print("=" * 60)
 
 
@@ -132,14 +132,14 @@ async def main():
 if __name__ == "__main__":
     print("""
     使用前准备:
-    1. 运行 python scripts/init_rules_db.py 初始化规则 schema
+    1. 确保已有规则数据（使用 workspace=rules）
     2. 准备 COC7th 规则文档 (PDF/TXT/JSON)
     3. 使用 scripts/ingest_rules.py 导入规则数据
     
     运行示例：
     - demo_rule_query(): 查询规则
     - demo_insert_rule(): 插入规则文档
-    - demo_comparison(): 演示数据隔离
+    - demo_comparison(): 演示 workspace 隔离
     """)
     
     # 在同一个 event loop 中运行所有演示（避免 event loop 错误）

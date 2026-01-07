@@ -15,10 +15,10 @@ logger = get_logger(__name__)
 class RuleService:
     """
     规则查询服务
-    - 使用独立的 coc7th_rules schema
-    - 使用独立的 LightRAG 实例和图谱文件
+    - 使用 rules workspace（跨世界共享）
+    - 使用 RAGEngine 统一管理
     - 与世界数据完全隔离
-    - 目前只存进light rag，没往数据库存
+    - 所有世界都可以访问相同的规则数据
     """
     
     def __init__(self, llm_tier: str = "standard"):
@@ -28,57 +28,25 @@ class RuleService:
     
     async def _ensure_initialized(self):
         """确保 RAG 引擎已初始化（异步）"""
-        if self._initialized:
+        if self._engine is not None:
             return
         
-        logger.info(f"初始化规则数据 LightRAG 实例 (llm_tier={self.llm_tier})...")
+        logger.info(f"初始化规则数据 RAG 引擎 (llm_tier={self.llm_tier})...")
         
-        # 获取存储配置
-        config = get_rules_storage_config()
-        
-        # 获取设置
-        settings = get_settings()
-        
-        # 设置环境变量（与 RAG_engine 相同）
-        import os
-        db_config = settings.database
-        os.environ["POSTGRES_USER"] = db_config.username or "postgres"
-        os.environ["POSTGRES_PASSWORD"] = db_config.password or ""
-        os.environ["POSTGRES_DATABASE"] = db_config.project_name or "postgres"
-        os.environ["POSTGRES_HOST"] = db_config.host
-        os.environ["POSTGRES_PORT"] = db_config.port or "5432"
-        
-        # 创建 LLM 和 Embedding 函数（与 RAG_engine 相同）
-        llm_func = create_llm_model_func(tier=self.llm_tier)
-        
-        vector_config = settings.vector_store
-        logger.debug(f"使用的向量存储配置: provider={vector_config.provider}, model={vector_config.embedding_model_name}, dim={vector_config.embedding_dim}")
-        embedding_func = create_embedding_func(
-            model_name=vector_config.embedding_model_name,
-            embedding_dim=vector_config.embedding_dim,
-            max_token_size=8192,
-            provider=vector_config.provider
+        # 使用 RAGEngine 获取 rules domain 的实例
+        self._engine = await RAGEngine.get_instance(
+            domain="rules",  # 关键：使用 rules domain，对应 workspace="rules"
+            llm_tier=self.llm_tier
         )
         
-        # 初始化 LightRAG
-        self._rag = LightRAG(
-            llm_model_func=llm_func,
-            embedding_func=embedding_func,
-            **config
-        )
-        
-        # 关键：初始化存储连接（异步）
-        await self._rag.initialize_storages()
-        
-        self._initialized = True
-        logger.info(f"规则数据 LightRAG 初始化完成: {config['working_dir']}")
+        logger.info("规则数据 RAG 引擎初始化完成")
     
     @property
-    def rag(self) -> LightRAG:
-        """获取 RAG 实例（同步属性，仅用于已初始化的场景）"""
-        if self._rag is None:
+    def engine(self) -> RAGEngine:
+        """获取 RAG 引擎实例（同步属性，仅用于已初始化的场景）"""
+        if self._engine is None:
             raise RuntimeError("RuleService 未初始化，请先调用 await rule_service._ensure_initialized()")
-        return self._rag
+        return self._engine
     
     async def query_rule(
         self, 
@@ -100,17 +68,12 @@ class RuleService:
         logger.info(f"查询规则: {question} (mode={mode})")
         
         try:
-            # 构建查询参数
-            param = QueryParam(
+            result = await self.engine.query(
+                question=question,
                 mode=mode,
-                top_k=top_k
+                top_k=top_k,
+                user_prompt=user_prompt
             )
-            
-            # 如果有自定义提示词，设置到参数中
-            if user_prompt:
-                param.user_prompt = user_prompt
-            
-            result = await self.rag.aquery(question, param=param)
             logger.debug(f"规则查询成功")
             return result
         except Exception as e:
@@ -123,8 +86,11 @@ class RuleService:
         logger.info(f"插入规则文档 (doc_id={doc_id}, 长度={len(content)})")
         
         try:
-            await self.rag.ainsert(content)
-            logger.info(f"✓ 规则文档插入成功")
+            success = await self.engine.insert(content)
+            if success:
+                logger.info(f"✓ 规则文档插入成功")
+            else:
+                logger.error(f"✗ 规则文档插入失败")
         except Exception as e:
             logger.error(f"✗ 规则文档插入失败: {e}")
             raise
@@ -134,34 +100,25 @@ class RuleService:
         await self._ensure_initialized()
         logger.info(f"批量插入规则文档: {len(contents)} 个")
         
-        success_count = 0
-        for i, content in enumerate(contents, 1):
-            try:
-                await self.rag.ainsert(content)
-                success_count += 1
-                logger.debug(f"✓ 批量插入进度: {i}/{len(contents)}")
-            except Exception as e:
-                logger.error(f"✗ 批量插入第 {i} 个文档失败: {e}")
-        
+        success_count = await self.engine.insert_batch(contents)
         logger.info(f"批量插入完成: {success_count}/{len(contents)}")
         return success_count
     
     async def close(self):
         """关闭 RAG 引擎，释放资源"""
-        if self._rag is not None:
+        if self._engine is not None:
             try:
-                await self._rag.finalize_storages()
+                await self._engine.close()
                 logger.info("规则 RAG 引擎已关闭")
             except Exception as e:
                 logger.error(f"关闭规则 RAG 引擎失败: {e}")
         
-        self._initialized = False
-        self._rag = None
+        self._engine = None
     
     @property
     def is_initialized(self) -> bool:
         """检查引擎是否已初始化"""
-        return self._initialized
+        return self._engine is not None
     
     def get_db_session(self):
         """获取规则数据库会话"""
@@ -172,10 +129,10 @@ class RuleService:
         await self._ensure_initialized()
         
         health = {
-            "initialized": self._initialized,
-            "rag_available": self._rag is not None,
+            "initialized": self.is_initialized,
+            "rag_available": self._engine is not None and self._engine.is_initialized,
             "db_available": False,
-            "schema": "coc7th_rules"
+            "workspace": "rules"
         }
         
         # 检查数据库连接

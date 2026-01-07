@@ -101,7 +101,9 @@ def get_storage_config(
 
 def get_rules_storage_config() -> Dict[str, Any]:
     """
-    获取规则数据专用存储配置
+    获取规则数据专用存储配置（已弃用，保留用于兼容）
+    推荐使用 RAGEngine.get_instance(domain="rules") 替代。
+    
     用于存储跨世界的COC7th规则书
     - Workspace: rules（数据隔离）
     - 工作目录: data/rules（独立图谱文件）
@@ -133,7 +135,7 @@ def get_rules_storage_config() -> Dict[str, Any]:
         }
     }
     
-    logger.info(f"规则数据存储配置: schema=rules, working_dir={working_dir}")
+    logger.info(f"规则数据存储配置: workspace=rules, working_dir={working_dir}")
     return config
 
 
