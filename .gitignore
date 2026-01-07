@@ -23,5 +23,6 @@ data/
 # test file
 test.py
 
-# 
+# tmp files
+tmp/
 scripts/graph_preview.png
