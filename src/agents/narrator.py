@@ -5,6 +5,8 @@ Narrator Agent - 基于融合架构的叙事引擎
 2. 通过 ReAct 模式调用 Archivist 工具和 RuleKeeper 工具
 3. 生成沉浸式的克苏鲁风格叙事
 4. 管理记忆的读写
+
+TODO: 开幕描写、结团判断与描写
 """
 import json
 import asyncio
@@ -58,7 +60,7 @@ class Narrator:
             with open(self.trace_log_path, "a", encoding="utf-8") as f:
                 f.write(json.dumps(record, ensure_ascii=False) + "\n")
         except Exception as e:
-            logger.warning(f"写入 LLM trace 失败: {e}")
+            logger.error(f"写入 LLM trace 失败: {e}")
 
     async def _get_game_stat(self, session_id: str, player_name: str) -> Dict[str, Any]:
         """获取当前游戏状态"""
@@ -71,7 +73,7 @@ class Narrator:
                 active_global_tags = game_session_stat.get("active_global_tags", [])
                 beat_counter = game_session_stat.get("beat_counter", 0) if game_session_stat.get("beat_counter", 0) >=5  else 0
             else:
-                logger.warning(f"无法获取全局状态信息: {game_session_stat}")
+                logger.error(f"无法获取全局状态信息: {game_session_stat}")
                 return self._default_game_state()
             
             # 获取调查员名称列表
@@ -79,7 +81,7 @@ class Narrator:
             if investigator_list_stat.get("ok"):
                 global_investigator_list = investigator_list_stat.get("investigators", [])
             else:
-                logger.warning(f"无法获取调查员列表: {investigator_list_stat}")
+                logger.error(f"无法获取调查员列表: {investigator_list_stat}")
                 global_investigator_list = []
             
             # 获取地点状态
@@ -87,7 +89,7 @@ class Narrator:
             if location_stat.get("ok"):
                 location_stat.pop("ok")
             else:
-                logger.warning(f"无法获取地点状态信息: {location_stat}")
+                logger.error(f"无法获取地点状态信息: {location_stat}")
                 location_stat = {
                     "location_name": "Unknown", 
                     "description": "你在一片虚空之中。", 
@@ -342,13 +344,54 @@ class Narrator:
 
         # 第二轮调用（不再传 tools，避免无限循环）
         final_narrative = ""
+        buffer = ""
+        in_narrative = False
+        has_output_started = False
+        
         async for chunk in self.llm.chat(messages, tools=None):
             if isinstance(chunk, str):
                 final_narrative += chunk
-                yield chunk
+                buffer += chunk
+                
+                # 检测 <narrative> 开始标签
+                if not in_narrative and "<narrative>" in buffer:
+                    in_narrative = True
+                    # 输出 <narrative> 之后的内容
+                    idx = buffer.find("<narrative>") + len("<narrative>")
+                    content_after_tag = buffer[idx:]
+                    if content_after_tag.strip():
+                        yield content_after_tag
+                        has_output_started = True
+                    buffer = ""  # 清空缓冲区
+                    continue
+                
+                # 检测 </narrative> 结束标签
+                if in_narrative and "</narrative>" in buffer:
+                    # 输出 </narrative> 之前的内容
+                    idx = buffer.find("</narrative>")
+                    content_before_tag = buffer[:idx]
+                    if content_before_tag.strip():
+                        yield content_before_tag
+                    break
+                
+                # 在 narrative 标签内，流式输出内容
+                if in_narrative:
+                    yield chunk
+                    has_output_started = True
+        
+        # 提取清理后的叙事用于记录
+        clean_narrative = final_narrative
+        if "<narrative>" in final_narrative and "</narrative>" in final_narrative:
+            start = final_narrative.find("<narrative>") + len("<narrative>")
+            end = final_narrative.find("</narrative>")
+            clean_narrative = final_narrative[start:end].strip()
+        
+        # 如果没有输出任何内容（说明 LLM 没有按格式输出），则输出全部
+        if not has_output_started and clean_narrative:
+            yield "\n" + clean_narrative + "\n"
 
         # 记录最终叙事到记忆
-        await self.memory.add_dialogue("assistant", final_narrative)
+        await self.memory.add_dialogue("assistant", clean_narrative)
         self._log_llm_trace(
             trace_id,
             "llm_session_complete",
