@@ -91,31 +91,49 @@ class MemoryManager:
 
         logger.info(f"正在固化 {len(buffer)} 条记录。")
 
-        # 总结
+        # 总结 - 使用更严格的 prompt 控制输出格式
         text_to_summarize = "\n".join([f"{r.role}: {r.content}" for r in buffer])
-        prompt = f"请总结以下跑团对话，提取关键线索与决策，保持简洁：\n\n{text_to_summarize}"
+        prompt = f"""请用一段简洁的第三人称叙述总结以下跑团对话（不超过100字）。
+
+要求：
+1. 只描述发生了什么事实和玩家的行动
+2. 不要使用 XML 标签、markdown 格式或列表
+3. 不要分析或评论，只陈述事实
+4. 使用第三人称（"调查员..."、"艾德薇诗..."）
+
+对话内容：
+{text_to_summarize}
+
+总结："""
         
-        summary = await self._get_llm_response(prompt)
+        raw_summary = await self._get_llm_response(prompt)
         
-        # 存储 MemoryTrace
+        # 清理 summary：移除可能的格式化内容
+        clean_summary = self._clean_summary(raw_summary)
+        
+        # 存储 MemoryTrace（保存原始总结以便审计）
         start_turn = buffer[0].turn_number
         end_turn = buffer[-1].turn_number
         
         trace = MemoryTrace(
-            summary=summary,
+            summary=raw_summary,  # 保存原始内容
             start_turn=start_turn,
             end_turn=end_turn,
             tags=["consolidated_dialogue"]
         )
         session.add(trace)
         
-        # 存储 LightRAG
-        engine = await self._get_rag_engine()
-        try:
-            # 注意：RAGEngine.insert 目前忽略 metadata，但接口保留以备未来扩展
-            await engine.insert(summary, metadata={"start_turn": start_turn, "end_turn": end_turn})
-        except Exception as e:
-            logger.error(f"插入 LightRAG 失败: {e}")
+        # 存储 LightRAG（只存储清理后的简洁内容）
+        if len(clean_summary) > 20:
+            engine = await self._get_rag_engine()
+            try:
+                logger.debug(f"准备插入 LightRAG: {len(clean_summary)} 字符")
+                await engine.insert(clean_summary, metadata={"start_turn": start_turn, "end_turn": end_turn})
+                logger.debug("LightRAG 插入完成")
+            except Exception as e:
+                logger.error(f"插入 LightRAG 失败: {e}")
+        else:
+            logger.warning(f"清理后的 summary 过短({len(clean_summary)}字)，跳过 LightRAG 插入")
         
         # 标记已固化
         record_ids = [r.id for r in buffer]
@@ -123,6 +141,55 @@ class MemoryManager:
         await session.execute(stmt)
         await session.commit()
         logger.info("固化完成。")
+    
+    def _clean_summary(self, text: str) -> str:
+        """清理总结文本，移除格式化标记和冗余内容"""
+        clean = text.strip()
+        
+        # 移除 thinking 标签及其内容
+        if "<thinking>" in clean:
+            thinking_end = clean.find("</thinking>")
+            if thinking_end != -1:
+                clean = clean[thinking_end + len("</thinking>"):].strip()
+        
+        # 提取 narrative 标签内容
+        if "<narrative>" in clean and "</narrative>" in clean:
+            start = clean.find("<narrative>") + len("<narrative>")
+            end = clean.find("</narrative>")
+            clean = clean[start:end].strip()
+        
+        # 移除其他 XML 标签
+        import re
+        clean = re.sub(r'<[^>]+>', '', clean)
+        
+        # 移除 markdown 格式化（**粗体**、## 标题等）
+        clean = re.sub(r'\*\*([^*]+)\*\*', r'\1', clean)  # **text** -> text
+        clean = re.sub(r'^#+\s+', '', clean, flags=re.MULTILINE)  # ## Title -> Title
+        
+        # 移除列表标记和格式化部分
+        lines = clean.split('\n')
+        narrative_lines = []
+        for line in lines:
+            line = line.strip()
+            # 跳过空行、列表项、明显的格式化标题
+            if not line:
+                continue
+            if line.startswith('-') or line.startswith('*') or line.startswith('•'):
+                continue
+            if line.startswith('**') or line.endswith('**'):
+                continue
+            if any(marker in line for marker in ['关键线索', '玩家决策', '当前状态', '环境细节']):
+                continue
+            narrative_lines.append(line)
+        
+        # 只保留前5行叙事内容
+        clean = ' '.join(narrative_lines[:5])
+        
+        # 确保长度合理（100-500字之间）
+        if len(clean) > 500:
+            clean = clean[:497] + "..."
+        
+        return clean.strip()
 
     async def _get_llm_response(self, prompt: str) -> str:
         """辅助函数：获取 LLM 完整响应"""
