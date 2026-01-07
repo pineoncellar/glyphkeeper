@@ -3,12 +3,14 @@ LightRAG 模型层封装
 将 OpenAI/Ollama/HuggingFace 的 API 调用逻辑与业务逻辑分离
 适配 LightRAG 的 llm_model_func 和 embedding_func 接口
 """
+import time
 import numpy as np
 from typing import Optional, List
 from lightrag.llm.openai import openai_complete_if_cache, openai_embed
 from lightrag.utils import EmbeddingFunc
 
 from ..core import get_logger, get_settings
+from ..utils import track_tokens
 from .llm_base import Message
 
 logger = get_logger(__name__)
@@ -26,6 +28,7 @@ def create_llm_model_func(tier: str = "standard"):
         **kwargs
     ) -> str:
         """LightRAG 兼容的 LLM 调用函数"""
+        start_time = time.perf_counter()
         logger.debug(f"LLM 调用: model={model_config.model_name}, tier={tier}")
         payload_history = history_messages or []
         
@@ -39,6 +42,27 @@ def create_llm_model_func(tier: str = "standard"):
                 base_url=provider_config.base_url,
                 **kwargs
             )
+            
+            # 估算 token 用量 (LightRAG 不返回 usage 信息)
+            prompt_text = f"{system_prompt or ''}\n{prompt}\n" + "\n".join(
+                f"{m.get('role', '')}: {m.get('content', '')}" for m in payload_history
+            )
+            prompt_tokens = max(1, (len(prompt_text) + 3) // 4)
+            completion_tokens = max(1, (len(result) + 3) // 4)
+            
+            # 记录用量
+            try:
+                track_tokens(
+                    model=model_config.model_name,
+                    prompt_tokens=prompt_tokens,
+                    completion_tokens=completion_tokens,
+                    operation="lightrag_llm",
+                )
+                elapsed_ms = int((time.perf_counter() - start_time) * 1000)
+                logger.debug(f"已记录 LightRAG LLM 用量: model={model_config.model_name}, elapsed_ms={elapsed_ms}")
+            except Exception as log_err:
+                logger.warning(f"记录模型用量失败: {log_err}")
+            
             return result
         except Exception as e:
             error_msg = f"LLM 调用失败 [{model_config.model_name}]: {e}"
@@ -71,6 +95,7 @@ def create_embedding_func(
     
     async def embedding_func(texts: List[str]) -> np.ndarray:
         """LightRAG 兼容的 Embedding 函数"""
+        start_time = time.perf_counter()
         logger.debug(f"texts:{texts}")
         logger.debug(f"Embedding 调用: model={model_name}, texts_count={len(texts)}")
         
@@ -81,6 +106,24 @@ def create_embedding_func(
                 api_key=provider_config.api_key,
                 base_url=provider_config.base_url,
             )
+            
+            # 估算 token 用量
+            total_text = " ".join(texts)
+            prompt_tokens = max(1, (len(total_text) + 3) // 4)
+            
+            # 记录用量 (embedding 没有 completion tokens)
+            try:
+                track_tokens(
+                    model=model_name,
+                    prompt_tokens=prompt_tokens,
+                    completion_tokens=0,
+                    operation="lightrag_embedding",
+                )
+                elapsed_ms = int((time.perf_counter() - start_time) * 1000)
+                logger.debug(f"已记录 LightRAG Embedding 用量: model={model_name}, elapsed_ms={elapsed_ms}")
+            except Exception as log_err:
+                logger.warning(f"记录 Embedding 用量失败: {log_err}")
+            
             return result
         except Exception as e:
             logger.error(f"Embedding 调用失败: {e}")
