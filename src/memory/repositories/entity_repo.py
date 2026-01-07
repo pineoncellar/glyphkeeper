@@ -37,6 +37,13 @@ class EntityRepository(TaggableRepository[Entity]):
         )
         return result.scalar_one_or_none()
 
+    async def get_by_key(self, key: str) -> Optional[Entity]:
+        """根据 key 获取实体"""
+        if not key:
+            return None
+        result = await self.session.execute(select(Entity).where(Entity.key == key))
+        return result.scalar_one_or_none()
+
     async def update_location(self, entity_id: UUID, location_id: UUID) -> Optional[Entity]:
         """更新实体的位置"""
         entity = await self.get_by_id(entity_id)
@@ -70,6 +77,15 @@ class EntityRepository(TaggableRepository[Entity]):
             await self.session.refresh(entity)
         
         return entity
+    
+    async def get_by_location(self, location_id: UUID) -> List[Entity]:
+        """获取指定地点的所有实体"""
+        if not location_id:
+            return []
+        result = await self.session.execute(
+            select(Entity).where(Entity.location_id == location_id)
+        )
+        return result.scalars().all()
     
     async def get_by_name(self, name: str) -> Optional[Entity]:
         """
