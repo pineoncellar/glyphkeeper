@@ -78,7 +78,7 @@ class RAGEngine:
         else:
             # world domain
             active_world = settings.project.active_world
-            working_dir = data_dir / "worlds" / active_world
+            working_dir = data_dir / "worlds"
             workspace = active_world  # 使用世界名称作为 workspace
 
         # 确保目录存在
