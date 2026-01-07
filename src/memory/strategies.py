@@ -29,7 +29,7 @@ class ConsolidationStrategy(ABC):
 
 class TokenCountStrategy(ConsolidationStrategy):
     """基于 Token 数量的硬触发策略"""
-    def __init__(self, max_tokens: int = 2000):
+    def __init__(self, max_tokens: int = 100000):
         self.max_tokens = max_tokens
 
     def _count_tokens(self, text: str) -> int:
