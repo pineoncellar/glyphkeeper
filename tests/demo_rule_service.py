@@ -11,6 +11,7 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from src.memory import get_rule_service
+from src.core import get_logger, get_settings
 
 
 async def demo_rule_query():
@@ -91,6 +92,9 @@ async def demo_comparison():
     print("=" * 60)
     print("数据隔离演示")
     print("=" * 60)
+
+    settings = get_settings()
+    active_world = settings.project.active_world
     
     # 世界数据 (使用原有的 RAG)
     from src.memory import get_rag_engine
