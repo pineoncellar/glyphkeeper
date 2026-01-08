@@ -110,9 +110,11 @@ async def run_interactive_session():
                 )
                 
                 # 调用 Narrator
-                print(f"\n[守密人] ", end="", flush=True)
-                
+                first_chunk = True
                 async for chunk in narrator.chat(narrator_input):
+                    if first_chunk:
+                        print(f"\n[守密人] ", end="", flush=True)
+                        first_chunk = False
                     print(chunk, end="", flush=True)
                 
                 print()  # 换行
