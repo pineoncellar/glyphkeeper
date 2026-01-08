@@ -7,10 +7,10 @@ from typing import AsyncGenerator
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker, AsyncEngine
 from sqlalchemy.orm import DeclarativeBase
 from sqlalchemy import text
-from ..core import get_settings
+from ..core import get_settings, get_logger
 
-# 设置 SQLAlchemy 日志级别为 WARNING，减少看不懂的无关日志输出
-logging.getLogger('sqlalchemy.engine').setLevel(logging.WARNING)
+# 使用项目日志系统配置 SQLAlchemy，设置级别为 WARNING，避免过多日志输出
+get_logger('sqlalchemy.engine', log_level='WARNING')
 
 def get_db_url() -> str:
     """构建数据库连接 URL"""
@@ -42,7 +42,7 @@ class DatabaseManager:
             
             self._engine = create_async_engine(
                 get_db_url(), 
-                echo=settings.project.debug,
+                echo=False,
                 # 连接池配置，避免长时间操作时连接超时
                 pool_size=5,  # 连接池大小（减少以避免连接过多）
                 max_overflow=10,  # 最大溢出连接数
