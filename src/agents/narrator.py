@@ -250,154 +250,254 @@ class Narrator:
             )
             return
 
-        # 有工具调用，进入 ReAct 循环，执行工具
-        logger.debug(f"检测到 {len(tool_calls)} 个工具调用")
+        # 进入 ReAct 循环，支持多轮工具调用
+        # 硬性轮次限制
+        max_iterations = 5  # 最大工具调用轮数，防止无限循环
+        iteration = 0
+        all_tool_results = []  # 累积所有工具结果
         
-        # 将第一轮 LLM 的响应加入历史
-        messages.append({
-            "role": "assistant",
-            "content": full_response_content,
-            "tool_calls": tool_calls
-        })
-
-        # 执行所有工具调用
-        tool_results_for_prompt = []
+        # 重复调用检测
+        tool_call_history = []  # 记录每次工具调用的签名 (func_name, args)
         
-        for tool_call in tool_calls:
-            func_name = tool_call["function"]["name"]
-            args_str = tool_call["function"]["arguments"]
-            call_id = tool_call["id"]
-
-            # 输出工具执行提示
-            # yield f"\n\n[System] 正在执行: {func_name}...\n\n"
-            logger.debug(f"执行工具: {func_name}")
-
-            try:
-                args = json.loads(args_str)
-                logger.debug(f"工具参数: {args}")
-
-                # 动态调用 Archivist 方法
-                if hasattr(self.archivist, func_name):
-                    method = getattr(self.archivist, func_name)
-                    result_data = await method(**args)
-                    result_str = json.dumps(result_data, ensure_ascii=False)
-                    
-                    # 保存结果用于下一轮 Prompt 构建
-                    tool_results_for_prompt.append(result_data)
-                
-                # 调用 RuleKeeper 方法
-                elif hasattr(self.rule_keeper, func_name):
-                    method = getattr(self.rule_keeper, func_name)
-                    result_text = await method(**args)
-                    result_data = {"rule_judgment": result_text}
-                    result_str = json.dumps(result_data, ensure_ascii=False)
-                    
-                    tool_results_for_prompt.append(result_data)
-                else:
-                    result_data = {"error": f"Tool {func_name} not found"}
-                    result_str = json.dumps(result_data)
-
-            except Exception as e:
-                logger.error(f"工具执行失败: {e}", exc_info=True)
-                result_data = {"error": str(e)}
-                result_str = json.dumps(result_data)
-
-            # 将结果加入消息历史
+        while tool_calls and iteration < max_iterations:
+            iteration += 1
+            logger.debug(f"第 {iteration} 轮工具调用，检测到 {len(tool_calls)} 个工具")
+            
+            # 将 LLM 的响应加入历史
             messages.append({
-                "role": "tool",
-                "tool_call_id": call_id,
-                "content": result_str
+                "role": "assistant",
+                "content": full_response_content,
+                "tool_calls": tool_calls
             })
 
-        self._log_llm_trace(
-            trace_id,
-            "tool_results",
-            {"tool_results": tool_results_for_prompt},
-        )
+            # 执行所有工具调用
+            current_round_results = []
+            detected_loop = False  # 标记是否检测到循环
+            
+            for tool_call in tool_calls:
+                func_name = tool_call["function"]["name"]
+                args_str = tool_call["function"]["arguments"]
+                call_id = tool_call["id"]
 
-        # 第二轮：基于工具结果重新构建 Prompt + 生成最终叙事
-        logger.debug("开始第二轮 LLM 调用（叙事生成）...")
+                logger.debug(f"执行工具: {func_name}")
+
+                try:
+                    args = json.loads(args_str)
+                    
+                    # 创建工具调用签名（函数名 + 参数的标准化表示）
+                    call_signature = (func_name, json.dumps(args, sort_keys=True, ensure_ascii=False))
+                    
+                    # 检查是否与最近的调用重复
+                    if call_signature in tool_call_history[-2:]:  # 检查最近2次调用
+                        logger.warning(f"检测到重复工具调用: {func_name}({args})")
+                        detected_loop = True
+                        result_data = {
+                            "error": "重复调用检测",
+                            "message": "系统检测到您正在尝试重复相同的操作，这可能不会带来新的结果。请换一个思路。"
+                        }
+                        result_str = json.dumps(result_data, ensure_ascii=False)
+                        
+                        # 将错误结果加入消息历史
+                        messages.append({
+                            "role": "tool",
+                            "tool_call_id": call_id,
+                            "content": result_str
+                        })
+                        current_round_results.append(result_data)
+                        
+                        self._log_llm_trace(
+                            trace_id,
+                            f"loop_detected_round_{iteration}",
+                            {"func_name": func_name, "args": args, "signature": call_signature},
+                        )
+                        
+                        continue  # 跳过实际执行
+                    
+                    # 记录本次调用
+                    tool_call_history.append(call_signature)
+                    logger.debug(f"工具参数: {args}")
+
+                    # 动态调用 Archivist 方法
+                    if hasattr(self.archivist, func_name):
+                        method = getattr(self.archivist, func_name)
+                        result_data = await method(**args)
+                        result_str = json.dumps(result_data, ensure_ascii=False)
+                        current_round_results.append(result_data)
+                    
+                    # 调用 RuleKeeper 方法
+                    elif hasattr(self.rule_keeper, func_name):
+                        method = getattr(self.rule_keeper, func_name)
+                        result_text = await method(**args)
+                        result_data = {"rule_judgment": result_text}
+                        result_str = json.dumps(result_data, ensure_ascii=False)
+                        current_round_results.append(result_data)
+                    else:
+                        result_data = {"error": f"Tool {func_name} not found"}
+                        result_str = json.dumps(result_data)
+
+                except Exception as e:
+                    logger.error(f"工具执行失败: {e}", exc_info=True)
+                    result_data = {"error": str(e)}
+                    result_str = json.dumps(result_data)
+
+                # 将结果加入消息历史
+                messages.append({
+                    "role": "tool",
+                    "tool_call_id": call_id,
+                    "content": result_str
+                })
+            
+            # 累积本轮结果
+            all_tool_results.extend(current_round_results)
+            
+            self._log_llm_trace(
+                trace_id,
+                f"tool_results_round_{iteration}",
+                {"tool_results": current_round_results, "loop_detected": detected_loop},
+            )
+
+            # 如果检测到循环，提前终止并强制生成叙事
+            if detected_loop:
+                logger.warning(f"检测到工具调用循环，在第 {iteration} 轮提前终止")
+                full_response_content += "\n\n[系统检测到重复操作，已停止进一步查询]"
+                tool_calls = []  # 清空，强制退出循环
+                break
+
+            # 继续调用 LLM，检查是否还需要更多工具
+            logger.debug(f"第 {iteration} 轮工具执行完成，继续 LLM 调用...")
+            
+            full_response_content = ""
+            tool_calls = []
+            
+            # 接近上限时的警告 prompt
+            approaching_limit = (iteration >= max_iterations - 1)
+            
+            # 更新 system prompt 以包含最新的工具结果
+            system_prompt_with_results = PromptAssembler.build(
+                player_name=active_char,
+                game_state=game_state,
+                rag_context=rag_context,
+                history_str=history_str,
+                user_input=content_text,
+                tool_results=all_tool_results,
+                scene_mode=forced_scene_mode
+            )
+            
+            # 如果接近上限，在 system prompt 末尾添加强制结案指令
+            if approaching_limit:
+                system_prompt_with_results += "\n\n**系统强制要求**：你已接近最大推理轮次，必须立即基于当前已知信息生成最终叙事回复，不得再调用任何工具。请直接输出 <narrative> 标签包裹的叙事内容。"
+                logger.warning(f"已达到最大轮次 ({max_iterations})，强制要求 LLM 生成叙事")
+            
+            messages[0] = {"role": "system", "content": system_prompt_with_results}
+            
+            self._log_llm_trace(
+                trace_id,
+                f"llm_request_round_{iteration + 1}",
+                {
+                    "messages": messages,
+                    "tools": self.tools if not approaching_limit else None,
+                    "accumulated_tool_results": all_tool_results,
+                    "approaching_limit": approaching_limit,
+                },
+            )
+            
+            # 如果接近上限，禁用工具调用
+            tools_param = None if approaching_limit else self.tools
+            
+            async for chunk in self.llm.chat(messages, tools=tools_param):
+                if isinstance(chunk, str):
+                    full_response_content += chunk
+                    # 在推理阶段也可以输出思考过程（可选）
+                    # yield chunk
+                elif isinstance(chunk, dict) and "tool_calls" in chunk:
+                    tool_calls = chunk["tool_calls"]
+            
+            self._log_llm_trace(
+                trace_id,
+                f"llm_response_round_{iteration + 1}",
+                {
+                    "raw_content": full_response_content,
+                    "tool_calls": tool_calls,
+                },
+            )
+            
+            # 如果没有新的工具调用，跳出循环
+            if not tool_calls:
+                logger.debug("无更多工具调用需求，准备生成最终叙事")
+                break
         
-        # 重新构建 Prompt，这次包含工具结果
-        system_prompt_with_results = PromptAssembler.build(
-            player_name=active_char,
-            game_state=game_state,
-            rag_context=rag_context,
-            history_str=history_str,
-            user_input=content_text,
-            tool_results=tool_results_for_prompt,
-            scene_mode=forced_scene_mode
-        )
+        # 检查是否达到最大迭代次数（理论上不应该触发，因为达到上限会提前阻止）
+        if iteration >= max_iterations:
+            logger.warning(f"达到最大工具调用轮数 ({max_iterations})，强制结束")
+            if tool_calls:
+                logger.error(f"LLM 在强制结案指令下仍尝试调用工具: {[tc['function']['name'] for tc in tool_calls]}")
+            full_response_content += "\n\n[系统提示：调查过程过于复杂，暂时告一段落]"
 
-        # 更新系统消息
-        messages[0] = {"role": "system", "content": system_prompt_with_results}
-
-        self._log_llm_trace(
-            trace_id,
-            "llm_request_final",
-            {
-                "messages": messages,
-                "tools": None,
-                "tool_results": tool_results_for_prompt,
-            },
-        )
-
-        # 第二轮调用（不再传 tools，避免无限循环）
+        # 最终叙事生成：不再允许工具调用
+        logger.debug("开始最终叙事生成...")
+        
+        # 如果最后一轮没有 tool_calls，说明 LLM 已经准备好输出叙事了
+        # 此时 full_response_content 就是最终内容
+        # 但为了保险起见，再调用一次，明确禁用 tools
         final_narrative = ""
         buffer = ""
         in_narrative = False
         has_output_started = False
         
-        async for chunk in self.llm.chat(messages, tools=None):
-            if isinstance(chunk, str):
-                final_narrative += chunk
-                buffer += chunk
-                
-                # 检测 <narrative> 开始标签
-                if not in_narrative and "<narrative>" in buffer:
-                    in_narrative = True
-                    # 输出 <narrative> 之后的内容
-                    idx = buffer.find("<narrative>") + len("<narrative>")
-                    content_after_tag = buffer[idx:]
-                    if content_after_tag.strip():
-                        yield content_after_tag
-                        has_output_started = True
-                    buffer = ""  # 清空缓冲区
-                    continue
-                
-                # 检测 </narrative> 结束标签
-                if in_narrative and "</narrative>" in buffer:
-                    # 输出 </narrative> 之前的内容
-                    idx = buffer.find("</narrative>")
-                    content_before_tag = buffer[:idx]
-                    if content_before_tag.strip():
-                        yield content_before_tag
-                    break
-                
-                # 在 narrative 标签内，流式输出内容
-                if in_narrative:
-                    yield chunk
-                    has_output_started = True
+        # 如果上一轮已经输出了 narrative，直接使用
+        if "<narrative>" in full_response_content:
+            final_narrative = full_response_content
+        else:
+            # 否则再调用一次 LLM，明确生成叙事
+            self._log_llm_trace(
+                trace_id,
+                "llm_request_final_narrative",
+                {
+                    "messages": messages + [{"role": "assistant", "content": full_response_content}],
+                    "tools": None,
+                },
+            )
+            
+            async for chunk in self.llm.chat(
+                messages + [{"role": "assistant", "content": full_response_content}], 
+                tools=None
+            ):
+                if isinstance(chunk, str):
+                    final_narrative += chunk
         
-        # 提取清理后的叙事用于记录
-        clean_narrative = final_narrative
-        if "<narrative>" in final_narrative and "</narrative>" in final_narrative:
-            start = final_narrative.find("<narrative>") + len("<narrative>")
-            end = final_narrative.find("</narrative>")
-            clean_narrative = final_narrative[start:end].strip()
-        
-        # 如果没有输出任何内容（说明 LLM 没有按格式输出），则输出全部
-        if not has_output_started and clean_narrative:
-            yield "\n" + clean_narrative + "\n"
+        # 流式输出叙事内容
+        buffer = final_narrative
+        if "<narrative>" in buffer and "</narrative>" in buffer:
+            start = buffer.find("<narrative>") + len("<narrative>")
+            end = buffer.find("</narrative>")
+            clean_narrative = buffer[start:end].strip()
+            
+            # 流式输出
+            for char in clean_narrative:
+                yield char
+                has_output_started = True
+        elif final_narrative.strip():
+            # 如果没有标签，直接输出全部内容
+            yield final_narrative
+            clean_narrative = final_narrative.strip()
+            has_output_started = True
+        else:
+            clean_narrative = full_response_content.strip()
+            if clean_narrative:
+                yield clean_narrative
+                has_output_started = True
 
         # 记录最终叙事到记忆
-        await self.memory.add_dialogue("assistant", clean_narrative)
+        if clean_narrative:
+            await self.memory.add_dialogue("assistant", clean_narrative)
+        
         self._log_llm_trace(
             trace_id,
             "llm_session_complete",
             {
-                "final_narrative": final_narrative,
-                "tool_results": tool_results_for_prompt,
+                "final_narrative": clean_narrative,
+                "total_iterations": iteration,
+                "all_tool_results": all_tool_results,
             },
         )
         
