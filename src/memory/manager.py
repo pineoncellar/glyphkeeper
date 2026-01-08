@@ -22,7 +22,7 @@ class MemoryManager:
         self.knowledge_service = None  # 延迟初始化，避免循环导入
         self.rag_engine: Optional[RAGEngine] = None  # 保留用于写入操作
         self.strategies: List[ConsolidationStrategy] = [
-            TokenCountStrategy(max_tokens=2000)
+            TokenCountStrategy(max_tokens=10000)
         ]
         # 默认使用 standard 等级模型进行总结
         self.summarizer_llm = LLMFactory.get_llm("standard")
