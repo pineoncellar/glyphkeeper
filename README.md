@@ -25,6 +25,30 @@
 | **逻辑不一致** | LLM 凭空编造或记忆错乱（如：搜索过的房间重复刷新物品） | **单一事实来源**：所有游戏状态持久化到数据库，LLM 只作为"执行器"而非"存储器" |
 | **规则混淆** | LLM 虚构或混淆 CoC 规则（如：错误的孤注一掷判定） | **RAG 规则检索**：RuleKeeper 通过向量检索查询规则书，提供准确的裁决建议 |
 
+## 🚀 开发里程碑
+
+```mermaid
+timeline
+    title GlyphKeeper 开发历程
+    
+    section 第一阶段 : 架构设计
+        多智能体架构设计
+        双脑记忆系统设计
+    
+    section 第二阶段 : 记忆层实现
+        mermory模块完成
+        RAG 引擎集成
+    
+    section 第三阶段 : 叙事控制层初步实现
+        主要agents初步实现
+        探索环节测试成功
+    
+    section 当前阶段
+        完善开场、结团与战斗轮追逐轮相关部分
+        完善规则与检定相关部分
+        To be continue...
+```
+
 ---
 
 ## 🏗️ 系统架构
@@ -78,39 +102,51 @@ graph TD
 **文件位置**: [src/agents/narrator.py](src/agents/narrator.py)
 
 **职责**：
-- 作为主控制器，接收玩家输入并解析意图
-- 通过 ReAct（推理-行动-观察）循环进行决策
-- 调用 Archivist、RuleKeeper 等工具获取信息
+- 作为主控制器，接收玩家输入（通过 `NarratorInput` 结构化输入）并解析意图
+- 通过 ReAct（推理-行动-观察）循环进行决策，支持**多轮工具调用**
+- 调用 Archivist（9个工具）、RuleKeeper 等获取信息和执行操作
 - 生成沉浸式的洛夫克拉夫特风格叙事文本
 
 **核心能力**：
-- 动态提示词构建（通过 `PromptAssembler`）
+- **XML 结构化 Prompt**（通过 `PromptAssembler`）
+- **循环防护机制**（最多 5 轮工具调用 + 重复调用检测）
 - 流式输出生成（支持异步流）
 - 工具调用编排（OpenAI Function Calling）
 - 场景模式切换（探索/战斗/对话/调查）
+- LLM 追踪日志（记录所有调用到 `logs/llm_traces.jsonl`）
 
 #### 2. Archivist - 数据守门人 📜
 
 **文件位置**: [src/agents/archivist.py](src/agents/archivist.py)
 
 **职责**：
-- 封装所有游戏状态的 CRUD 操作为原子化工具
+- 封装所有游戏状态的 CRUD 操作为**9个原子化工具**
+- 实现复杂逻辑（BFS 自动寻路、状态自动更新等）
 - 确保数据的一致性和幂等性
 - 提供 LLM 友好的 JSON 格式返回
 
-**核心工具**（部分）：
+**核心工具**（共 9 个）：
 ```python
-# 实体操作
-move_entity(entity_name, target_location)      # 移动角色/NPC
-get_location_view(entity_name)                 # 获取当前位置信息
-inspect_target(entity_name, target)            # 检查物品/NPC
+# 游戏状态查询
+get_game_session_stat(session_id)             # 会话信息（时间、节拍、全局标签）
+list_investigators(session_id)                # 调查员列表
 
-# 物品交互
-interact_with_interactable(entity, target)     # 与容器/物品互动
-discover_clue(entity, interactable)            # 发现线索
+# 场景交互
+get_location_stat(entity_name)                # 当前场景完整信息
+inspect_target(viewer_name, target_name)      # 详细检查目标，触发线索发现
 
-# 知识查询
-recall_knowledge(entity_name, query)           # 回忆已知信息
+# 双移动系统
+move_entity(entity_name, direction)           # 【战术移动】短距离相邻移动
+travel_to_location(entity_name, target_ref)   # 【叙事旅行】BFS 自动寻路
+
+# 状态管理
+get_entity_status(entity_name)                # 实体属性（HP/SAN/MP/tags）
+update_entity_resource(entity, resource, delta) # 更新资源，自动处理阈值
+add_entity_tag(entity_name, tags)             # 批量添加状态标签
+
+# 物品 & 知识
+transfer_item(item, from, to)                 # 物品转移
+recall_knowledge(entity_name, query)          # RAG 知识检索
 ```
 
 #### 3. RuleKeeper - 规则裁判 ⚖️
@@ -133,15 +169,40 @@ recall_knowledge(entity_name, query)           # 回忆已知信息
 **文件位置**: [src/agents/assembler.py](src/agents/assembler.py)
 
 **职责**：
-- 实现**融合架构 (Fusion Architecture)** 的动态提示词生成
-- 将游戏状态、记忆、历史整合为五层结构
+- 实现**XML 结构化上下文**的动态提示词生成
+- 将游戏状态、记忆、历史整合为多层结构
+- 支持场景模式自动检测
 
-**五层提示词架构**：
-1. **核心层**：AI 人设和基本行为准则
-2. **状态层**：当前时间、地点、环境氛围
-3. **记忆层**：从 RAG 检索的相关世界观和剧情信息
-4. **历史层**：最近 N 轮的对话上下文
-5. **工具结果层**：刚执行的工具调用返回数据
+**多层提示词架构**（使用 XML 标签分隔）：
+
+```xml
+<系统指令层>
+  核心法则：绝对真实、玩家自主权、洛夫克拉夫特风格、内容安全
+</系统指令层>
+
+<world_state>
+  时间、地点、调查员、环境标签
+</world_state>
+
+<knowledge_base>
+  <lore>语义记忆</lore>
+  <history>情节记忆</history>
+  <keeper_notes>守密人笔记</keeper_notes>
+</knowledge_base>
+
+<conversation_history>
+  最近对话历史
+</conversation_history>
+
+<observation>
+  工具调用结果
+</observation>
+```
+
+**关键特性**：
+- XML 结构化增强 LLM 理解能力
+- 自动场景模式检测（探索/战斗/对话/调查）
+- 内容安全规则内置
 
 ---
 
