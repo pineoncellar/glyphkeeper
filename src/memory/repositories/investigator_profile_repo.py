@@ -91,3 +91,8 @@ class InvestigatorProfileRepository(BaseRepository[InvestigatorProfile]):
             await self.session.commit()
             await self.session.refresh(profile)
         return profile
+
+    async def list_all_profiles(self) -> list[InvestigatorProfile]:
+        """列出所有调查员档案"""
+        result = await self.session.execute(select(InvestigatorProfile))
+        return result.scalars().all()
