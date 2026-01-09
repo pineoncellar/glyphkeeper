@@ -15,7 +15,7 @@ from ..core import get_logger
 from ..memory.RAG_engine import get_rag_engine
 from ..memory.database import DatabaseManager
 from ..memory.models import (
-    Location, Entity, Interactable, Knowledge, ClueDiscovery
+    Location, Entity, Interactable, Knowledge, ClueDiscovery, GameSession, SessionStatus
 )
 
 logger = get_logger(__name__)
@@ -43,9 +43,42 @@ class ModuleLoader:
             for loc_data in json_data['locations']:
                 await self._ingest_location(loc_data)
 
+        # 摄入模组开场模版
+        if 'opening' in json_data:
+            await self._ingest_opening_template(module_name, json_data['opening'])
+
         # TODO: 其他顶层结构，如事件等
         
         logger.info(f"模组 {module_name} 摄入完成")
+
+    async def _ingest_opening_template(self, module_name: str, opening_data: Dict[str, Any]):
+        """Create or update the template GameSession row (ID=0)"""
+        template_id = uuid.UUID('00000000-0000-0000-0000-000000000000')
+        
+        stmt = select(GameSession).where(GameSession.id == template_id)
+        result = await self.db.execute(stmt)
+        existing = result.scalar_one_or_none()
+
+        if existing:
+            existing.scenario_name = module_name
+            existing.opening = opening_data
+            existing.status = SessionStatus.NOT_STARTED
+            existing.active_global_tags = []
+            existing.investigator_ids = []
+            logger.info(f"更新模组模板 Session: {module_name}")
+        else:
+            new_template = GameSession(
+                id=template_id,
+                scenario_name=module_name,
+                opening=opening_data,
+                status=SessionStatus.NOT_STARTED,
+                active_global_tags=[],
+                investigator_ids=[]
+            )
+            self.db.add(new_template)
+            logger.info(f"创建模组模板 Session: {module_name}")
+        
+        await self.db.flush() 
 
     async def _ingest_knowledge(self, knowledge_list: List[Dict[str, Any]]):
         for k in knowledge_list:
