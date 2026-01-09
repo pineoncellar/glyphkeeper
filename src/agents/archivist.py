@@ -32,7 +32,64 @@ class Archivist:
 
     def __init__(self):
         self.db_manager = db_manager
+
+    async def set_investigator_location(self, investigator_id: str, target_location_key: str) -> bool:
+        """强制传送实体，仅供程序调用，不提供给LLM使用"""
+        async with self.db_manager.session_factory() as session:
+            entity_repo = EntityRepository(session)
+            location_repo = LocationRepository(session)
+            
+            entity = await entity_repo.get_by_id(investigator_id)
+            if not entity:
+                logger.error(f"Investigator {investigator_id} not found.")
+                return False
+            
+            location = await location_repo.get_by_key(target_location_key)
+            if not location:
+                logger.error(f"Location {target_location_key} not found.")
+                return False
+            
+            entity.location_id = location.id
+            session.add(entity)
+            await session.commit()
+            return True
     
+    async def get_entity_id_by_name(self, name:str) -> Optional[UUID]:
+        """由实体名称获取实体ID，不提供LLM使用"""
+        async with self.db_manager.session_factory() as session:
+            entity_repo = EntityRepository(session)
+            entity = await entity_repo.get_by_name(name)
+            if entity:
+                return entity.id
+            return None
+    
+    async def get_location_stat_by_key(self, location_key: str) -> Dict[str, Any]:
+        """由地点ID获取地点状态摘要，不提供LLM使用"""
+        async with self.db_manager.session_factory() as session:
+            location_repo = LocationRepository(session)
+            location = await location_repo.get_by_key(location_key)
+            if not location:
+                return {"ok": False, "reason": f"未找到场景: {location_key}"}
+            
+            return {
+                "ok": True,
+                "location_id": str(location.id),
+                "location_key": location.key,
+                "location_name": location.name,
+                "description": location.base_desc,
+                "exits": list(location.exits.keys()) if location.exits else [],
+                "exits_detail": location.exits or {},  # 包含完整的出口映射
+                "environment_tags": location.tags or [],
+            }
+
+    async def get_all_investigator_id(self) -> List[str]:
+        """从InvestigatorProfile获取所有调查员ID列表，不提供LLM使用"""
+        async with self.db_manager.session_factory() as session:
+            investigator_repo = InvestigatorProfileRepository(session)
+            investigators = await investigator_repo.list_all_profiles()
+            return [str(inv.id) for inv in investigators]
+
+
     async def get_game_session_stat(self, session_id: UUID) -> Dict[str, Any]:
         """获取当前游戏会话的状态摘要"""
         async with self.db_manager.session_factory() as session:

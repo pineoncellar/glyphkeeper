@@ -22,6 +22,13 @@ class TimeSlot(str, enum.Enum):
     EVENING = "EVENING"
     LATE_NIGHT = "LATE_NIGHT"
 
+class SessionStatus(str, enum.Enum):
+    """游戏会话状态"""
+    NOT_STARTED = "NOT_STARTED"  # 未开始
+    RUNNING = "RUNNING"           # 进行中
+    PAUSED = "PAUSED"             # 暂停
+    COMPLETED = "COMPLETED"       # 已结束
+
 class SourceType(str, enum.Enum):
     ITEM = "ITEM"
     OBSERVATION = "OBSERVATION"
@@ -173,11 +180,16 @@ class GameSession(Base):
     __tablename__ = "game_session"
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    time_slot: Mapped[TimeSlot] = mapped_column(Enum(TimeSlot), default=TimeSlot.MORNING)
-    beat_counter: Mapped[int] = mapped_column(Integer, default=0)
-    active_global_tags: Mapped[List[str]] = mapped_column(ARRAY(Text), default=list)
+    status: Mapped[SessionStatus] = mapped_column(Enum(SessionStatus), default=SessionStatus.NOT_STARTED)
+    scenario_name: Mapped[str] = mapped_column(String, nullable=True)  # 模组名称
+    time_slot: Mapped[TimeSlot] = mapped_column(Enum(TimeSlot), default=TimeSlot.MORNING, nullable=True)
+    beat_counter: Mapped[int] = mapped_column(Integer, default=0, nullable=True)
+    active_global_tags: Mapped[List[str]] = mapped_column(ARRAY(Text), default=list, nullable=True)
     # 调查员列表：存储参与本次会话的调查员 Entity ID
-    investigator_ids: Mapped[List[str]] = mapped_column(ARRAY(Text), default=list)
+    investigator_ids: Mapped[List[str]] = mapped_column(ARRAY(Text), default=list, nullable=True)
+
+    # 模组定义的开场配置 (Data Layer update)
+    opening: Mapped[dict] = mapped_column(JSONB)
 
 class Event(Base):
     """
@@ -199,7 +211,6 @@ class DialogueRecord(Base):
     __tablename__ = "dialogue_records"
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    # investigator_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("investigators.id"), index=True) # 暂时注释，等待 investigator 表定义
     investigator_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), index=True, nullable=True) # 临时改为 nullable=True，避免外键报错
 
     # 序号，确保顺序绝对正确

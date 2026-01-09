@@ -5,8 +5,6 @@ Narrator Agent - 基于融合架构的叙事引擎
 2. 通过 ReAct 模式调用 Archivist 工具和 RuleKeeper 工具
 3. 生成沉浸式的克苏鲁风格叙事
 4. 管理记忆的读写
-
-TODO: 开幕描写、结团判断与描写
 """
 import json
 import asyncio
@@ -19,8 +17,12 @@ from ..core import get_logger, get_settings
 from .archivist import Archivist
 from .rule_keeper import RuleKeeper
 from ..memory import MemoryManager
+from ..memory.database import db_manager
+from ..memory.models import GameSession, SessionStatus
 from ..llm import LLMFactory
 from .tools import NarratorInput, PromptAssembler, SceneMode
+from sqlalchemy import select, text
+from enum import Enum
 
 logger = get_logger(__name__)
 
@@ -30,21 +32,147 @@ class Narrator:
 
     def __init__(
         self, 
-        memory_manager: MemoryManager
+        window_id: str,
     ):
         self.default_player_name = "调查员"
         self.llm = LLMFactory.get_llm("smart")
         self.archivist = Archivist()
         self.rule_keeper = RuleKeeper()
-        self.memory = memory_manager
+        self.window_id = window_id
         settings = get_settings()
         self.trace_log_path: Path = settings.get_absolute_path("logs/llm_traces.jsonl")
         
         # 获取工具定义
         self.tools = self.archivist.get_openai_tools_schema()
         self.tools.append(self.rule_keeper.get_tool_schema())
+
+        # 初始化记忆管理器
+        # 使用 uuid5 生成确定的 session_id
+        session_id = uuid.uuid5(uuid.NAMESPACE_DNS, str(window_id))
+        self.session_id = session_id
+        self.memory = MemoryManager(session_id=session_id)
         
         logger.info(f"Narrator 初始化完成")
+
+    async def start_game(self) -> AsyncGenerator[str, None]:
+        """游戏入口点：初始化session并生成开场白"""
+        
+        logger.info(f"正在为窗口{self.window_id}生成开场白...")
+        
+        # 初始化会话
+        try:
+            opening_config = await self._initialize_game_session(self.session_id)
+        except ValueError as e:
+            yield f"Start Game Error: {str(e)}"
+            return
+
+        # 读取配置
+        start_location_key = opening_config.get("start_location_key")
+        intro_template = opening_config.get("intro_text_template", "故事开始了...")
+        investigator_id_list = opening_config.get("investigator_id_list", [])
+        
+        # 初始化位置
+        for investigator_id in investigator_id_list:
+            if start_location_key:
+                success = await self.archivist.set_investigator_location(investigator_id, start_location_key)
+                if not success:
+                    logger.warning(f"Failed to set location for {investigator_id} to start location: {start_location_key}")
+
+        # 获取环境描述
+        loc_stat = await self.archivist.get_location_stat_by_key(start_location_key)
+        if loc_stat.get("ok"):
+            current_desc = loc_stat.get('description', '（一片虚空）')
+            location_name = loc_stat.get('location_name', '未知之地')
+        else:
+            logger.error(f"无法获取起始地点状态: {loc_stat}")
+            current_desc = "（一片虚空）"
+            location_name = "未知之地"
+        
+        # 构建 Prompt
+        prompt = f"""
+        你是一位COC跑团守密人，现在是模组开场阶段。
+
+        【开场背景】
+        {intro_template}
+        
+        【当前场景：{location_name}】
+        {current_desc}
+        
+        【指令】
+        请根据以上信息，为玩家生成一段沉浸式的开场白。
+        要求：
+        1. 详细描述周遭的环境氛围，营造克苏鲁式的悬疑或压抑感。
+        2. 结合背景交代玩家当前的处境。
+        3. 在最后引导玩家行动，询问他们打算做什么。
+        4. 使用第二人称"你"称呼玩家。
+        """
+        # TODO：添加玩家
+
+        # 生成开场白
+        response_text = ""
+        async for chunk in self.llm.chat(messages=[{"role": "user", "content": prompt}]):
+            if isinstance(chunk, str):
+                response_text += chunk
+                yield chunk
+        
+        # 状态流转 & 记忆写入
+        await self._update_session_status(self.session_id, SessionStatus.RUNNING)
+        await self.memory.add_dialogue("assistant", response_text)
+
+    async def _initialize_game_session(self, session_id: uuid.UUID) -> Dict[str, Any]:
+        """初始化或重置 GameSession，从 ID=0 的模版复制数据"""
+        template_id = uuid.UUID('00000000-0000-0000-0000-000000000000')
+        
+        async with db_manager.session_factory() as session:
+            # 获取模版
+            stmt = select(GameSession).where(GameSession.id == template_id)
+            result = await session.execute(stmt)
+            template = result.scalar_one_or_none()
+            
+            if not template:
+                raise ValueError("未找到模组模板 (ID=0)。请确保已执行 ingest_module 且模组包含 opening 配置。")
+                
+            opening_config = template.opening or {}
+            scenario_name = template.scenario_name
+            default_time_slot = opening_config.get("start_time_slot", "MORNING")
+            required_tags = opening_config.get("required_tags", [])
+            
+            # 检查目标 Session
+            stmt = select(GameSession).where(GameSession.id == session_id)
+            result = await session.execute(stmt)
+            game_session = result.scalar_one_or_none()
+            
+            if not game_session:
+                game_session = GameSession(id=session_id)
+                session.add(game_session)
+                logger.info(f"新建会话 {session_id}")
+            else:
+                logger.info(f"重置已有会话 {session_id}")
+            
+            # 由于是SQLAlchemy对象，直接赋值即可更新
+            game_session.scenario_name = scenario_name
+            game_session.opening = opening_config
+            game_session.status = SessionStatus.NOT_STARTED
+            game_session.beat_counter = 0
+            game_session.time_slot = default_time_slot
+            game_session.active_global_tags = required_tags
+
+            # 将InvestigatorProfile中的所有调查员添加进调查员列表
+            investigator_id_list = await self.archivist.get_all_investigator_id()
+            opening_config['investigator_id_list'] = investigator_id_list
+            game_session.investigator_ids = investigator_id_list
+            
+            await session.commit()
+            return opening_config
+
+    async def _update_session_status(self, session_id: uuid.UUID, status: SessionStatus):
+        async with db_manager.session_factory() as session:
+            stmt = select(GameSession).where(GameSession.id == session_id)
+            result = await session.execute(stmt)
+            game_session = result.scalar_one_or_none()
+            if game_session:
+                game_session.status = status
+                await session.commit()
 
     def _log_llm_trace(self, trace_id: str, stage: str, payload: Dict[str, Any]):
         """将调用上下文写入日志记录"""
@@ -162,6 +290,9 @@ class Narrator:
 
         active_char = user_input.character_name
         content_text = user_input.content
+
+        # 获取角色ID
+        investigator_id = await self.archivist.get_entity_id_by_name(active_char)
         
         logger.debug(f"Narrator 收到输入: [{active_char}] {content_text}")
 
@@ -169,7 +300,7 @@ class Narrator:
 
         # 记录用户发言到记忆
         # 加上角色名前缀以便在历史中区分
-        await self.memory.add_dialogue("user", f"[{active_char}] {content_text}")
+        await self.memory.add_dialogue("user", f"[{active_char}] {content_text}", investigator_id=investigator_id)
 
         # 收集数据：游戏状态 + RAG 上下文 + 对话历史
         game_state = await self._get_game_stat(user_input.session_id, active_char)
@@ -502,37 +633,6 @@ class Narrator:
         )
         
         logger.info("Narrator 回合结束")
-
-    async def start_session(self, scenario_name: str = "未命名冒险") -> str:
-        """
-        开始一个新的游戏会话
-        
-        Args:
-            scenario_name: 剧本名称
-        
-        Returns:
-            开场白
-        """
-        logger.info(f"开始新会话: {scenario_name}")
-        
-        opening = f"""
-欢迎来到《克苏鲁的呼唤》。
-
-你扮演的是 **{self.player_name}**，一位调查员。
-在这个充满未知与恐怖的世界中，你将面对那些不应被凝视之物。
-
-记住：
-- 保持理智
-- 记录线索
-- 相信直觉
-
-剧本：{scenario_name}
-
-你的冒险即将开始...
-"""
-        
-        await self.memory.add_dialogue("system", opening)
-        return opening
 
     def get_player_name(self) -> str:
         """获取当前玩家名称"""
