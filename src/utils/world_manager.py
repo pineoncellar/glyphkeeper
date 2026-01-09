@@ -31,6 +31,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..core import get_logger, get_settings, PROJECT_ROOT
 from ..memory.database import DatabaseManager, Base
+from ..memory import models
 
 logger = get_logger(__name__)
 
