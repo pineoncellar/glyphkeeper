@@ -17,8 +17,8 @@ from ..llm.llm_factory import LLMFactory
 logger = get_logger(__name__)
 
 class MemoryManager:
-    def __init__(self, investigator_id: Optional[uuid.UUID] = None):
-        self.investigator_id = investigator_id
+    def __init__(self, session_id: Optional[uuid.UUID] = None):
+        self.session_id = session_id
         self.knowledge_service = None  # 延迟初始化，避免循环导入
         self.rag_engine: Optional[RAGEngine] = None  # 保留用于写入操作
         self.strategies: List[ConsolidationStrategy] = [
@@ -40,8 +40,11 @@ class MemoryManager:
             self.rag_engine = await RAGEngine.get_instance()
         return self.rag_engine 
 
-    async def add_dialogue(self, role: str, content: str):
-        """添加一条新的对话记录"""
+    async def add_dialogue(self, role: str, content: str, investigator_id: Optional[uuid.UUID] = None): 
+        """
+        添加一条新的对话记录
+        investigator_id仅在role为"user"时需要传入
+        """
         async with db_manager.session_factory() as session:
             # 获取当前最大的 turn_number
             stmt = select(DialogueRecord.turn_number).order_by(desc(DialogueRecord.turn_number)).limit(1)
@@ -49,7 +52,7 @@ class MemoryManager:
             last_turn = result.scalar_one_or_none() or 0
             
             new_record = DialogueRecord(
-                investigator_id=self.investigator_id,
+                investigator_id=investigator_id,
                 turn_number=last_turn + 1,
                 role=role,
                 content=content,
