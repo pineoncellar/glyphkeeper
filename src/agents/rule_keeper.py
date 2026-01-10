@@ -1,4 +1,6 @@
 """
+已弃用
+
 RuleKeeper Agent - 规则裁决者
 负责查询和解释游戏规则 (CoC 7th Edition)
 """
