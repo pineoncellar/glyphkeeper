@@ -11,19 +11,19 @@
 
 ```mermaid
 graph TD
-    User((👤 玩家)) <--> Engine[⚙️ 中央引擎 GameEngine<br/>(FSM 状态机)]
+    User((👤 玩家)) <--> Engine["⚙️ 中央引擎<br/>GameEngine<br/>(FSM 状态机)"]
 
     subgraph "Stage 1: 感知与翻译 (Perception)"
-        Engine --> Analyzer[🧠 意图分析师 Analyzer<br/>(LLM: DeepSeek)]
+        Engine --> Analyzer["🧠 意图分析师<br/>Analyzer<br/>(LLM: DeepSeek)"]
         Analyzer -->|1. 意图 JSON| Engine
     end
 
     subgraph "Stage 2: 规则与裁决 (Resolution)"
-        Engine --> Resolver[⚖️ 规则总线 Resolver<br/>(Python Facade)]
+        Engine --> Resolver["⚖️ 规则总线<br/>Resolver<br/>(Python Facade)"]
         
         Resolver --> Check{硬编码逻辑?}
-        Check -->|Yes| PyComp[🧩 Python 组件<br/>Combat/Sanity/Skill]
-        Check -->|No| Adjudicator[👨‍⚖️ 裁决者 Adjudicator<br/>(LLM: 规则翻译官)]
+        Check -->|Yes| PyComp["🧩 Python 组件<br/>Combat/Sanity/Skill"]
+        Check -->|No| Adjudicator["👨‍⚖️ 裁决者<br/>Adjudicator<br/>(LLM: 规则翻译官)"]
         
         Adjudicator -->|规则参数| PyComp
         PyComp <--> DB[(PostgreSQL)]
@@ -32,12 +32,12 @@ graph TD
     end
 
     subgraph "Stage 3: 表达与叙事 (Expression)"
-        Engine --> Writer[✍️ 叙事作家 Writer<br/>(LLM: DeepSeek)]
+        Engine --> Writer["✍️ 叙事作家<br/>Writer<br/>(LLM: DeepSeek)"]
         Writer -->|3. 叙事文本| Engine
     end
 
     subgraph "Stage 4: 记忆固化 (Consolidation)"
-        Writer -.-> Memorizer[🦉 记忆员 Memorizer<br/>(后台任务)]
+        Writer -.-> Memorizer["🦉 记忆员<br/>Memorizer<br/>(后台任务)"]
         Memorizer -->|提取 Facts| RAG[(向量库)]
         RAG -.->|Context| Analyzer
     end
