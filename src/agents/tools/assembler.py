@@ -66,13 +66,46 @@ class PromptAssembler:
      * 礼貌地拒绝："抱歉，这类内容超出了我作为 KP 的职责范围。让我们换个方向继续故事。"
      * 提供替代方案，保持叙事流畅性。
    - **记住**：洛夫克拉夫特式恐怖的核心在于**未知的恐惧**和**宇宙冷漠**，而非明确的暴力或仇恨。
+
+    1. **单一事实来源**: `<world_state>` 和 `<observation>` 是绝对真理。如果工具返回"门是锁着的"，你绝不能描述玩家"推门而入"。
+    2. **判定优先**: 在描述任何有风险、有阻碍或涉及知识获取的行动前，**必须**先调用相关工具（如 `perform_skill_check`）。只有拿到工具返回的 "success" 结果后，才能描述成功。
+    3. **洛夫克拉夫特风格**: 强调未知的恐惧、感官的细节（粘稠、腥臭、低语）和理智的脆弱。
+    4. **非玩家角色 (NPC)**: NPC 有自己的动机。不要让 NPC 成为单纯的百科全书，他们会撒谎、隐瞒或因恐惧而拒绝沟通。
 """
 
     # ------------------------------------------------------------------
-    # 2. 上下文层 (Context Layers) - 清晰隔离左右脑
+    # 2. 规则协议层 (Rule Protocols) - 核心机制的"作弊条"
+    #    这里实现了"数据驱动"的一部分，让 LLM 知道何时触发特殊逻辑
     # ------------------------------------------------------------------
+    RULE_SECTION = """
+<rule_protocols>
+    <instruction>在决定调用哪个工具前，必须对照以下模式进行匹配：</instruction>
     
-    # 左脑：结构化客观事实
+    <pattern name="PUSHING_THE_ROLL (孤注一掷)">
+        <trigger>玩家在上一轮技能检定失败后，**立即**描述了新的尝试方式，且暗示愿意承担更高风险（如"更用力"、"花更多时间"）。</trigger>
+        <action>调用 `perform_skill_check` 时，设置参数 `is_pushed=True`。必须在 `<thinking>` 中预判失败的后果。</action>
+    </pattern>
+
+    <pattern name="SANITY_ENCOUNTER (直面恐惧)">
+        <trigger>玩家遭遇神话生物、尸体、极度血腥场景或超自然现象。</trigger>
+        <action>必须调用 `perform_san_check`。参数 `source_type` 需对应怪物的标签（如 'ghoul', 'deep_one'）。</action>
+    </pattern>
+
+    <pattern name="COMBAT_MANEUVER (战斗/战技)">
+        <trigger>玩家试图攻击、射击、闪避、反击或使用战技（Maneuver）。</trigger>
+        <action>调用 `perform_combat_action` (如果存在) 或 `perform_skill_check`。注意：战斗技能通常不可孤注一掷。</action>
+    </pattern>
+
+    <pattern name="INVESTIGATION (调查)">
+        <trigger>玩家搜索房间、检查物品、阅读书籍。</trigger>
+        <action>调用 `inspect_target`。如果涉及专门知识（如考古学、神秘学），先调用 `perform_skill_check`，成功后再调用 `inspect_target`。</action>
+    </pattern>
+</rule_protocols>
+"""
+
+    # ------------------------------------------------------------------
+    # 3. 上下文层 (Context Layers)
+    # ------------------------------------------------------------------
     STATE_SECTION = """
 <world_state>
     <time_and_beat>时间: {time_slot} | 节拍数: {beat_counter}</time_and_beat>
@@ -92,86 +125,71 @@ class PromptAssembler:
 </world_state>
 """
 
-    # 右脑：非结构化记忆与知识
     MEMORY_SECTION = """
 <knowledge_base>
-    <lore>
+    <lore_and_secrets>
 {semantic_memory}
-    </lore>
-    
-    <story_context>
-{episodic_memory}
-    </story_context>
-
-    <secret_notes>
 {keeper_secrets}
-    </secret_notes>
+    </lore_and_secrets>
+    <recent_events>
+{episodic_memory}
+    </recent_events>
 </knowledge_base>
 """
 
-    # ------------------------------------------------------------------
-    # 3. 行动层 (Action Layer) - 历史与观察
-    # ------------------------------------------------------------------
-    
     HISTORY_SECTION = """
 <chat_history>
 {history_str}
 </chat_history>
 """
 
-    # 工具执行结果：这是 ReAct 循环中的 "Observation"
+    # ------------------------------------------------------------------
+    # 4. 观察层 (Observation) - 工具返回结果
+    # ------------------------------------------------------------------
     TOOL_RESULT_SECTION = """
 <observation>
-基于玩家的上一步意图，系统执行了工具。
-以下数据是**刚发生的客观事实** (JSON 格式):
+【系统提示】：这是你刚刚调用工具返回的**客观执行结果**。
+你必须基于此结果生成最终叙事。如果结果是 failure，必须描述失败的后果。
 
 {tool_outputs_json}
-
-(如果结果显示 "failure" 或 "empty"，请务必在叙述中体现这种挫折感)
 </observation>
 """
 
     # ------------------------------------------------------------------
-    # 4. 指令层 (Instruction Layer) - 强制 CoT 与 模式指导
+    # 5. 指令层 (Instruction Layer) - 强制思维链
+    #    这里实现了 "Gatekeeper -> Referee -> Dispatcher" 的逻辑流
     # ------------------------------------------------------------------
-    
     FINAL_INSTRUCTION = """
 <task>
-请分析 `<observation>` (如果有) 和 `<world_state>`，然后生成对玩家的回应。
+当前场景模式: **{mode_name}** ({mode_guidance})
 
-当前场景模式: **{mode_name}**
-模式指导: {mode_guidance}
+请严格按照以下 **XML 思维链 (Chain of Thought)** 格式进行输出。
+不要跳过 `<thinking>` 步骤，直接输出结果会导致逻辑错误。
 
-**必须执行的思考步骤 (Thinking Process)**:
-在生成叙事之前，你必须先在 `<thinking>` 标签中进行逻辑推演：
-1. **事实核对**: 工具执行成功了吗？如果不成功，怎么描述这种阻碍？
-2. **冲突检测**: `<world_state>` (事实) 和 `<knowledge_base>` (传说/记忆) 有冲突吗？如果有，以事实为准，可以把传说描述为“错误的传言”。
-3. **氛围定调**: 这是一个安全的探索时刻，还是紧迫的战斗时刻？
-4. **秘密判定**: 玩家的行为是否触发了 `<secret_notes>` 中的线索？
+{logic_instruction}
 
-**输出格式要求**:
-请严格按照以下格式输出：
+**输出格式模板**:
 
 <thinking>
-在此处写下你的推理过程...
-1. 工具结果分析: ...
-2. 状态检查: ...
-3. 叙事策略: ...
+    <phase_1_intent>
+    1. 玩家意图分析: ...
+    2. 合理性检查 (Gatekeeper): 玩家是否被束缚？是否有物理条件？
+    </phase_1_intent>
+    
+    <phase_2_rule_match>
+    1. 匹配 <rule_protocols>: 是否触发 孤注一掷 / SAN Check / 战斗？
+    2. 风险评估: 这是一个日常动作（直接叙述）还是风险动作（需要检定）？
+    </phase_2_rule_match>
+    
+    <phase_3_strategy>
+    1. 决策: [调用工具 / 直接叙事 / 拒绝请求]
+    2. 工具参数构建 (如需): ...
+    </phase_3_strategy>
 </thinking>
 
-<narrative>
-在此处输出给玩家的最终剧情描述...
-</narrative>
+{tool_or_narrative_instruction}
 </task>
 """
-
-    # 针对中文语境优化的模式指导
-    MODE_GUIDANCE = {
-        SceneMode.EXPLORATION: "重点描写环境氛围（光影、声音、气味）。节奏缓慢，建立悬疑感。",
-        SceneMode.COMBAT: "节奏紧凑。短句为主。重点描写动作的后果和肉体的痛楚。",
-        SceneMode.DIALOGUE: "通过语言展现 NPC 的性格。不要过度热心，NPC 应该有自己的动机和隐瞒。",
-        SceneMode.INVESTIGATION: "强调细节。根据 `<observation>` 中的数据，精确地描述线索，但不要直接给出结论，让玩家自己推理。"
-    }
 
     @staticmethod
     def _detect_scene_mode(user_input: str, game_state: Dict) -> SceneMode:
@@ -203,13 +221,8 @@ class PromptAssembler:
 
     @staticmethod
     def _format_dict_to_yaml(data: Any, indent: int = 4) -> str:
-        """辅助函数：将字典格式化为对 LLM 友好的伪 YAML 字符串"""
         if isinstance(data, str):
-            try:
-                parsed = json.loads(data)
-                return json.dumps(parsed, ensure_ascii=False, indent=2)
-            except:
-                return " " * indent + data
+            return " " * indent + data
         return json.dumps(data, ensure_ascii=False, indent=2)
 
     @classmethod
@@ -224,16 +237,16 @@ class PromptAssembler:
         scene_mode: Optional[SceneMode] = None
     ) -> str:
         
-        # 1. 默认模式处理
         if scene_mode is None:
             scene_mode = cls._detect_scene_mode(user_input, game_state)
         
         parts = []
 
-        # 2. 组装 Header
+        # 1. Header & Rules (新增了 Rules 部分)
         parts.append(cls.SYSTEM_HEADER.format(player_name=player_name))
+        parts.append(cls.RULE_SECTION)
 
-        # 3. 组装左脑 (State)
+        # 2. Context
         loc_data = game_state.get("location_stat", {})
         parts.append(cls.STATE_SECTION.format(
             time_slot=game_state.get("time_slot", "未知"),
@@ -243,55 +256,67 @@ class PromptAssembler:
             player_condition=str(game_state.get("player_condition", "健康")), 
             active_global_tags=", ".join(game_state.get("active_global_tags", []))
         ))
-
-        # 4. 组装右脑 (Memory)
+        
         parts.append(cls.MEMORY_SECTION.format(
-            semantic_memory=rag_context.get("semantic", "暂无相关传说。"),
-            episodic_memory=rag_context.get("episodic", "暂无近期记忆。"),
-            keeper_secrets=rag_context.get("keeper_notes", "此处无特殊秘密。")
+            semantic_memory=rag_context.get("semantic", ""),
+            episodic_memory=rag_context.get("episodic", ""),
+            keeper_secrets=rag_context.get("keeper_notes", "")
         ))
 
-        # 5. 组装历史
+        # 3. History
         parts.append(cls.HISTORY_SECTION.format(
-            history_str=history_str if history_str else "[会话开始]"
+            history_str=history_str if history_str else "[新会话]"
         ))
 
-        # 6. 组装工具结果 (Observation)
-        if tool_results:
+        # 4. Observation & Dynamic Instructions
+        # 核心逻辑：根据是否存在 tool_results 来决定 Instruction 的内容
+        
+        has_observation = tool_results is not None and len(tool_results) > 0
+        
+        if has_observation:
+            # --- 阶段 B: 叙事生成阶段 ---
             formatted_tools = json.dumps(tool_results, ensure_ascii=False, indent=2)
             parts.append(cls.TOOL_RESULT_SECTION.format(tool_outputs_json=formatted_tools))
+            
+            logic_instruction = """
+            【注意】：你现在处于 **叙事生成阶段**。
+            上一步调用的工具已经返回了客观结果（见 <observation>）。
+            你需要根据这些结果，结合场景氛围，生成最终的剧情描述。
+            不要再次调用相同的工具，除非结果明确提示需要进一步操作。
+            """
+            
+            tool_or_narrative_instruction = """
+            如果工具执行成功且无需后续判定：
+            直接输出 <narrative>...</narrative>
+            """
+        else:
+            # --- 阶段 A: 推理与决策阶段 ---
+            logic_instruction = """
+            【注意】：你现在处于 **推理与决策阶段**。
+            玩家刚刚输入了行动指令，你需要分析意图并决定调用什么工具。
+            **严禁**在没有调用工具的情况下直接描述判定结果（如“你成功发现了...”）。
+            """
+            
+            tool_or_narrative_instruction = """
+            如果需要判定或获取信息：
+            输出 Tool Calls (Function Calling)。
+            
+            如果只是纯粹的闲聊或无需判定的日常行为：
+            直接输出 <narrative>...</narrative>
+            """
 
-        # 7. 组装最终指令
         parts.append(cls.FINAL_INSTRUCTION.format(
             mode_name=scene_mode.value,
-            mode_guidance=cls.MODE_GUIDANCE[scene_mode]
+            mode_guidance=cls.MODE_GUIDANCE.get(scene_mode, ""),
+            logic_instruction=logic_instruction,
+            tool_or_narrative_instruction=tool_or_narrative_instruction
         ))
 
         return "\n".join(parts)
 
-    @classmethod
-    def build_simple(
-        cls,
-        player_name: str,
-        current_location: str,
-        user_input: str
-    ) -> str:
-        """简化版构建器：用于快速对话场景"""
-        return cls.build(
-            player_name=player_name,
-            game_state={
-                "location_stat": {"description": current_location},
-                "time_slot": "Unknown",
-                "active_global_tags": [],
-                "beat_counter": 0,
-                "player_condition": "Unknown"
-            },
-            rag_context={
-                "semantic": "",
-                "episodic": "",
-                "keeper_notes": ""
-            },
-            history_str="",
-            user_input=user_input,
-            tool_results=None
-        )
+    MODE_GUIDANCE = {
+        SceneMode.EXPLORATION: "重点描写环境氛围。如果玩家要调查细节，必须调用 `inspect_target`。",
+        SceneMode.COMBAT: "战斗中！任何攻击必须调用 `perform_combat_action` 或 `perform_skill_check`。描写要血腥、快速。",
+        SceneMode.DIALOGUE: "注意 NPC 的隐秘动机。",
+        SceneMode.INVESTIGATION: "如果玩家进行了深入调查，记得检查是否需要 `Spot Hidden` 或 `Library Use` 检定。"
+    }
