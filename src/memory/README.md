@@ -21,70 +21,194 @@ Memory 模块是 GlyphKeeper 的核心组件，负责维护游戏世界的**持�
 ## 架构概览
 
 ```mermaid
-graph TD
-    A["Agent (Narrator/Archivist)"] -->|CRUD| B(Repositories)
-    A -->|Query/Insert| C("Episodic/Semantic Memory")
-    
-    subgraph Structured Memory ["左脑：结构化记忆"]
-        B -->|SQLAlchemy| D[("PostgreSQL")]
-        D -->|Tables| E[Locations]
-        D -->|Tables| F[Entities]
-        D -->|Tables| G[GameSession]
-        D -->|Tables| H[Interactables]
-        D -->|Tables| I[ClueDiscoveries]
-        D -->|Tables| J[Knowledge]
-        
-        E --- H
-        E --- F
-        F --- H
-        H -.-> I
-        F -.-> I
-        I --> J
+graph TB
+    subgraph Agent Layer ["Agent 层"]
+        Narrator["Narrator 叙事者"]
+        Archivist["Archivist 档案员"]
+        RuleKeeper["RuleKeeper 规则守护"]
     end
     
-    subgraph Unstructured Memory ["右脑：非结构化记忆"]
-        C -->|RAG Engine| H[LightRAG]
-        H -->|Vector| I[("PGVector")]
-        H -->|KV| J[("PostgreSQL KV")]
-        H -->|Graph| K["NetworkX/Neo4j"]
+    subgraph Service Layer ["服务层 - 对外接口"]
+        Manager["MemoryManager<br/>对话记忆管理"]
+        RuleService["RuleService<br/>规则查询服务"]
+        Bridge["Bridge<br/>数据访问桥接"]
     end
+    
+    subgraph Data Access Layer ["数据访问层"]
+        Repos["Repositories<br/>(DAO层)"]
+        RAGEngine["RAG Engine<br/>(LightRAG封装)"]
+    end
+    
+    subgraph Storage Layer ["存储层"]
+        WorldDB[("PostgreSQL<br/>world_* schema<br/>世界数据")]
+        RulesDB[("PostgreSQL<br/>coc7th_rules schema<br/>规则数据")]
+        VectorStore[("PGVector + NetworkX<br/>向量/图存储")]
+    end
+    
+    Narrator --> Manager
+    Narrator --> Bridge
+    Archivist --> Repos
+    Archivist --> RAGEngine
+    RuleKeeper --> RuleService
+    
+    Manager --> RAGEngine
+    RuleService --> RAGEngine
+    Bridge --> WorldDB
+    
+    Repos --> WorldDB
+    RAGEngine --> VectorStore
+    RAGEngine --> WorldDB
+    RAGEngine --> RulesDB
+    
+    style Manager fill:#e1f5ff
+    style RuleService fill:#ffe1f5
+    style Bridge fill:#f5ffe1
 ```
 
 ---
 
 ## 核心组件
 
-### 1. 左脑：结构化记忆 (Structured Memory)
+### 1. 服务层 (Service Layer) - 对外接口
 
-负责管理精确的游戏规则数据，确保逻辑的一致性。
+Memory 模块提供三个主要的对外接口，各司其职：
 
-*   **Models (`models.py`)**: 定义了数据库表结构。
-    *   `Location`: 地点及其连接关系。
-    *   `Entity`: NPC、怪物及其属性，包含战斗数据与虚拟装备。
-    *   `Interactable`: 纯粹的物理容器与逻辑锚点，支持持有权转移（在场景中或在角色身上）。
-    *   `ClueDiscovery`: 中间层，连接物理实体与逻辑知识，定义发现条件与情境描述。
-    *   `Knowledge`: 纯逻辑开关，指向 LightRAG 中的具体内容。
-    *   `GameSession`: 全局游戏状态（时间、节拍）。
-*   **Repositories (`repositories/`)**: 数据访问层 (DAO)，提供类型安全的 CRUD 接口。
-    *   `BaseRepository`: 通用增删改查。
-    *   `TaggableRepository`: 支持 Tag 操作的基类。
-    *   `LocationRepository`, `EntityRepository`, `ClueDiscoveryRepository` 等：特定实体的业务逻辑。
+#### 1.1 MemoryManager (对话记忆管理器)
+**职责**：管理对话记录的录入、固化和上下文构建
+- **文件**：[manager.py](manager.py)
+- **主要功能**：
+  - `add_dialogue()`: 添加对话记录
+  - `_consolidate()`: 定期将对话固化为摘要，存入 RAG
+  - `build_prompt_context()`: 为 Narrator 构建检索上下文
+- **使用者**：Narrator、主流程
+- **适用场景**：需要处理对话记忆时
 
-### 2. RAG 引擎 (RAG Engine)
+#### 1.2 RuleService (规则查询服务)
+**职责**：提供 COC7th 规则数据的查询接口
+- **文件**：[rule_service.py](rule_service.py)
+- **主要功能**：
+  - `query_rule()`: 查询规则知识库
+  - `insert_rule_document()`: 插入规则文档
+- **使用者**：RuleKeeper Agent、规则导入脚本
+- **特点**：使用独立的 `coc7th_rules` schema，与世界数据完全隔离
+- **适用场景**：需要查询游戏规则时
 
-基于 [LightRAG](https://github.com/HKUDS/LightRAG) 实现的图谱增强检索系统，作为连接左右脑的桥梁。
+#### 1.3 Bridge (数据访问桥接)
+**职责**：提供通用的、基于字典的数据访问接口，屏蔽 ORM 细节
+- **文件**：[bridge.py](bridge.py)
+- **主要功能**：
+  - `fetch_model_data()`: 获取模型数据（返回字典）
+  - `save_model_data()`: 保存模型数据（创建或更新）
+  - `transaction_context()`: 事务上下文管理器
+- **使用者**：Components（如 DiceRoller、HealthSystem）、需要直接操作数据库的模块
+- **适用场景**：需要简单的 CRUD 操作，不想处理 ORM 复杂性时
 
-*   **`RAG_engine.py`**: 单例模式的引擎封装。负责初始化 LightRAG，配置存储后端（PostgreSQL + NetworkX）。
-*   **`storage.py`**: 存储配置管理。目前使用 PostgreSQL 作为 KV 和 Vector 存储，NetworkX 作为 Graph 存储。
+---
 
-### 3. 右脑：高级记忆接口
+### 2. 数据访问层 (Data Access Layer)
 
-*   **情景记忆 (`episodic_memory.py`)**:
-    *   记录游戏过程中发生的动态事件（"你打开了门"，"守卫被激怒了"）。
-    *   支持 **Metadata Injection**：将结构化 Tag（如 `[TAG: angry]`）注入到文本中，增强检索的相关性。
-*   **语义记忆 (`semantic_memory.py`)**:
-    *   存储模组的静态设定、风味文本、背景故事。
-    *   同样支持元数据注入，用于实现基于条件的知识检索。
+#### 2.1 Repositories (仓储层)
+**职责**：提供类型安全的 CRUD 接口和业务逻辑封装
+- **文件夹**：[repositories/](repositories/)
+- **主要类**：
+  - `BaseRepository`: 通用增删改查基类
+  - `LocationRepository`: 地点数据访问
+  - `EntityRepository`: 实体（NPC/调查员）数据访问
+  - `InteractableRepository`: 交互物数据访问
+  - `ClueDiscoveryRepository`: 线索发现数据访问
+  - `KnowledgeRepository`: 知识注册表数据访问
+  - `SessionRepository`: 游戏会话数据访问
+  - `InvestigatorProfileRepository`: 调查员档案数据访问
+- **使用者**：Archivist Agent、需要复杂查询的模块
+- **适用场景**：需要面向对象的数据访问、复杂关联查询时
+
+#### 2.2 RAG Engine (检索增强生成引擎)
+**职责**：基于 LightRAG 的语义检索和知识插入
+- **文件**：[RAG_engine.py](RAG_engine.py)
+- **主要功能**：
+  - `query()`: 执行语义检索（支持 local/global/hybrid/naive 模式）
+  - `insert()`: 插入文档到知识库
+  - 支持多 workspace 隔离（world_* 和 rules）
+- **存储后端**：
+  - Vector：PGVector (PostgreSQL)
+  - KV：PostgreSQL
+  - Graph：NetworkX
+- **使用者**：MemoryManager、RuleService、KnowledgeService
+- **适用场景**：需要语义检索、上下文召回时
+
+---
+
+### 3. 存储层 (Storage Layer)
+
+#### 3.1 左脑：结构化记忆 (PostgreSQL)
+
+##### 数据库架构设计
+- **Workspace 隔离**：每个世界使用独立 schema（如 `world_the_haunting`）
+- **规则数据隔离**：规则数据存储在独立的 `coc7th_rules` schema
+- **自动 Schema 切换**：通过 `search_path` 实现，由 `active_world` 配置控制
+
+##### 核心数据模型
+
+**物理层 (Physical Layer)**
+- **`Location`** (地点表)：场景及其连接关系
+  - `id`, `key`, `name`, `base_desc`, `tags`, `exits`
+  - 关联：`interactables`, `entities`
+
+- **`Interactable`** (交互物表)：物品、容器
+  - `id`, `key`, `name`, `tags`, `state`
+  - 位置互斥：`location_id` 或 `carrier_id`
+  - 支持状态切换和携带者转移
+
+- **`Entity`** (实体表)：NPC、怪物、调查员
+  - `id`, `key`, `name`, `location_id`, `tags`, `stats`, `attacks`
+  - 关联：`location`, `inventory`, `dialogue_links`, `profile`
+  - 虚拟装备系统：通过 `inventory` 关联 Interactable
+
+**逻辑层 (Logic Layer)**
+- **`InvestigatorProfile`** (调查员档案)：扩展 Entity 的调查员专属信息
+  - 基础信息：`player_name`, `occupation`, `age`, `gender`, `residence`, `birthplace`
+  - 背景故事：`backstory` (JSONB)
+  - 资产描述：`assets_detail`
+  - 一对一关联 Entity
+
+- **`Knowledge`** (知识注册表)：线索的逻辑开关
+  - `id`, `rag_key`, `tags_granted`
+  - 指向 LightRAG 中的具体内容
+
+- **`ClueDiscovery`** (线索发现中间层)：实现 N:N 映射
+  - 来源：`interactable_id` 或 `entity_id`（互斥）
+  - 目标：`knowledge_id`
+  - 触发条件：`required_check` (JSONB)
+  - 情境描述：`discovery_flavor_text`
+
+**控制层 (Control Layer)**
+- **`GameSession`** (游戏会话)：全局状态管理
+  - `id`, `status`, `scenario_name`, `time_slot`, `beat_counter`
+  - `active_global_tags`, `investigator_ids`, `opening`
+
+- **`Event`** (事件表)：状态转换规则
+  - `trigger_condition`, `effect_script`
+
+**记忆层 (Memory Layer)**
+- **`DialogueRecord`** (对话记录)：原始对话存档
+  - `investigator_id`, `turn_number`, `role`, `content`
+  - `is_consolidated`: 是否已固化标记
+  
+- **`MemoryTrace`** (记忆痕迹)：对话摘要索引
+  - `summary`, `start_turn`, `end_turn`, `tags`, `importance_score`
+  - 连接原始对话与 RAG 检索
+
+#### 3.2 右脑：非结构化记忆 (LightRAG)
+
+**存储架构**
+- **Vector Store**: PGVector (存储在 PostgreSQL 的 `public` schema)
+- **KV Store**: PostgreSQL Table
+- **Graph Store**: NetworkX (内存图 + 持久化序列化)
+
+**内容类型**
+- **世界设定 (Semantic Memory)**: 模组背景、NPC 历史、场景描述
+- **游戏事件 (Episodic Memory)**: 对话摘要、玩家行动、剧情进展
+- **规则文档 (Rules Memory)**: COC7th 规则、判定表、技能说明
 
 ---
 
