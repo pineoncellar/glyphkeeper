@@ -4,6 +4,7 @@
 """
 import logging
 from typing import AsyncGenerator
+from functools import wraps
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker, AsyncEngine
 from sqlalchemy.orm import DeclarativeBase
 from sqlalchemy import text
@@ -72,6 +73,36 @@ class DatabaseManager:
 
 # 全局单例
 db_manager = DatabaseManager()
+
+def transactional(func):
+    """
+    事务装饰器：自动管理数据库会话
+    1. 如果调用时传入了 session 参数，则复用该 session（不负责 commit/rollback）
+    2. 如果未传入 session，则新建一个 session，并在函数执行完毕后 commit（异常则 rollback）
+    """
+    @wraps(func)
+    async def wrapper(*args, **kwargs):
+        session = kwargs.get('session')
+        
+        # 情况1: 复用已有 session
+        if session:
+            return await func(*args, **kwargs)
+            
+        # 情况2: 新建 session
+        async with db_manager.session_factory() as new_session:
+            try:
+                kwargs['session'] = new_session
+                result = await func(*args, **kwargs)
+                await new_session.commit()
+                return result
+            except Exception as e:
+                await new_session.rollback()
+                raise e
+            finally:
+                # async with 会自动 close，但显式调用也没问题，这里省略
+                pass
+    return wrapper
+
 
 
 class RulesDatabaseManager:
