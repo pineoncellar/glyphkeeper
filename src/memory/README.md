@@ -97,7 +97,12 @@ Memory 模块提供三个主要的对外接口，各司其职：
 **职责**：提供通用的、基于字典的数据访问接口，屏蔽 ORM 细节
 - **文件**：[bridge.py](bridge.py)
 - **主要功能**：
-  - `fetch_model_data()`: 获取模型数据（返回字典）
+  - `read_model()`: 读取模型数据（返回字典）
+  - `queue_model_update()`: 将数据修改加入暂存队列
+  - `commit_model_changes()`: 提交所有暂存的修改
+- **使用者**：各类 Components (如 Health, Dice)
+- **特点**：支持自动合并同一实体的多次修改，简化事务管理
+- **适用场景**：组件需要读写游戏世界状态时
   - `save_model_data()`: 保存模型数据（创建或更新）
   - `transaction_context()`: 事务上下文管理器
 - **使用者**：Components（如 DiceRoller、HealthSystem）、需要直接操作数据库的模块
