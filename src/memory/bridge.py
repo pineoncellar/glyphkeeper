@@ -152,7 +152,7 @@ def _to_dict(instance: Any) -> Optional[Dict[str, Any]]:
     return data
 
 @transactional
-async def read(
+async def read_model(
     target: Union[str, Type[models.Base]], 
     filters: Dict[str, Any] = None, 
     one: bool = True,
@@ -196,7 +196,7 @@ async def read(
         return [_to_dict(i) for i in instances]
 
 
-def update_queue(
+def queue_model_update(
     target: Union[str, Type[models.Base]], 
     data: Dict[str, Any], 
     match_keys: List[str] = None
@@ -219,7 +219,7 @@ def update_queue(
 
 
 @transactional
-async def commit(session: AsyncSession = None) -> int:
+async def commit_model_changes(Session = None) -> int:
     """一次性提交全局修改队列中的所有数据到数据库"""
     queue = _get_queue()
     
@@ -321,9 +321,9 @@ async def fetch_model_data(
     session: AsyncSession = None
 ) -> Union[Dict[str, Any], List[Dict[str, Any]], None]:
     """
-    [已弃用] 向后兼容的旧接口，请使用 read() 替代
+    [已弃用] 向后兼容的旧接口，请使用 read_model() 替代
     """
-    return await read(target, filters, one, session)
+    return await read_model(target, filters, one, session)
 
 
 async def save_model_data(
@@ -336,13 +336,13 @@ async def save_model_data(
     [已弃用] 向后兼容的旧接口
     
     请改为使用：
-      data_dict = await read(target, ...)  # 读取
+      data_dict = await read_model(target, ...)  # 读取
       # ... 本地修改 data_dict ...
-      update_queue(target, data_dict)      # 暂存
-      await commit()                        # 提交
+      queue_model_update(target, data_dict)      # 暂存
+      await commit_model_changes()                        # 提交
     """
     # 为了向后兼容，这个函数直接执行单条修改
-    # 但新代码应该使用 update_queue() + commit() 模式
+    # 但新代码应该使用 queue_model_update() + commit_model_changes() 模式
     
     @transactional
     async def _save_single(session: AsyncSession = None):
@@ -371,10 +371,10 @@ async def transaction_context():
     
     使用示例：
         async with transaction_context() as tx:
-            entity = await read("Entity", {"name": "Player"})
+            entity = await read_model("Entity", {"name": "Player"})
             entity["stats"]["hp"] -= 10
-            update_queue("Entity", entity)
-            await commit()  # 在 context 内提交
+            queue_model_update("Entity", entity)
+            await commit_model_changes()  # 在 context 内提交
     """
     # 保存旧队列
     old_queue = _update_queue.get()

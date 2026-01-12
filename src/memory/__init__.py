@@ -7,7 +7,11 @@ from .RAG_engine import RAGEngine, get_rag_engine, quick_query
 from .manager import MemoryManager
 from .database import db_manager, rules_db_manager, get_db, init_db
 from .rule_service import RuleService, get_rule_service
-from .bridge import fetch_model_data, save_model_data, transaction_context
+from .bridge import (
+    read_model, 
+    queue_model_update, 
+    commit_model_changes
+)
 
 __all__ = [
     # 配置模型
@@ -21,9 +25,9 @@ __all__ = [
     "get_db",
     "init_db",
     # 桥接接口
-    "fetch_model_data",
-    "save_model_data",
-    "transaction_context",
+    "read_model",
+    "queue_model_update",
+    "commit_model_changes",
     # RAG 引擎
     "RAGEngine",
     "get_rag_engine",
