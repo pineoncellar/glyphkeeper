@@ -44,12 +44,12 @@ class IntentCombatActionData:
     """
     战斗行动意图数据
     target: 目标角色名称列表
-    action: 战斗动作，COC战斗动作很有限，可选：["攻击", "闪避", "格挡", "战技", "逃跑"]
+    action: 战斗动作，COC战斗动作很有限，可选：["攻击", "闪避", "战技", "脱战", "法术"]
         其中，“战技”概括的范围很宽泛，可以是使用特定体术技能，也可以是使用特殊物品。
     weapon: 使用的武器，如果为空手则为"拳头"
     """
-    target: str = None
     action: str = None
+    target: str = None
     weapon: str = None
 
 @dataclass
