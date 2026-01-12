@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from typing import List, Optional
 
 from ..core import get_logger
-from ..memory import fetch_model_data
+from ..memory import read_model
 
 logger = get_logger(__name__)
 
@@ -75,7 +75,7 @@ class DiceRoller:
         """
         CoC 7版规则检定逻辑。
 
-        返回：
+        返回int：
         0-大成功
         1-极难成功
         2-困难成功
@@ -133,7 +133,7 @@ class DiceRoller:
         """
         skill_value = 5  # 默认值
         
-        entity = await fetch_model_data("Entity", {"name": entity_name})
+        entity = await read_model("Entity", {"name": entity_name})
         
         if not entity:
             logger.warning(f"实体 '{entity_name}' 未找到，使用默认技能值")
