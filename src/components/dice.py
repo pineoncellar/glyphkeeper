@@ -1,3 +1,7 @@
+"""
+简易dice模块，提供掷骰和检定功能。
+目前支持基本的NdM+X格式掷骰和COC 7版的技能检定逻辑。
+"""
 import random
 import re
 from dataclasses import dataclass
