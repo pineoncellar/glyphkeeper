@@ -29,12 +29,16 @@ class DiceRoller:
     def roll(expression: str) -> DiceResult:
         """
         简单的掷骰器实现。
-        支持 "NdM+X" 或 "NdM-X" 格式。
+        支持 "NdM+X" 或 "NdM-X" 格式，也支持纯数字 "X"。
         """
+        # 纯数字处理
+        if expression.isdigit():
+            val = int(expression)
+            return DiceResult(expression, [], 0, val, str(val))
+
         # 基础解析 NdM (+/-) X
         match = re.match(r"(\d+)d(\d+)(?:([+-])(\d+))?", expression)
         if not match:
-            # 针对单个数字或无效格式的回退处理
             return DiceResult(expression, [], 0, 0, "无效表达式")
             
         num_dice = int(match.group(1)) # 掷骰数量
@@ -61,6 +65,56 @@ class DiceRoller:
             total=final_total,
             details=details
         )
+
+    @staticmethod
+    def get_min_value(expression: str) -> int:
+        """获取表达式可能的最小值"""
+        if expression.isdigit():
+            return int(expression)
+            
+        match = re.match(r"(\d+)d(\d+)(?:([+-])(\d+))?", expression)
+        if not match:
+            return 0
+            
+        num_dice = int(match.group(1))
+        # sides = int(match.group(2))
+        op = match.group(3)
+        modifier = int(match.group(4)) if match.group(4) else 0
+        
+        # 最小值：所有骰子投出 1
+        total = num_dice * 1
+        
+        if op == '+':
+            total += modifier
+        elif op == '-':
+            total -= modifier
+            
+        return max(0, total)
+
+    @staticmethod
+    def get_max_value(expression: str) -> int:
+        """获取表达式可能的最大值"""
+        if expression.isdigit():
+            return int(expression)
+            
+        match = re.match(r"(\d+)d(\d+)(?:([+-])(\d+))?", expression)
+        if not match:
+            return 0
+            
+        num_dice = int(match.group(1))
+        sides = int(match.group(2))
+        op = match.group(3)
+        modifier = int(match.group(4)) if match.group(4) else 0
+        
+        # 最大值：所有骰子投出 sides
+        total = num_dice * sides
+        
+        if op == '+':
+            total += modifier
+        elif op == '-':
+            total -= modifier
+            
+        return max(0, total)
 
     @staticmethod
     def roll_d100() -> int:
