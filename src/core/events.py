@@ -4,7 +4,7 @@ events模块
 """
 from enum import Enum, auto
 from dataclasses import dataclass, field
-from typing import Optional, Dict, Any, Union
+from typing import Optional, Dict, Any, Union, List
 
 class IntentType(Enum):
     PHYSICAL_INTERACT = "PHYSICAL_INTERACT"
@@ -17,13 +17,19 @@ class IntentType(Enum):
 class IntentPhysicalInteractData:
     """
     物理交互意图数据
-    target: 目标对象（如物品、环境等），对象名称列表
-    action_verb: 动作动词（如"检查"、"拾取"
-    tool: 可选，使用的工具或物品
+    targets: 目标名称列表
+    action_description: 清洗后的行动描述
+    raw_input: 玩家原始输入文本
+    explicit_tool: 可选，玩家明确指定使用的工具名称
     """
-    target: str = None
-    action_verb: str = None
-    tool: Optional[str] = None
+    targets: List[str] = field(default_factory=list)
+    # 清洗后的行动描述
+    # Analyzer 将玩家的原始输入转化为一段清晰的、第三人称的行动描述。
+    # 包含：动作、工具、方式、试图达成的目的。
+    # 例："调查员试图小心翼翼地用发卡去拨弄锁芯，想听听里面有没有机关。"
+    action_description: str = ""
+    raw_input: str = ""
+    explicit_tool: Optional[str] = None
 
 @dataclass
 class IntentSocialInteractData:
@@ -33,6 +39,7 @@ class IntentSocialInteractData:
     raw_dialogue: 原始对话内容
     intention: 交流意图（如"询问最近是否有见过脸上带刀疤的人"、"要求对方离开"）
     tone: 可选，交流的语气或风格
+    TODO: 增加对话历史项
     """
     target: str = None
     raw_dialogue: str = None
@@ -75,10 +82,12 @@ class Intent:
     """
     意图数据
     type: 意图类型
+    character_name: 发起意图的角色名称
     data: 意图数据
         依照意图类型分类，不同的意图类型有不同的数据结构
     """
     type: IntentType
+    character_name: str
     data: Union[IntentPhysicalInteractData, IntentSocialInteractData, IntentCombatActionData, IntentMoveData, IntentMetaData] 
 
 @dataclass
