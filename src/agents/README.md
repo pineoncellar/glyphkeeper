@@ -27,6 +27,9 @@ graph TD
         
         Adjudicator -->|规则参数| PyComp
         PyComp <--> DB[(PostgreSQL)]
+
+        Resolver -.->|暂停: 请求检定| User
+        User -.->|回调: 掷骰结果| Resolver
         
         Resolver -->|2. 结果 JSON| Engine
     end
@@ -69,7 +72,7 @@ src/
 │       ├── writer_prompts.py
 │       └── ...
 │
-├── components/              # [逻辑层] 纯 Python 业务内核 (Resolver + Systems)
+├── resolver/                # [逻辑层] 纯 Python 业务内核 (Resolver + Systems)
 │   ├── __init__.py
 │   ├── resolver.py          # 规则总线 (Facade) - 唯一入口
 │   ├── base.py              # Component 基类
@@ -109,7 +112,7 @@ src/
 * **职责**：维护游戏世界的物理法则和规则逻辑。
 * **双路处理机制**：
 1. **Fast Path (Python)**: 针对常见动作（战斗、技能检定、移动）。
-* 直接调用 `components` 进行数值计算。
+* 直接调用 `resolver` 进行数值计算。
 
 
 2. **Slow Path (Adjudicator LLM)**: 针对即兴行为（如“用面粉撒地”）。
@@ -120,13 +123,18 @@ src/
 3. **Improvisation (常识补全)**:
 * 针对“找灭火器”等合理但不存在的物品，调用常识判断并动态生成。
 
-
+4. **Suspend & Resume (中断与恢复)**: <NEW>
+* 遇到需要检定的环节，可返回 `PENDING_DICE` 状态。
+* 中断流程，等待外部（玩家或第三方服务）掷骰。
+* 接收回调后，恢复上下文继续执行。
 
 
 * **输出 (ResolutionResult)**：
-* `success`: bool
-* `outcome_desc`: 技术性描述 (如 "HP -1, Status: Prone")
-* `signal`: 系统信号 (如 `COMBAT_START`)
+* `status`: `COMPLETED` | `PENDING_DICE`
+* `success`: bool (仅 COMPLETED 有效)
+* `outcome_desc`: 技术性描述或提示语
+* `signal`: 系统信号
+* `required_check`: 请求的检定类型 (如 "SPOT_HIDDEN")
 
 
 
@@ -173,12 +181,14 @@ src/
 
 ### 场景：玩家寻找灭火器 (即兴生成)
 
-1. **User**: "快找找有没有灭火器！"
-2. **Analyzer**: `{"type": "PHYSICAL_INTERACT", "target": "fire_extinguisher", "action": "search"}`
-3. **Resolver**:
-* `PhysicalComponent` 查库 -> 无。
-* 调用 **常识判断** -> "现代楼道应该有"。
-* 执行 **幸运检定** -> 成功。
+1.**中断返回**: `{"status": "PENDING_DICE", "reason": "LUCK_CHECK"}`
+4. **Engine**: 提示 "请进行一次幸运检定 (默认50)"。
+5. **User**: "/roll 1d100" -> 30 (成功)。
+6. **Resolver (Resume)**:
+* 判定成功。
+* **写入数据库**: `INSERT INTO items (name="灭火器")...`
+* 返回: `{"status": "COMPLETED", "success": True, "item": "Fire Extinguisher"}`
+7 执行 **幸运检定** -> 成功。
 * **写入数据库**: `INSERT INTO items (name="灭火器")...`
 * 返回: `{"success": True, "item": "Fire Extinguisher"}`
 
@@ -195,7 +205,7 @@ src/
 
 
 2. **Phase 2: 移植逻辑层**
-* 将原 `Archivist` 的逻辑拆解放入 `components/`。
+*   将原 `Archivist` 的逻辑拆解放入 `resolver/`。
 * 编写 `dice.py`，确保所有的随机数都来自 Python。
 
 
