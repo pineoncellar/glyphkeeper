@@ -90,14 +90,35 @@ class Intent:
     character_name: str
     data: Union[IntentPhysicalInteractData, IntentSocialInteractData, IntentCombatActionData, IntentMoveData, IntentMetaData] 
 
+class ResolutionStatus(Enum):
+    COMPLETED = "COMPLETED"      # 裁决完成
+    PENDING_DICE = "PENDING_DICE"   # 挂起：等待掷骰
+
+@dataclass
+class CheckRequest:
+    """
+    单个检定请求
+    check_type: 检定类型 (如 "SPOT_HIDDEN", "SANITY")
+    difficulty: 难度等级 (如 "REGULAR", "HARD", "EXTREME")
+    target_value: 目标值 (可选，用于对抗检定或明确难度的场景)
+    """
+    check_type: str
+    difficulty: str = "REGULAR"
+    target_value: Optional[int] = None
+
 @dataclass
 class ResolutionResult:
     """
-    意图解析结果数据
-    state: 解析状态，True表示成功解析，False表示失败
-    success: 玩家意图执行结果，True表示执行成功，False表示执行失败
+    决策层结果数据
+    status: 解析状态 (COMPLETED=完成, PENDING_DICE=等待掷骰)
+    success: 玩家意图执行结果，True表示执行成功，False表示执行失败 (仅当 status=COMPLETED 时有效)
     outcome_desc: 结果描述，简要说明执行结果
+    required_checks: 请求的检定列表
+    callback_context: 回调上下文数据，用于恢复执行
     """
-    state: bool
-    success: bool
-    outcome_desc: str
+    status: ResolutionStatus = ResolutionStatus.COMPLETED
+    success: bool = False
+    outcome_desc: str = ""
+    required_checks: List[CheckRequest] = field(default_factory=list)
+    callback_context: Optional[Dict[str, Any]] = None
+
