@@ -6,7 +6,7 @@ from .events import Intent, IntentType, ResolutionResult
 from ..agents.analyzer import Analyzer
 from ..agents.writer import Writer
 from ..agents.memorizer import Memorizer
-from ..components.resolver import Resolver
+from ..resolver.resolver import Resolver
 
 class GameEngine:
     def __init__(self):
