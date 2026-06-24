@@ -38,7 +38,9 @@ async def dice_node(state: GameState) -> dict:
     """
     pending = state.get("pending_dice")
     if not pending:
-        logger.warning("dice_node: 无待处理的掷骰请求")
+        # 正常路径：combat_graph 无条件执行 dice_node 作为图的第一步，
+        # 此时可能没有待处理的掷骰请求，属于正常"无事可做"
+        logger.debug("dice_node: 被调用但无 pending_dice（正常路径，来自 combat_graph 的 dice_roll）")
         return {
             "pending_dice": None,
             "resolution": {
