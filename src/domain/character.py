@@ -10,13 +10,257 @@
 类:
   - Character: 核心角色数据
   - Stats: 八项属性值对象
-  - Skills: 技能集合管理
   - Occupation: 职业模板
 
 函数:
   - create_investigator(name, occupation, stats) -> Character
   - apply_skill_growth(character, skill_name, roll_value) -> bool
-  - calculate_damage_bonus(str_score) -> str
-  - calculate_build(str_score, siz_score) -> int
+  - calculate_combat_stats(str_score, siz_score) -> tuple[str, int]
   - calculate_move(dex_score, str_score, siz_score) -> int
 """
+
+import uuid
+from dataclasses import dataclass, field
+from typing import Dict, Optional, List
+from src.tools.dice import roll_d100, roll_dice
+
+
+@dataclass
+class Stats:
+    """八项属性"""
+    strength: int = 50        # 力量 STR
+    constitution: int = 50    # 体质 CON
+    size: int = 50            # 体型 SIZ
+    dexterity: int = 50       # 敏捷 DEX
+    appearance: int = 50      # 外貌 APP
+    intelligence: int = 50    # 智力 INT
+    power: int = 50           # 意志 POW
+    education: int = 50       # 教育 EDU
+
+    def to_dict(self) -> dict:
+        return {
+            "STR": self.strength,
+            "CON": self.constitution,
+            "SIZ": self.size,
+            "DEX": self.dexterity,
+            "APP": self.appearance,
+            "INT": self.intelligence,
+            "POW": self.power,
+            "EDU": self.education,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "Stats":
+        return cls(
+            strength=data.get("STR", 50),
+            constitution=data.get("CON", 50),
+            size=data.get("SIZ", 50),
+            dexterity=data.get("DEX", 50),
+            appearance=data.get("APP", 50),
+            intelligence=data.get("INT", 50),
+            power=data.get("POW", 50),
+            education=data.get("EDU", 50),
+        )
+
+
+@dataclass
+class Character:
+    """调查员角色"""
+    id: str = ""
+    name: str = ""
+    occupation: str = ""
+    stats: Stats = field(default_factory=Stats)
+    skills: Dict[str, int] = field(default_factory=dict)
+    sanity: int = 0
+    max_sanity: int = 0
+    hit_points: int = 0
+    max_hit_points: int = 0
+    magic_points: int = 0
+    max_magic_points: int = 0
+    damage_bonus: str = "0"
+    build: int = 0
+    move: int = 8
+    armor: int = 0
+
+
+def create_investigator(
+    name: str,
+    occupation: str,
+    stats: Stats,
+    occupation_skills: Dict[str, int],
+) -> Character:
+    """
+    创建调查员角色，自动计算衍生属性。
+
+    参数:
+      name: 角色名
+      occupation: 职业
+      stats: 八项属性
+      occupation_skills: 职业技能（技能名 → 技能值）
+
+    返回: 完整的 Character 对象
+    """
+    # 计算衍生属性
+    max_hp = calculate_max_hp(stats.constitution, stats.size)
+    max_mp = calculate_max_mp(stats.power)
+    max_san = stats.power  # 最大 SAN = POW
+    db, build = calculate_combat_stats(stats.strength, stats.size)
+    move = calculate_move(stats.dexterity, stats.strength, stats.size)
+
+    # CoC 7版 基础技能数值表
+    base_skills = {
+        # ── 动态计算 ──
+        "闪避": stats.dexterity // 2,
+        "语言(母语)": stats.education,
+
+        # ── 固定基础值 ──
+        "会计": 5,
+        "人类学": 1,
+        "估价": 5,
+        "考古学": 1,
+        "取悦": 15,
+        "魅惑": 15,
+        "攀爬": 20,
+        "计算机使用": 5,
+        "信用评级": 0,
+        "克苏鲁神话": 0,
+        "乔装": 5,
+        "汽车驾驶": 20,
+        "电气维修": 10,
+        "电子学": 1,
+        "话术": 5,
+        "斗殴": 25,
+        "手枪": 20,
+        "急救": 30,
+        "历史": 5,
+        "恐吓": 15,
+        "跳跃": 20,
+        "法律": 5,
+        "图书馆利用": 20,
+        "聆听": 20,
+        "锁匠": 1,
+        "机械维修": 10,
+        "医学": 1,
+        "博物学": 10,
+        "导航": 10,
+        "神秘学": 5,
+        "操作重型机械": 1,
+        "说服": 10,
+        "精神分析": 1,
+        "心理学": 10,
+        "骑术": 5,
+        "妙手": 10,
+        "侦查": 25,
+        "潜行": 20,
+        "生存": 10,
+        "游泳": 20,
+        "投掷": 20,
+        "追踪": 10,
+        "动物驯养": 5,
+        "潜水": 1,
+        "爆破": 1,
+        "读唇": 1,
+        "催眠": 1,
+        "炮术": 1,
+    }
+
+    # 合并技能（职业技能覆盖基础技能）
+    all_skills = {**base_skills, **occupation_skills}
+
+    return Character(
+        id=str(uuid.uuid4()),
+        name=name,
+        occupation=occupation,
+        stats=stats,
+        skills=all_skills,
+        sanity=max_san,
+        max_sanity=max_san,
+        hit_points=max_hp,
+        max_hit_points=max_hp,
+        magic_points=max_mp,
+        max_magic_points=max_mp,
+        damage_bonus=db,
+        build=build,
+        move=move,
+        armor=0,
+    )
+
+
+def calculate_combat_stats(str_score: int, siz_score: int) -> tuple[str, int]:
+    """
+    根据 STR + SIZ 计算伤害加值（DB）和体格值（Build）。
+    
+    CoC 7版规则：
+    STR+SIZ ≤ 64 → DB="-2", Build=-2
+    65-84   → DB="-1", Build=-1
+    85-124  → DB="0",  Build=0
+    125-164 → DB="+1D4", Build=1
+    165-204 → DB="+1D6", Build=2
+    ≥ 205   → DB="+2D6", Build=3
+
+    返回: (damage_bonus, build)
+    """
+    total = str_score + siz_score
+
+    db_table = [
+        (64, "-2", -2),
+        (84, "-1", -1),
+        (124, "0", 0),
+        (164, "+1D4", 1),
+        (204, "+1D6", 2),
+    ]
+    for threshold, db, build in db_table:
+        if total <= threshold:
+            return (db, build)
+    return ("+2D6", 3)
+
+
+def calculate_move(dex: int, str_score: int, siz_score: int) -> int:
+    """
+    计算移动力。
+    
+    CoC 7版规则：
+    - DEX < SIZ 且 STR < SIZ → MOV 7
+    - STR > SIZ 且 DEX > SIZ → MOV 9
+    - 其余情况→ MOV 8
+    """
+    if dex > siz_score and str_score > siz_score:
+        return 9
+    if dex < siz_score and str_score < siz_score:
+        return 7
+    return 8
+
+
+def calculate_max_hp(con: int, siz: int) -> int:
+    """最大 HP = (CON + SIZ) / 2，向下取整"""
+    return (con + siz) // 2
+
+
+def calculate_max_mp(pow: int) -> int:
+    """最大 MP = POW / 5"""
+    return max(1, pow // 5)
+
+
+def apply_skill_growth(character: Character, skill_name: str, roll_value: int) -> bool:
+    """
+    技能成长：技能检定成功后，掷 D100，如果 > 当前技能值，则 +1D10。
+    返回是否成长。
+
+    参数:
+      character: 角色对象
+      skill_name: 技能名称
+      roll_value: 成长掷骰值（1-100）
+
+    返回: True 如果技能成长了，False 否则
+    """
+    current_value = character.skills.get(skill_name)
+    if current_value is None:
+        return False
+
+    # 如果掷骰值 > 当前技能值，则成长
+    if roll_value > current_value:
+        growth = roll_dice("1D10")
+        character.skills[skill_name] = current_value + growth
+        return True
+
+    return False
