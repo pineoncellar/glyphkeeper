@@ -6,13 +6,13 @@
 >
 > 本项目遵循 Chaosium 的爱好者使用政策。GlyphKeeper 仅提供**跑团辅助系统的代码逻辑**，不自带任何《克苏鲁的呼唤》规则书原文或官方模组数据。使用者需自行导入合法的规则数据。
 
-### 基于多代理与持久化状态的 AI COC7版规则跑团守密人系统
+### 基于图编排与事件溯源的 AI COC7版规则跑团守密人系统
 
-> **核心理念**：通过多智能体协作与双脑式记忆架构，解决 LLM 在长程叙事中的灾难性遗忘与角色悖论问题
+> **核心理念**：通过 Graph Runtime 图编排与双脑式记忆架构，解决 LLM 在长程叙事中的灾难性遗忘与角色悖论问题
 
 ## 📖 项目简介
 
-**GlyphKeeper** 是一个为《克苏鲁的呼唤》桌面角色扮演游戏设计的智能守密人（Keeper）系统。它采用**多智能体协作架构**和**双脑式记忆系统**，通过将 AI 守密人的职责拆解为多个专业化代理，实现了高质量的长程叙事和规则裁决能力。
+**GlyphKeeper** 是一个为《克苏鲁的呼唤》桌面角色扮演游戏设计的智能守密人（Keeper）系统。它采用**Graph Runtime 图编排架构**和**双脑式记忆系统**，通过将 AI 守密人的职责拆解为多个专业化节点，实现了高质量的长程叙事和规则裁决能力。
 
 传统的"单体 LLM + 提示词工程"方案存在根本性矛盾：同一个模型既要发挥创造性进行叙事，又要严格维护游戏状态和规则，这导致了记忆混乱和逻辑冲突。本项目受 **Google DeepMind Concordia** 框架与 **ChatRPG v2** 论文启发，通过**关注点分离** 原则，将守密人的能力分解为协同工作的多个专业代理，并基于**持久化数据库**构建单一事实来源。
 
@@ -21,35 +21,142 @@
 | 痛点 | 传统 LLM 方案的问题 | GlyphKeeper 解决方案 |
 | --- | --- | --- |
 | **记忆遗忘** | 依赖有限的 Context Window，随对话变长必然遗忘 | **双脑式记忆架构**：结构化数据存储在 PostgreSQL，非结构化叙事存储在基于 LightRAG 的向量/图数据库 |
-| **角色冲突** | 单个模型既要"创造性叙事"又要"严格维护状态" | **多智能体分工**：Narrator 负责创作，Archivist 负责数据维护，RuleKeeper 负责规则裁决 |
+| **角色冲突** | 单个模型既要"创造性叙事"又要"严格维护状态" | **Graph Node 分工**：LLM Nodes 负责创作，Rule Nodes 负责裁决，Event → Reducer 维护状态 |
 | **逻辑不一致** | LLM 凭空编造或记忆错乱（如：搜索过的房间重复刷新物品） | **单一事实来源**：所有游戏状态持久化到数据库，LLM 只作为"执行器"而非"存储器" |
-| **规则混淆** | LLM 虚构或混淆 CoC 规则（如：错误的孤注一掷判定） | **RAG 规则检索**：RuleKeeper 通过向量检索查询规则书，提供准确的裁决建议 |
+| **规则混淆** | LLM 虚构或混淆 CoC 规则（如：错误的孤注一掷判定） | **确定性规则内核**：`domain/` 层 100% 无 LLM 逻辑 + RAG 规则检索辅助 |
 
 ---
 
 ## 🏗️ 系统架构
 
-重构中
+GlyphKeeper 采用 **3 层 + 1 Runtime 架构**，是一个 **Graph Runtime 驱动**的事件驱动系统。
 
-## 💾 记忆系统：双脑架构
+> **核心范式**：`event-driven graph runtime + deterministic game engine + LLM node system`
 
-详细架构请参阅 [src/memory/README.md](src/memory/README.md)
+### 宏观架构全景图
+
+```mermaid
+graph TB
+    Player((👤 玩家))
+    WS["🌐 API Layer<br/>WebSocket / HTTP"]
+
+    subgraph "🧠 Runtime Engine"
+        Engine["⚙️ Graph Executor<br/>(Step Loop)"]
+        Scheduler["📋 Input Scheduler"]
+        Dispatcher["🔀 Node Dispatcher"]
+    end
+
+    subgraph "🔁 Agent Graph"
+        Router["🔄 Router Graph<br/>意图路由"]
+        Combat["⚔️ Combat Graph<br/>战斗流程"]
+        Investigate["🔍 Investigation Graph<br/>探索流程"]
+        Keeper["👤 Keeper Graph<br/>主流程"]
+    end
+
+    subgraph "🧩 Nodes"
+        LLMN["🤖 LLM Nodes<br/>intent / narrator / adjudicator"]
+        RuleN["📐 Rule Nodes<br/>combat / sanity / skill"]
+        ToolN["🔧 Tool Nodes<br/>dice / lookup / roll"]
+    end
+
+    subgraph "🗄️ State & Memory"
+        State["📦 State Store<br/>(Event Sourcing)"]
+        PG[("PostgreSQL<br/>结构化数据")]
+        RAG[("LightRAG<br/>向量/图存储")]
+        Workers["⚙️ Workers<br/>记忆固化 / 摘要"]
+    end
+
+    Player --> WS
+    WS --> Scheduler
+    Scheduler --> Engine
+    Engine --> Router
+    Router --> Investigate
+    Router --> Combat
+    Router --> Keeper
+
+    Engine --> Dispatcher
+    Dispatcher --> LLMN
+    Dispatcher --> RuleN
+    Dispatcher --> ToolN
+
+    LLMN --> State
+    RuleN --> State
+    ToolN --> State
+
+    State --> PG
+    State -.-> RAG
+    RAG -.-> LLMN
+    Workers -.-> RAG
+    State --> Engine
+```
+
+### 三层详解
+
+| 层级 | 目录 | 职责 |
+|------|------|------|
+| **🧠 Runtime 层** | `src/runtime/` | Graph 执行引擎、输入调度、Node 路由分发、执行上下文管理 |
+| **🔁 Graph 层** | `src/graph/` | 系统行为拓扑定义，描述"意图→路由→裁决→叙事"的完整流程 |
+| **🧩 Node 层** | `src/nodes/` | 所有可执行能力单元（LLM 节点 / 规则节点 / 工具节点） |
+| **🗄️ 数据层** | `src/state/` + `src/memory/` | 事件溯源状态 + 双脑记忆架构 |
+
+### 核心流水线：Graph Step Loop
+
+```
+玩家输入
+    ↓
+[API Layer] WebSocket / HTTP
+    ↓
+[Runtime Engine] Graph Executor 启动 Step Loop
+    ↓
+[Graph] Router → 意图路由
+    ├──→ Investigation Graph: 搜索 → 线索 → 知识授予
+    ├──→ Combat Graph: 先攻 → 行动 → 伤害 → 结算
+    └──→ Keeper Graph: 主流程叙事
+    ↓
+[State] Event → Reducer → 状态变更（不可变事件流）
+    ↓
+[Memory / RAG] 后台 Worker 自动固化
+```
+
+---
+
+## 💾 双脑记忆系统
+
+### 架构总览
+
+```mermaid
+graph TB
+    subgraph "Service Layer"
+        Retriever["Retriever<br/>记忆检索器"]
+        Summarizer["Summarizer<br/>对话摘要"]
+    end
+
+    subgraph "Storage Layer"
+        PG[("PostgreSQL<br/>左脑 - 结构化")]
+        VEC[("PGVector + NetworkX<br/>右脑 - 向量/图")]
+    end
+
+    subgraph "Event System"
+        ES["Event Store<br/>不可变事件流"]
+    end
+
+    Retriever --> PG
+    Retriever --> VEC
+    Summarizer --> ES
+    ES --> PG
+```
 
 ### 左脑 - 结构化记忆 (PostgreSQL)
 
 负责存储精确的、逻辑严密的游戏数据：
 
-**核心数据模型** ([src/memory/models.py](src/memory/models.py))：
+**核心数据模型**（旧版参考：`backup_old_structure/old_src/memory/models.py`）：
 - **Location**: 地点及其连接关系
 - **Entity**: 玩家、NPC、怪物（包含属性、状态、战斗数据）
 - **Interactable**: 物理容器（箱子、门、尸体等）
 - **ClueDiscovery**: 线索发现的中间层（支持多对多映射）
 - **Knowledge**: 逻辑开关，指向 LightRAG 中的具体知识内容
 - **GameSession**: 全局游戏状态（时间、节拍、存档点）
-
-**数据访问层** ([src/memory/repositories/](src/memory/repositories/))：
-- 基于 Repository 模式封装的类型安全接口
-- 支持标签 (Tag) 系统实现条件性内容解锁
 
 ### 右脑 - 非结构化记忆 (LightRAG)
 
@@ -60,10 +167,11 @@
 - **pgvector**: PostgreSQL 向量扩展，存储文本嵌入
 - **NetworkX**: 图数据库，存储实体关系网络
 
-**核心功能**：
-- **情景记忆** ([src/memory/episodic_memory.py](src/memory/episodic_memory.py))：记录游戏过程中发生的事件
-- **语义记忆** ([src/memory/semantic_memory.py](src/memory/semantic_memory.py))：存储模组的背景故事和设定
-- **元数据注入**：将结构化 Tag 注入到文本中，增强检索相关性
+**新接口**（`src/memory/`）：
+- `event_store.py` — 事件溯源存储（不可变事件流）
+- `vector_store.py` — 向量/图语义检索（LightRAG 封装）
+- `summarizer.py` — 对话摘要与记忆压缩
+- `retriever.py` — Graph Node 的统一记忆输入源
 
 ---
 
@@ -74,6 +182,7 @@
 | 组件 | 技术 | 说明 |
 |------|------|------|
 | **编程语言** | Python 3.12+ | 利用现代异步特性 |
+| **Graph Runtime** | LangGraph | 状态图驱动的 Agent 执行引擎 |
 | **LLM 集成** | OpenAI-compatible API | 支持 OpenAI / Azure OpenAI / 兼容接口 |
 | **数据库** | PostgreSQL + pgvector | 关系型数据 + 向量检索 |
 | **ORM** | SQLAlchemy 2.0 | 异步 ORM |
@@ -170,21 +279,22 @@ uv run python scripts/manage_worlds.py --help
 # 导入 PDF 格式的模组文件
 uv run python scripts/ingest_module.py path/to/your_module.pdf
 
-# 或使用交互式导入
-uv run python src/interfaces/cli_runner.py
+# 或使用交互式导入（旧版入口，位于备份目录）
+uv run python backup_old_structure/old_src/interfaces/cli_runner.py
 ```
 
 ### 5. 运行系统
 
 **方式 A：命令行交互模式**
 ```bash
-uv run python src/interfaces/cli_runner.py
+# （CLI 待实现 — 暂用旧版入口）
+uv run python backup_old_structure/old_src/interfaces/cli_runner.py
 ```
 
 **方式 B：启动 API 服务**
 ```bash
-# 启动 FastAPI 服务器（开发中）
-uv run python -m src.interfaces.api_server
+# （API 服务待实现 — 暂用旧版入口）
+uv run python backup_old_structure/old_src/interfaces/api_server.py
 ```
 
 ---
@@ -212,49 +322,82 @@ GlyphKeeper/
 │   ├── ingest_module.py     # 导入模组
 │   └── inspect_graph.py     # 检查 RAG 图谱
 │
-├── src/                     # 源代码
-│   ├── agents/              # 多智能体系统
-│   │   ├── narrator.py      # 叙事引擎
-│   │   ├── archivist.py     # 数据守门人
-│   │   ├── rule_keeper.py   # 规则裁判
-│   │   ├── assembler.py     # 提示词构建器
-│   │   └── tools/           # 代理工具集
-│   │       ├── knowledge_service.py  # 知识检索服务
-│   │       └── db_tools.py           # 数据库工具
+├── src/                     # 源代码（新 Graph Runtime 架构）
+│   ├── runtime/             # 🧠 Graph 执行引擎（系统 CPU）
+│   │   ├── engine.py        # Graph 执行器 — 核心 Step Loop
+│   │   ├── scheduler.py     # 多玩家输入调度器
+│   │   ├── dispatcher.py    # Node 路由分发器
+│   │   └── context.py       # 执行上下文管理
 │   │
-│   ├── memory/              # 记忆系统
-│   │   ├── models.py        # 数据模型定义
-│   │   ├── database.py      # 数据库连接管理
-│   │   ├── RAG_engine.py    # RAG 引擎封装
-│   │   ├── episodic_memory.py   # 情景记忆
-│   │   ├── semantic_memory.py   # 语义记忆
-│   │   └── repositories/    # 数据访问层
-│   │       ├── entity_repo.py
-│   │       ├── location_repo.py
-│   │       └── ...
+│   ├── state/               # 🗄️ 世界唯一真相（Event Sourcing）
+│   │   ├── game_state.py    # 游戏全局状态
+│   │   ├── player_state.py  # 玩家/调查员状态
+│   │   ├── world_state.py   # 世界状态管理器
+│   │   ├── event_log.py     # 事件溯源日志
+│   │   └── snapshot.py      # 状态快照管理
 │   │
-│   ├── llm/                 # LLM 集成层
-│   │   ├── llm_factory.py   # LLM 工厂
-│   │   ├── llm_base.py      # 基础接口
-│   │   └── llm_openai.py    # OpenAI 兼容实现
+│   ├── graph/               # 🔁 Agent Graph 定义（节点+边拓扑）
+│   │   ├── keeper_graph.py       # 守密人主 Graph
+│   │   ├── combat_graph.py       # 战斗子 Graph
+│   │   ├── investigation_graph.py # 调查/探索子 Graph
+│   │   └── router_graph.py       # 意图路由子 Graph
 │   │
-│   ├── ingestion/           # 数据摄入模块
-│   │   ├── loader.py        # 文件加载器
-│   │   ├── pdf_parser.py    # PDF 解析
-│   │   └── structure_extractor.py  # 结构化提取
+│   ├── nodes/               # 🧩 所有可执行能力节点
+│   │   ├── llm/             # 🤖 LLM 节点
+│   │   │   ├── intent_node.py      # 意图分析
+│   │   │   ├── narrator_node.py    # 叙事生成
+│   │   │   └── adjudicator_node.py # 即兴裁决
+│   │   ├── rules/           # 📐 确定性规则节点
+│   │   │   ├── combat_node.py     # 战斗规则
+│   │   │   ├── sanity_node.py     # 理智规则
+│   │   │   └── skill_node.py      # 技能检定
+│   │   └── tools/           # 🔧 工具节点
+│   │       ├── dice_node.py       # 掷骰执行
+│   │       ├── lookup_node.py     # 知识检索
+│   │       └── roll_node.py       # 自动化检定
 │   │
-│   ├── interfaces/          # 接口层
-│   │   ├── cli_runner.py    # 命令行界面
-│   │   └── api_server.py    # REST API 服务（开发中）
+│   ├── tools/               # 🔧 外部工具（纯函数，无副作用）
+│   │   ├── dice.py          # 掷骰引擎（D100/Bonus/Penalty）
+│   │   ├── random.py        # 安全随机工具
+│   │   ├── vector_search.py # 向量搜索封装
+│   │   ├── time.py          # 游戏时间工具
+│   │   └── utils.py         # 通用工具函数
 │   │
-│   ├── core/                # 核心功能
-│   │   ├── config.py        # 配置管理
-│   │   └── logger.py        # 日志系统
+│   ├── domain/              # 🎲 CoC 规则域模型（100% 确定性）
+│   │   ├── coc_rules.py     # 核心规则（成功等级/难度）
+│   │   ├── sanity_rules.py  # 理智规则（SAN 损失/疯狂）
+│   │   ├── combat_rules.py  # 战斗规则（伤害/护甲/武器）
+│   │   ├── character.py     # 角色模型（属性/技能/职业）
+│   │   └── checks.py        # 检定逻辑（技能/属性/对抗）
 │   │
-│   └── utils/               # 工具类
-│       └── token_tracker.py # Token 统计
+│   ├── memory/              # 🧠 长期记忆系统
+│   │   ├── event_store.py   # 事件溯源存储
+│   │   ├── vector_store.py  # 向量/图语义检索（LightRAG）
+│   │   ├── summarizer.py    # 对话摘要与记忆压缩
+│   │   └── retriever.py     # Graph Node 的输入源
+│   │
+│   ├── workers/             # ⚙️ 后台任务
+│   │   ├── memorizer_worker.py   # 长期记忆提取
+│   │   ├── world_summarizer.py   # 世界状态摘要
+│   │   └── background_sync.py    # 后台数据同步
+│   │
+│   ├── api/                 # 🌐 接口层
+│   │   ├── websocket.py     # WebSocket 实时通信
+│   │   ├── routes.py        # RESTful HTTP 路由
+│   │   └── dto.py           # 数据传输对象
+│   │
+│   ├── config/              # 配置管理
+│   │   └── __init__.py
+│   │
+│   └── tests/               # 测试套件
+│       ├── test_domain.py   # 域模型单元测试
+│       ├── test_tools.py    # 工具层单元测试
+│       └── test_runtime.py  # Runtime 集成测试
 │
-├── tests/                   # 测试与演示
+├── backup_old_structure/    # 旧代码备份参考
+│   └── old_src/             # 原 agents/resolver/core/... 完整存档
+│
+├── tests/                   # 旧版测试与演示
 └── template/                # 配置文件模板
     ├── config.yaml.template
     └── providers.ini.template
