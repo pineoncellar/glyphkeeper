@@ -7,6 +7,9 @@ requires-python = ">=3.12"
 dependencies = [
     "aiohttp>=3.13.2",
     "asyncpg>=0.31.0",
+    "langchain-core>=0.3.0",
+    "langgraph>=0.4.0",
+    "langgraph-checkpoint>=2.0.0",
     "lightrag-hku[api]>=1.4.9.10",
     "matplotlib>=3.10.8",
     "networkx>=3.6.1",
@@ -17,4 +20,9 @@ dependencies = [
     "pyyaml>=6.0.3",
     "sqlalchemy>=2.0.45",
     "tokenizers>=0.22.1",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
 ]
