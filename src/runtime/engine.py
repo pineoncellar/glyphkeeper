@@ -1,13 +1,452 @@
 """
-Graph 执行引擎（系统最核心模块）
-
-职责:
-  - 接收玩家输入，遍历 Graph 拓扑执行节点
-  - 管理 Step Loop：意图 → 路由 → 裁决 → 叙事 → 等待
-  - 处理节点的 suspend/resume 生命周期
-  - 维护当前执行栈与上下文传递
+@File     :   engine.py
+@Desc     :   Graph 执行引擎 — 系统核心入口
+@Note     :   封装 LangGraph CompiledGraph，管理会话状态、事件溯源、快照
 
 使用方式:
-    engine = GraphEngine()
-    result = await engine.run(player_input, session_id)
+    engine = GraphEngine(keeper_graph)
+    narrative = await engine.run("我搜索书桌", session_id="abc-123")
 """
+
+from __future__ import annotations
+
+import traceback
+from datetime import datetime, timezone
+from typing import Any, Optional
+
+from langgraph.graph.state import CompiledStateGraph as CompiledGraph
+
+from src.state.game_state import GameState, create_initial_state
+from src.state.event_log import EventLog
+from src.state.snapshot import SnapshotManager
+from src.memory.event_store import EventStore
+from src.runtime.context import ExecutionContext
+from src.runtime.dispatcher import (
+    ExecutionResult,
+    dispatch_with_retry,
+    NodeDispatcher,
+)
+from src.config import get_logger, get_settings
+
+logger = get_logger(__name__)
+
+
+# ====================================================================
+# Engine 模式常量
+# ====================================================================
+
+ENGINE_MODE_FULL = "full"
+"""完整模式: 遍历整个 Graph（intent → router → combat/investigate → narrate）"""
+
+ENGINE_MODE_LANGGRAPH = "langgraph"
+"""委托模式: 将 state 直接交给 CompiledGraph.ainvoke() 处理"""
+
+
+# ====================================================================
+# GraphEngine
+# ====================================================================
+
+
+class GraphEngine:
+    """Graph 执行引擎
+
+    职责:
+      1. 管理 CompiledGraph 实例
+      2. 封装 graph.ainvoke() 调用
+      3. 处理初始状态构建
+      4. 管理事件溯源（EventLog）
+      5. 管理状态快照（SnapshotManager）
+      6. 提供统一的 run() 接口
+
+    使用方式:
+        engine = GraphEngine(keeper_graph)
+        narrative = await engine.run("我搜索书桌", session_id="abc-123")
+
+    模式说明:
+      - full（默认）: 使用 Engine 内部流程，支持 suspend/resume/retry
+      - langgraph: 委托给 CompiledGraph.ainvoke()，LangGraph 管理全部流程
+    """
+
+    def __init__(
+        self,
+        graph: CompiledGraph,
+        mode: str = ENGINE_MODE_LANGGRAPH,
+        event_store: Optional[EventStore] = None,
+        event_log: Optional[EventLog] = None,
+        snapshot_mgr: Optional[SnapshotManager] = None,
+        dispatcher: Optional[NodeDispatcher] = None,
+    ):
+        """
+        Args:
+            graph:        编译好的 LangGraph CompiledGraph
+            mode:         引擎模式（full / langgraph）
+            event_store:  事件溯源存储（None 则自动创建）
+            event_log:    事件日志管理器（None 则自动创建）
+            snapshot_mgr: 状态快照管理器（None 则自动创建）
+            dispatcher:   Node 分发器（None 则自动创建，仅 full 模式使用）
+        """
+        self.graph = graph
+        self.mode = mode
+        self._event_store = event_store
+        self._event_log = event_log
+        self._snapshot_mgr = snapshot_mgr
+        self._dispatcher = dispatcher or NodeDispatcher(
+            default_max_retries=3,
+            default_timeout=30.0,
+        )
+
+    # ── 属性 ──
+
+    @property
+    def event_log(self) -> Optional[EventLog]:
+        return self._event_log
+
+    @property
+    def snapshot_mgr(self) -> Optional[SnapshotManager]:
+        return self._snapshot_mgr
+
+    # ── 核心执行 ──
+
+    async def run(
+        self,
+        player_input: str,
+        session_id: str,
+        previous_state: Optional[GameState] = None,
+        context: Optional[ExecutionContext] = None,
+        auto_snapshot: bool = False,
+    ) -> str:
+        """执行一次完整的 Graph 遍历
+
+        参数:
+            player_input:   玩家输入文本
+            session_id:     会话 ID
+            previous_state: 可选的上一轮状态（用于连续对话）
+            context:        执行上下文（None 则自动创建）
+            auto_snapshot:  是否在执行后自动创建快照
+
+        返回:
+            narrative: 叙事文本（执行失败时返回错误描述）
+        """
+        ctx = context or ExecutionContext(session_id=session_id)
+
+        # 1. 构建初始 state
+        state = self._prepare_state(
+            player_input=player_input,
+            session_id=session_id,
+            previous_state=previous_state,
+        )
+
+        logger.info(
+            f"Engine.run: session={session_id[:8]} "
+            f"mode={self.mode} "
+            f"input={player_input[:50]}..."
+        )
+
+        # 2. 执行
+        try:
+            if self.mode == ENGINE_MODE_LANGGRAPH:
+                narrative = await self._run_langgraph(state, ctx)
+            else:
+                narrative = await self._run_full(state, ctx)
+
+            # 3. 自动快照
+            if auto_snapshot and self._snapshot_mgr:
+                try:
+                    snap_id = await self._snapshot_mgr.create(state, label="auto")
+                    logger.debug(f"Engine.run: 快照已创建 {snap_id[:8]}")
+                except Exception as e:
+                    logger.warning(f"Engine.run: 快照创建失败: {e}")
+
+            logger.info(
+                f"Engine.run: OK session={session_id[:8]} "
+                f"narrative_len={len(narrative)}"
+            )
+            return narrative
+
+        except Exception as e:
+            error_msg = f"{type(e).__name__}: {e}"
+            logger.error(f"Engine.run: FAILED {error_msg}\n{traceback.format_exc()}")
+            return f"（系统异常：{error_msg}）"
+
+    # ── langgraph 模式 ──
+
+    async def _run_langgraph(
+        self,
+        state: GameState,
+        ctx: ExecutionContext,
+    ) -> str:
+        """委托模式：直接调用 CompiledGraph.ainvoke()"""
+        result = await self.graph.ainvoke(state)
+
+        # 记录追踪
+        ctx.set_trace("graph", {"keys": list(result.keys())})
+
+        # 提取 narrative
+        narrative = result.get("narrative", "")
+
+        # 记录事件（如果 event_log 可用）
+        if self._event_log:
+            await self._record_graph_event(result, ctx)
+
+        return narrative
+
+    # ── full 模式 ──
+
+    async def _run_full(
+        self,
+        state: GameState,
+        ctx: ExecutionContext,
+    ) -> str:
+        """完整模式：Engine 逐节点调度执行"""
+        narrative = ""
+        current_node = "intent"
+        safety_counter = 0
+        MAX_STEPS = 50  # 最大执行步数，防止无限循环
+
+        while current_node and safety_counter < MAX_STEPS:
+            safety_counter += 1
+
+            # 获取节点函数
+            node_fn = self._get_node_fn(current_node)
+            if node_fn is None:
+                logger.error(f"Engine: 未知节点 '{current_node}'，终止执行")
+                break
+
+            # 执行节点
+            result = await self._dispatcher.dispatch(
+                node_fn=node_fn,
+                state=state,
+                node_name=current_node,
+            )
+
+            # 记录追踪
+            ctx.set_trace(current_node, result.to_dict())
+
+            if not result.success:
+                logger.error(f"Engine: 节点 '{current_node}' 执行失败: {result.error}")
+                self._add_error(state, f"[{current_node}] {result.error}")
+                break
+
+            # 应用 state_patch
+            if result.state_patch:
+                from src.state.reducer import reduce_state
+                state = reduce_state(state, result.state_patch)
+
+            # 记录事件
+            if self._event_log and result.emitted_events:
+                for evt in result.emitted_events:
+                    await self._record_event(
+                        state, evt, current_node, ctx
+                    )
+
+            # 检查控制语义
+            if self._dispatcher.should_suspend(result):
+                logger.debug(f"Engine: 节点 '{current_node}' 触发挂起 ({result.control})")
+                # 如果挂起时已有 narrative，保留它
+                if result.state_patch and "narrative" in result.state_patch:
+                    narrative = result.state_patch.get("narrative", narrative)
+                break
+
+            # 路由到下一个节点
+            next_node = result.next_node
+            if next_node is None:
+                # 从 state 提取 narrative
+                narrative = state.get("narrative", narrative)
+                break
+
+            current_node = next_node
+
+        if safety_counter >= MAX_STEPS:
+            logger.warning(f"Engine: 达到最大执行步数 {MAX_STEPS}")
+            self._add_error(state, f"达到最大执行步数 {MAX_STEPS}")
+
+        return narrative
+
+    # ── 辅助方法 ──
+
+    def _prepare_state(
+        self,
+        player_input: str,
+        session_id: str,
+        previous_state: Optional[GameState] = None,
+    ) -> GameState:
+        """构建或复用 GameState"""
+        if previous_state:
+            state: GameState = dict(previous_state)
+            state["player_input"] = player_input
+            state["beat_counter"] = state.get("beat_counter", 0) + 1
+        else:
+            state = create_initial_state(
+                session_id=session_id,
+                scenario_name="",
+            )
+            state["player_input"] = player_input
+            state["beat_counter"] = 1
+        return state
+
+    def _get_node_fn(self, node_name: str):
+        """根据节点名获取对应的异步函数
+
+        从 CompiledStateGraph.nodes 中提取可调用的 Node 函数。
+        PregelNode.bound.func 存储了注册时的原始函数。
+
+        注意: 排除 '__start__' 等 LangGraph 内部节点。
+        """
+        if node_name.startswith("__"):
+            return None
+
+        try:
+            node_spec = self.graph.nodes.get(node_name)
+            if node_spec is None:
+                return None
+            # PregelNode.bound.func 是原始注册的函数
+            fn = getattr(node_spec.bound, "func", None)
+            if fn is not None and callable(fn):
+                return fn
+            # 兜底：尝试 bound 自身的 invoke
+            if hasattr(node_spec.bound, "invoke") and callable(node_spec.bound.invoke):
+                return node_spec.bound.invoke
+        except (AttributeError, KeyError, TypeError):
+            pass
+        return None
+
+    async def _record_event(
+        self,
+        state: GameState,
+        event_data: dict,
+        source_node: str,
+        ctx: ExecutionContext,
+    ):
+        """记录单条事件到 EventLog"""
+        if not self._event_log:
+            return
+        try:
+            await self._event_log.record_and_apply(
+                current=state,
+                patch=event_data.get("state_patch", {}),
+                event_type=event_data.get("type", "NodeExecution"),
+                source_node=source_node,
+                parent_event_id=ctx.execution_id,
+                extra_data=event_data.get("extra"),
+            )
+        except Exception as e:
+            logger.warning(f"Engine: 事件记录失败: {e}")
+
+    async def _record_graph_event(
+        self,
+        result: dict,
+        ctx: ExecutionContext,
+    ):
+        """记录整个 Graph 执行结果的事件"""
+        if not self._event_log:
+            return
+        try:
+            await self._event_log.record_and_apply(
+                current=result,  # type: ignore
+                patch={
+                    "narrative": result.get("narrative", ""),
+                    "beat_counter": result.get("beat_counter", 0),
+                },
+                event_type="GraphExecution",
+                source_node="engine",
+                parent_event_id=ctx.execution_id,
+                extra_data={
+                    "intent": result.get("intent"),
+                    "resolution": result.get("resolution"),
+                },
+            )
+        except Exception as e:
+            logger.warning(f"Engine: Graph 事件记录失败: {e}")
+
+    @staticmethod
+    def _add_error(state: GameState, error_msg: str):
+        """向 state 中添加错误记录"""
+        errors = state.get("errors", [])
+        if isinstance(errors, list):
+            errors.append(error_msg)
+            state["errors"] = errors
+
+    # ── 生命周期管理 ──
+
+    async def close(self):
+        """关闭引擎，释放资源"""
+        if self._event_store:
+            try:
+                await self._event_store.close()
+            except Exception as e:
+                logger.warning(f"Engine.close: EventStore 关闭异常: {e}")
+        if self._snapshot_mgr:
+            try:
+                await self._snapshot_mgr.close()
+            except Exception as e:
+                logger.warning(f"Engine.close: SnapshotManager 关闭异常: {e}")
+        logger.info("Engine: 已关闭")
+
+    # ── 状态重建 ──
+
+    async def replay_to_state(
+        self,
+        session_id: str,
+    ) -> Optional[GameState]:
+        """回放事件重建指定会话的状态
+
+        需要 event_log 已配置。
+        """
+        if not self._event_log:
+            logger.warning("Engine.replay_to_state: event_log 未配置")
+            return None
+        try:
+            state = await self._event_log.replay_to_state(session_id)
+            logger.info(
+                f"Engine.replay_to_state: session={session_id[:8]} "
+                f"state_keys={list(state.keys())}"
+            )
+            return state
+        except Exception as e:
+            logger.error(f"Engine.replay_to_state: 失败 {e}")
+            return None
+
+    # ── 工厂方法 ──
+
+    @classmethod
+    async def create(
+        cls,
+        graph: CompiledGraph,
+        mode: str = ENGINE_MODE_LANGGRAPH,
+        session_id: Optional[str] = None,
+        enable_event_log: bool = False,
+        enable_snapshot: bool = False,
+    ) -> GraphEngine:
+        """异步工厂方法 — 创建带完整基础设施的 Engine
+
+        Args:
+            graph:             编译好的 CompiledGraph
+            mode:              引擎模式
+            session_id:        可选的测试会话 ID
+            enable_event_log:  是否启用事件溯源
+            enable_snapshot:   是否启用状态快照
+
+        Returns:
+            配置好的 GraphEngine 实例
+        """
+        event_store = None
+        event_log = None
+        snapshot_mgr = None
+
+        if enable_event_log:
+            event_store = EventStore()
+            await event_store._init_db()
+            event_log = EventLog(event_store)
+
+        if enable_snapshot:
+            snapshot_mgr = SnapshotManager(
+                event_store=event_store,
+            )
+
+        return cls(
+            graph=graph,
+            mode=mode,
+            event_store=event_store,
+            event_log=event_log,
+            snapshot_mgr=snapshot_mgr,
+        )
