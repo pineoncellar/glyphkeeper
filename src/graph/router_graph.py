@@ -7,7 +7,7 @@
   - COMBAT_ACTION       → combat
   - MOVE                → investigate
   - PHYSICAL_INTERACT   → investigate
-  - SOCIAL_INTERACT     → narrate
+  - SOCIAL_INTERACT     → npc_dialogue
   - META                → narrate
   - 未知类型            → narrate（兜底）
 
@@ -31,7 +31,7 @@ _ROUTING_TABLE: dict[str, str] = {
     "COMBAT_ACTION": "combat",
     "MOVE": "investigate",
     "PHYSICAL_INTERACT": "investigate",
-    "SOCIAL_INTERACT": "narrate",
+    "SOCIAL_INTERACT": "npc_dialogue",
     "META": "narrate",
 }
 
@@ -45,9 +45,10 @@ def route_by_intent(state: GameState) -> str:
 
     Returns:
         下一个节点的名称:
-        - "combat"      → CombatGraph
-        - "investigate" → InvestigationGraph
-        - "narrate"     → 直接叙事（兜底）
+        - "combat"       → CombatGraph
+        - "investigate"  → InvestigationGraph
+        - "npc_dialogue" → NPCDialogueNode
+        - "narrate"      -> 直接叙事（兜底）
     """
     intent = state.get("intent")
     if not intent:

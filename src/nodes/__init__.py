@@ -4,7 +4,7 @@
 @Note     :   每个 node 是独立可测试的 async State → State 函数
 
 子模块:
-  - nodes/llm/     : LLM 驱动节点（intent / narrate / adjudicate）
+  - nodes/llm/     : LLM 驱动节点（intent / narrate / adjudicate / npc_dialogue）
   - nodes/rules/   : 确定性规则节点（combat / sanity / skill）
   - nodes/tools/   : 工具节点（dice / lookup / roll）
 
@@ -18,6 +18,7 @@
 from src.nodes.llm.intent_node import intent_node, rule_only_intent_node
 from src.nodes.llm.narrator_node import narrate_node
 from src.nodes.llm.adjudicator_node import adjudicate_node
+from src.nodes.llm.npc_dialogue_node import npc_dialogue_node
 from src.nodes.rules.combat_node import combat_node, init_combat_node
 from src.nodes.rules.sanity_node import sanity_node
 from src.nodes.rules.skill_node import skill_node, batch_skill_check
@@ -31,6 +32,7 @@ __all__ = [
     "rule_only_intent_node",
     "narrate_node",
     "adjudicate_node",
+    "npc_dialogue_node",
     # Rule Nodes
     "combat_node",
     "init_combat_node",

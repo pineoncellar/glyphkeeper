@@ -188,6 +188,28 @@ class WorldSummarizer:
                 for i, n in enumerate(narratives, 1):
                     lines.append(f"  [{i}] {n[:150]}...")
 
+            # NPC 对话统计和关系追踪：分析 NPCDialogue 事件
+            npc_dialogues = [r for r in relevant if r["type"] == "NPCDialogue"]
+            if npc_dialogues:
+                # 按 NPC 名称分组统计对话次数
+                npc_talk_count: dict[str, int] = {}
+                for d in npc_dialogues:
+                    # 从 data 字段提取 NPC 名（事件数据不在 entry 的 phase/narrative 中）
+                    pass
+                # 直接在事件级别统计
+                npc_counts: dict[str, int] = {}
+                for e in events:
+                    if e.get("type") == "NPCDialogue":
+                        edata = e.get("data", {})
+                        nname = edata.get("npc_name", "unknown")
+                        npc_counts[nname] = npc_counts.get(nname, 0) + 1
+                if npc_counts:
+                    lines.append("")
+                    lines.append("NPC 交互统计:")
+                    for nname, cnt in sorted(npc_counts.items(), key=lambda x: -x[1]):
+                        bar = "█" * min(cnt, 15)
+                        lines.append(f"  {nname:>12}: {bar} ({cnt})")
+
             summary = "\n".join(lines)
 
             # 写入 VectorStore

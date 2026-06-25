@@ -49,6 +49,10 @@ class GameState(TypedDict):
     character: Optional[dict]           # 调查员角色数据（由角色创建流程注入）
     current_location: str               # 玩家当前所在场景 key
 
+    # ── NPC 交互状态 ──
+    npc_relations: dict                 # NPC 关系追踪: {npc_name: {talk_count, disposition, last_talk}}
+    current_npc: str                    # 当前对话中的 NPC 名称
+
     # ── 交互挂起 ──
     pending_dice: Optional[dict]        # 等待玩家掷骰: {reason, skill_name, difficulty, bonus_dice, penalty_dice}
 
@@ -87,6 +91,8 @@ def create_initial_state(
         "game_phase": "exploration",
         "character": None,
         "current_location": "",
+        "npc_relations": {},
+        "current_npc": "",
         "active_tags": [],
         "pending_dice": None,
         "combat_active": False,

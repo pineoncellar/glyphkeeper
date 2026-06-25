@@ -2,6 +2,7 @@
 @File     :   graph/__init__.py
 @Desc     :   Graph 包 — 系统执行拓扑定义
 @Note     :   导出所有 Graph 构建函数和已编译实例
+              路由: COMBAT→combat, MOVE/PHYSICAL→investigate, SOCIAL→npc_dialogue, META/其他→narrate
 """
 
 from __future__ import annotations

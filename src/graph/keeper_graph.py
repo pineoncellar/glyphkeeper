@@ -4,20 +4,23 @@
 @Note     :   编译后通过 runtime/engine.py 的 GraphEngine 驱动
 
 主流程:
-    START → intent → router → [combat_subgraph]  ──→ narrate → END
-                               [investigate_subgraph] ─┘
-                               [narrate (直接)] ──────┘
+    START → intent → router → [combat_subgraph]       ──→ narrate → END
+                               [investigate_subgraph]  ──┘
+                               [npc_dialogue]          ──┘
+                               [narrate (直接)]        ──┘
 
 节点说明:
-  - intent:       IntentNode（LLM 意图分析 + 规则兜底）
-  - combat:       CombatSubgraph（战斗流程：掷骰→裁决→循环）
-  - investigate:  InvestigationSubgraph（调查流程：技能检定）
-  - narrate:      NarratorNode（LLM 叙事生成 + 模板兜底）
+  - intent:        IntentNode（LLM 意图分析 + 规则兜底）
+  - combat:        CombatSubgraph（战斗流程：掷骰→裁决→循环）
+  - investigate:   InvestigationSubgraph（调查流程：技能检定）
+  - npc_dialogue:  NPCDialogueNode（NPC 对话回应生成）
+  - narrate:       NarratorNode（LLM 叙事生成 + 模板兜底）
 
 路由规则:
   - COMBAT_ACTION     → combat subgraph
   - MOVE / PHYSICAL   → investigate subgraph
-  - SOCIAL / META/其他 → 直接 narrate
+  - SOCIAL_INTERACT   → npc_dialogue
+  - META / 其他       → 直接 narrate
 """
 
 from __future__ import annotations
@@ -26,6 +29,7 @@ from langgraph.graph import StateGraph, START, END
 from src.state.game_state import GameState
 from src.nodes.llm.intent_node import intent_node
 from src.nodes.llm.narrator_node import narrate_node
+from src.nodes.llm.npc_dialogue_node import npc_dialogue_node
 from src.graph.router_graph import route_by_intent
 from src.graph.combat_graph import combat_subgraph
 from src.graph.investigation_graph import investigation_subgraph
@@ -47,8 +51,9 @@ def build_keeper_graph() -> StateGraph:
     # ── 注册节点 ──
     builder.add_node("intent", intent_node)
     builder.add_node("narrate", narrate_node)
-    builder.add_node("combat", combat_subgraph)          # 战斗子图
-    builder.add_node("investigate", investigation_subgraph)  # 调查子图
+    builder.add_node("combat", combat_subgraph)             # 战斗子图
+    builder.add_node("investigate", investigation_subgraph) # 调查子图
+    builder.add_node("npc_dialogue", npc_dialogue_node)     # NPC 对话节点
 
     # ── 定义边 ──
     # START → 意图分析
@@ -61,13 +66,15 @@ def build_keeper_graph() -> StateGraph:
         {
             "combat": "combat",
             "investigate": "investigate",
+            "npc_dialogue": "npc_dialogue",
             "narrate": "narrate",
         },
     )
 
-    # 子图执行完后 → 叙事
+    # 子图/NPC 对话执行完后 → 叙事
     builder.add_edge("combat", "narrate")
     builder.add_edge("investigate", "narrate")
+    builder.add_edge("npc_dialogue", "narrate")
 
     # 叙事 → 结束
     builder.add_edge("narrate", END)
