@@ -55,12 +55,20 @@ class VectorStore:
         domain: str = "world",
         llm_tier: str = "standard",
         force_reinit: bool = False,
+        use_local_storage: bool = False,
     ) -> "VectorStore":
-        """获取指定 domain 的 VectorStore 实例（单例）"""
+        """获取指定 domain 的 VectorStore 实例（单例）
+
+        参数:
+            domain: 数据域 ("world" / "rules")
+            llm_tier: LLM 模型层级
+            force_reinit: 强制重新初始化
+            use_local_storage: 强制使用本地 JSON 存储（即使配置了 PostgreSQL）
+        """
         async with cls._lock:
             if domain not in cls._instances or force_reinit:
                 cls._instances[domain] = cls(domain)
-                await cls._instances[domain]._initialize(llm_tier)
+                await cls._instances[domain]._initialize(llm_tier, use_local_storage)
             return cls._instances[domain]
 
     @classmethod
@@ -72,8 +80,13 @@ class VectorStore:
 
     # ── 初始化 ──
 
-    async def _initialize(self, llm_tier: str = "standard"):
-        """初始化 LightRAG 实例"""
+    async def _initialize(self, llm_tier: str = "standard", use_local_storage: bool = False):
+        """初始化 LightRAG 实例
+
+        参数:
+            llm_tier: LLM 模型层级
+            use_local_storage: 强制使用本地 JSON 存储（即使配置了 PostgreSQL）
+        """
         if self._initialized:
             logger.warning(f"VectorStore({self.domain}) 已初始化，跳过")
             return
@@ -95,8 +108,8 @@ class VectorStore:
         llm_func = self._create_llm_func(llm_tier)
         embedding_func = self._create_embedding_func()
 
-        # 构建存储配置
-        storage_config = self._build_storage_config(str(working_dir), workspace)
+        # 构建存储配置（如果 use_local_storage=True，强制本地存储）
+        storage_config = self._build_storage_config(str(working_dir), workspace, use_local_storage)
 
         try:
             self.rag = LightRAG(
@@ -168,8 +181,14 @@ class VectorStore:
             func=embedding_func,
         )
 
-    def _build_storage_config(self, working_dir: str, workspace: str) -> dict:
-        """构建 LightRAG 存储配置"""
+    def _build_storage_config(self, working_dir: str, workspace: str, use_local_storage: bool = False) -> dict:
+        """构建 LightRAG 存储配置
+
+        参数:
+            working_dir: 工作目录
+            workspace: 工作空间名称
+            use_local_storage: 强制使用本地 JSON 存储（即使配置了 PostgreSQL）
+        """
         settings = get_settings()
         db_config = settings.database
 
@@ -181,6 +200,11 @@ class VectorStore:
             "kv_storage": "JsonKVStorage",
             "doc_status_storage": "JsonDocStatusStorage",
         }
+
+        # 如果强制使用本地存储，跳过 PG 配置
+        if use_local_storage:
+            logger.info("VectorStore: 强制使用本地 JSON 存储")
+            return config
 
         # 如果配置了 PostgreSQL，升级存储
         if db_config.host:

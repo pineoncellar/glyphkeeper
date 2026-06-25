@@ -143,6 +143,13 @@ class CliAdapter(AbstractAdapter):
                 await self._manual_roll()
                 continue
 
+            # 特殊处理 /ingest（不是游戏回合）
+            if msg.type == MessageType.SYSTEM_CMD and msg.text.strip().lower().startswith("/ingest"):
+                out = await self.handle(msg)
+                await self.send(out)
+                print()
+                continue
+
             # 常规处理
             self._turn_count += 1
             if msg.type == MessageType.PLAYER_INPUT:

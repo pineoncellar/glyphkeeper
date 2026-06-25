@@ -138,14 +138,21 @@ class AbstractAdapter(ABC):
             await self._scheduler.remove_session(session_id)
             # 重建会话
             await self._scheduler.submit(session_id, "")
-            return OutboundMessage.system_msg("✅ 会话已重置", session_id=session_id)
+            return OutboundMessage.system_msg("会话已重置", session_id=session_id)
 
         if cmd in ("/help", "/h"):
             return OutboundMessage.system_msg(
-                "可用命令: /help, /status, /reset, /quit\n"
+                "可用命令: /help, /status, /reset, /ingest, /quit\n"
+                "  /ingest list        - 列出可用模组\n"
+                "  /ingest <模组名>    - 摄入指定模组 (如 /ingest book)\n"
+                "  /ingest file <路径> - 从文件路径摄入\n"
                 "直接输入文本开始游戏。",
                 session_id=session_id,
             )
+
+        # ── /ingest 命令 — 模组数据摄入 ──
+        if cmd.startswith("/ingest"):
+            return await self._handle_ingest_cmd(cmd, session_id)
 
         return OutboundMessage.system_msg(f"未知命令: {cmd}", level="warn", session_id=session_id)
 
@@ -189,6 +196,79 @@ class AbstractAdapter(ABC):
         except Exception as e:
             logger.error(f"引擎执行异常: {e}", exc_info=True)
             return OutboundMessage.error(f"执行失败: {type(e).__name__}: {e}", session_id=session_id)
+
+    # ── 模组摄入命令 ──
+
+    async def _handle_ingest_cmd(self, cmd: str, session_id: str) -> OutboundMessage:
+        """处理 /ingest 子命令：摄入模组数据"""
+        parts = cmd.split(maxsplit=2)
+        # parts[0] = "/ingest", parts[1:] = 子参数
+
+        if len(parts) < 2:
+            return OutboundMessage.system_msg(
+                "用法:\n"
+                "  /ingest list            - 列出可用模组\n"
+                "  /ingest <模组名>        - 摄入指定模组\n"
+                "  /ingest file <文件路径> - 从文件路径摄入",
+                session_id=session_id,
+            )
+
+        sub = parts[1]
+
+        # ── /ingest list ──
+        if sub == "list":
+            from src.tools.ingestion import find_module_files
+
+            files = find_module_files()
+            if not files:
+                return OutboundMessage.system_msg("未找到任何模组文件。", session_id=session_id)
+
+            lines = [f"可用模组 ({len(files)} 个):"]
+            for f in files:
+                try:
+                    import json
+                    with open(f, "r", encoding="utf-8") as fh:
+                        data = json.load(fh)
+                    meta = data.get("meta", {})
+                    name = meta.get("module_name", f.stem)
+                    desc = meta.get("description", "")[:60]
+                    lines.append(f"  - {name}  ({desc})")
+                except Exception:
+                    lines.append(f"  - {f.stem}")
+            return OutboundMessage.system_msg("\n".join(lines), session_id=session_id)
+
+        # ── /ingest file <路径> ──
+        if sub == "file":
+            if len(parts) < 3:
+                return OutboundMessage.system_msg("请指定文件路径", level="warn", session_id=session_id)
+
+            file_path = parts[2]
+            from pathlib import Path
+            path = Path(file_path)
+            if not path.is_absolute():
+                from src.tools import PROJECT_ROOT
+                path = PROJECT_ROOT / path
+
+            if not path.exists():
+                return OutboundMessage.system_msg(f"文件不存在: {path}", level="error", session_id=session_id)
+
+            from src.tools.ingestion import ingest_by_path
+            success = await ingest_by_path(path)
+            if success:
+                return OutboundMessage.system_msg(f"[OK] 模组摄入完成: {path.name}", session_id=session_id)
+            return OutboundMessage.system_msg(f"[FAIL] 模组摄入失败: {path.name}", level="error", session_id=session_id)
+
+        # ── /ingest <模组名> ──
+        module_name = sub
+        from src.tools.ingestion import ingest_by_name
+        success = await ingest_by_name(module_name)
+        if success:
+            return OutboundMessage.system_msg(f"[OK] 模组 '{module_name}' 摄入完成", session_id=session_id)
+        return OutboundMessage.system_msg(
+            f"[FAIL] 模组 '{module_name}' 摄入失败（未找到或处理出错）",
+            level="error",
+            session_id=session_id,
+        )
 
     # ── 工具方法 ──
 

@@ -1,10 +1,11 @@
 """
-tools - 外部工具层 + 配置管理
+tools - 外部工具层 + 配置管理 + 模组摄入
 
 职责:
   - 提供无副作用的纯工具函数
   - 骰子引擎、随机数、向量搜索、时间工具
   - 全局配置管理（config.yaml / providers.ini）
+  - 模组数据摄入（intermediate JSON → VectorStore + EventStore）
   - 分级 Logger 工厂
 """
 
@@ -30,6 +31,14 @@ from src.tools.config import (
     _DEBUG_MODE,
 )
 
+from src.tools.ingestion import (
+    ModuleIngestor,
+    ingest_by_name,
+    ingest_by_path,
+    list_available_modules,
+    find_module_files,
+)
+
 __all__ = [
     # config
     "PROJECT_ROOT",
@@ -47,4 +56,10 @@ __all__ = [
     "_early_log",
     "_settings_instance",
     "_DEBUG_MODE",
+    # ingestion
+    "ModuleIngestor",
+    "ingest_by_name",
+    "ingest_by_path",
+    "list_available_modules",
+    "find_module_files",
 ]
