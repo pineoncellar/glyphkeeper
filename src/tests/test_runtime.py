@@ -460,11 +460,14 @@ class TestGraphEngine:
         from src.graph.keeper_graph import keeper_graph
         engine = GraphEngine(keeper_graph, mode=ENGINE_MODE_LANGGRAPH)
 
-        narrative = await engine.run("你好", session_id="test-session")
+        narrative, new_state = await engine.run("你好", session_id="test-session")
         assert isinstance(narrative, str)
         assert len(narrative) > 0
         # 应包含叙事文本
         assert narrative is not None
+        # 应返回新状态
+        assert isinstance(new_state, dict)
+        assert new_state.get("session_id") == "test-session"
 
     @pytest.mark.asyncio
     async def test_run_with_previous_state(self):
@@ -475,13 +478,15 @@ class TestGraphEngine:
         prev = create_initial_state("test-session", "测试")
         prev["beat_counter"] = 3
 
-        narrative = await engine.run(
+        narrative, new_state = await engine.run(
             "我检查房间",
             session_id="test-session",
             previous_state=prev,
         )
         assert isinstance(narrative, str)
         assert len(narrative) > 0
+        # 上一轮 state 的字段应保留
+        assert new_state.get("session_id") == "test-session"
 
     @pytest.mark.asyncio
     async def test_run_error_handling(self):
@@ -491,7 +496,7 @@ class TestGraphEngine:
         engine = GraphEngine(keeper_graph)
 
         # 注入空的 session_id 不应导致崩溃
-        result = await engine.run("test", session_id="")
+        result, _ = await engine.run("test", session_id="")
         assert isinstance(result, str)
         # 要么是正常叙事，要么是错误消息
         assert len(result) > 0
@@ -587,6 +592,35 @@ class TestInputScheduler:
         slot = scheduler.get_session("session-1")
         assert slot is not None
         assert slot.turn_count == 2
+
+    @pytest.mark.asyncio
+    async def test_state_persists_across_turns(self):
+        """多轮对话中 state 正确累积"""
+        from src.graph.keeper_graph import keeper_graph
+        engine = GraphEngine(keeper_graph)
+        scheduler = InputScheduler(engine)
+
+        # 第一轮：状态从无到有
+        await scheduler.submit("persist-test", "第一轮")
+        state1 = scheduler.get_session_state("persist-test")
+        assert state1 is not None
+        assert state1["beat_counter"] >= 1
+        assert state1["session_id"] == "persist-test"
+        first_narrative = state1.get("narrative", "")
+
+        # 第二轮：beat_counter 应递增，narrative 可能保留
+        await scheduler.submit("persist-test", "第二轮")
+        state2 = scheduler.get_session_state("persist-test")
+        assert state2 is not None
+        assert state2["beat_counter"] >= state1["beat_counter"] + 1
+        # session_id 应始终一致
+        assert state2["session_id"] == "persist-test"
+
+        # 第三轮：进一步累积
+        await scheduler.submit("persist-test", "第三轮")
+        state3 = scheduler.get_session_state("persist-test")
+        assert state3 is not None
+        assert state3["beat_counter"] >= state2["beat_counter"] + 1
 
     @pytest.mark.asyncio
     async def test_multiple_sessions(self):
