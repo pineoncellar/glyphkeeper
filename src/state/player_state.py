@@ -2,7 +2,6 @@
 @File     :   player_state.py
 @Desc     :   玩家/调查员状态管理 — 从 GameState 到持久化的读写接口
 @Note     :   适配旧 entity_repo + investigator_profile_repo 到新的 state 架构
-              Phase 10: 新增 JSON 文件持久化（不依赖 EventStore）
 
 职责:
   - 管理单个调查员的完整状态（属性、技能、物品、位置）
@@ -51,14 +50,14 @@ class PlayerLoader:
     职责:
       - 通过 EventStore 或 JSON 文件读写调查员数据
       - 将领域对象 (Character) 转换为 dict 存储
-      - 提供零依赖的 JSON 文件持久化（Phase 10 推荐方式）
+      - 提供零依赖的 JSON 文件持久化
     """
 
     def __init__(self, event_store: Optional[EventStore] = None, event_log: Optional[EventLog] = None):
         self._event_store = event_store
         self._event_log = event_log
 
-    # ── JSON 文件持久化（零依赖，Phase 10 推荐） ──
+    # ── JSON 文件持久化 ──
 
     def character_exists(self, session_id: str) -> bool:
         """检查指定会话是否有已保存的角色"""

@@ -25,6 +25,9 @@ from src.domain.character import (
     calculate_skill_points, calculate_interest_points,
 )
 from src.state.player_state import PlayerLoader
+from src.workers.memorizer_worker import MemorizerWorker
+from src.workers.world_summarizer import WorldSummarizer
+from src.workers.background_sync import BackgroundSync
 
 logger = get_logger(__name__)
 
@@ -71,6 +74,12 @@ class CliAdapter(AbstractAdapter):
         self._available_module: Optional[str] = None
         self._player_loader = PlayerLoader()
         self._character: Optional[Character] = None
+
+        # Workers -- 懒初始化，由 _ensure_workers 创建
+        self._memorizer: Optional[MemorizerWorker] = None
+        self._summarizer: Optional[WorldSummarizer] = None
+        self._sync: Optional[BackgroundSync] = None
+        self._worker_tasks: list[asyncio.Task] = []
 
     # ── AbstractAdapter 接口实现 ──
 
@@ -131,7 +140,7 @@ class CliAdapter(AbstractAdapter):
         print(_color("═" * 50, _CYAN))
         print()
 
-        # 1. 输入姓名
+        # 先输入调查员姓名
         name = ""
         while not name.strip():
             raw = await asyncio.get_event_loop().run_in_executor(
@@ -140,7 +149,7 @@ class CliAdapter(AbstractAdapter):
             name = raw.strip()
         print()
 
-        # 2. 选择职业
+        # 再让玩家从职业模板中选择
         print(_color("─ 选择职业 ───────────────────────", _BOLD))
         for i, occ in enumerate(OCCUPATIONS, 1):
             print(f"  {i:>2}. {_color(occ.name, _CYAN)}")
@@ -161,7 +170,7 @@ class CliAdapter(AbstractAdapter):
         print(f"\n  已选择: {_color(occupation.name, _CYAN)}")
         print()
 
-        # 3. 骰点属性
+        # 然后进入属性骰点环节
         stats = None
         print(_color("─ 属性骰点 ───────────────────────", _BOLD))
         while True:
@@ -178,7 +187,7 @@ class CliAdapter(AbstractAdapter):
                 break
             print()
 
-        # 4. 技能分配
+        # 确定属性后分配职业技能点
         print()
         print(_color("─ 职业技能分配 ───────────────────", _BOLD))
         total_occ_pts = calculate_skill_points(occupation, stats)
@@ -221,7 +230,7 @@ class CliAdapter(AbstractAdapter):
         # 显示完整角色
         character = create_investigator(name, occupation.name, stats, occ_skills)
 
-        # 5. 创建完成
+        # 最后完成角色创建
         self._character = character
         self._player_loader.save_character(self.session_id, character)
 
@@ -292,6 +301,9 @@ class CliAdapter(AbstractAdapter):
         print(_color("💡 直接输入文本开始探索，输入 /help 查看命令", _DIM))
         print()
 
+        # 后台 Workers 启动
+        await self._ensure_workers()
+
         self._running = True
         while self._running:
             try:
@@ -349,17 +361,23 @@ class CliAdapter(AbstractAdapter):
             out = await self.handle(msg)
             await self.send(out)
 
-            # 🔥 Phase 12: 检测 state 中是否有 pending_dice，进入交互式掷骰子循环
+            # 检测 state 中是否有 pending_dice，进入交互式掷骰子循环
             await self._resolve_pending_dice_interactive(session_id=self.session_id)
+
+            # 每轮交互后触发记忆固化
+            await self._trigger_memorizer(session_id=self.session_id)
 
             print()
 
-        print(_color("\n👋 感谢使用 GlyphKeeper！", _CYAN))
+        # Workers 优雅退出
+        await self._stop_workers()
+        print(_color("  后台任务已停止", _DIM))
+        print(_color("\n感谢使用 GlyphKeeper！", _CYAN))
 
     # ── 工具方法 ──
 
     # ================================================================
-    # Phase 12: 增强型掷骰系统
+    # 增强型掷骰系统
     # ================================================================
 
     async def _handle_roll_cmd(self, cmd: str, session_id: str) -> OutboundMessage:
@@ -485,16 +503,16 @@ class CliAdapter(AbstractAdapter):
             f"技能 {skill_value} → {_color(level.value, color)}{extra}",
             session_id=session_id,
         )
+    
+    _DICE_TIMEOUT = 60.0
+    """等待玩家掷骰输入的超时秒数，超时后自动掷骰（状态：超时保护）"""
 
     async def _resolve_pending_dice_interactive(self, session_id: str):
         """
-        🔥 Phase 12: 检测 state 中是否有 pending_dice，进入交互式掷骰子循环。
+        检测 state 中是否有 pending_dice，进入交互式掷骰子循环。
 
-        在每次引擎执行后调用。如果 state 中有 pending_dice：
-          1. 显示掷骰请求信息
-          2. 提示玩家输入掷骰值
-          3. 注入 roll_value → 重新提交给引擎
-          4. 显示结果
+        流程：先检测 pending_dice 并显示请求信息，再等待玩家输入掷骰值。
+        超时后自动掷骰，无效输入走自动掷骰，最后注入 roll_value 并重提交引擎。
         """
         state = self._scheduler.get_session_state(session_id) if self._scheduler else None
         if not state:
@@ -504,7 +522,7 @@ class CliAdapter(AbstractAdapter):
         if not pending:
             return
 
-        # 如果已经有 roll_value 了（来自上一轮注入），跳过
+        # 已有 roll_value（来自上一轮注入），跳过
         if pending.get("roll_value") is not None:
             return
 
@@ -516,11 +534,10 @@ class CliAdapter(AbstractAdapter):
 
         # 显示掷骰请求
         print()
-        print(_color("═" * 50, _YELLOW))
-        print(_color(f"  🎲 需要掷骰!", _BOLD))
+        print(_color("=" * 50, _YELLOW))
+        print(_color(f"  [掷骰] 需要检定!", _BOLD))
         print(_color(f"  原因: {reason}", _YELLOW))
         if skill_name:
-            # 尝试从角色数据读取技能值
             skill_val = 0
             if self._character:
                 skill_val = self._character.skills.get(skill_name, 0)
@@ -533,36 +550,41 @@ class CliAdapter(AbstractAdapter):
             print(f"  奖励骰: +{bonus_dice}")
         if penalty_dice:
             print(f"  惩罚骰: +{penalty_dice}")
-        print(_color("═" * 50, _YELLOW))
-        print(_color("  输入你的掷骰结果 (1-100)，或直接回车自动掷骰", _DIM))
+        print(_color("=" * 50, _YELLOW))
+        print(_color(f"  输入掷骰值 (1-100)，{int(self._DICE_TIMEOUT)}s 无操作自动掷骰", _DIM))
         print()
 
-        # 等待玩家输入
+        # 等待玩家输入（带超时）
+        raw = ""
+        timed_out = False
         try:
-            raw = await asyncio.get_event_loop().run_in_executor(
-                None,
-                lambda: input(f"{_color('掷骰值', _GREEN)} > "),
+            raw = await asyncio.wait_for(
+                asyncio.get_event_loop().run_in_executor(
+                    None,
+                    lambda: input(f"{_color('掷骰值', _GREEN)} > "),
+                ),
+                timeout=self._DICE_TIMEOUT,
             )
+        except asyncio.TimeoutError:
+            print(_color(f"  [超时] 无响应，自动掷骰", _YELLOW))
+            timed_out = True
         except (KeyboardInterrupt, EOFError):
             print()
             return
 
-        raw = raw.strip()
-
         # 确定掷骰值
-        if not raw:
-            # 自动掷骰
+        if timed_out or not raw.strip():
             from src.tools.dice import roll_d100
             _, _, roll_value = roll_d100()
             print(_color(f"  自动掷骰: {roll_value}", _DIM))
         else:
             try:
-                roll_value = int(raw)
+                roll_value = int(raw.strip())
                 if not (1 <= roll_value <= 100):
-                    print(_color("⚠️  掷骰值必须在 1-100 之间，使用 50", _YELLOW))
+                    print(_color(f"  掷骰值越界 (1-100)，使用 50 替代", _YELLOW))
                     roll_value = 50
             except ValueError:
-                print(_color(f"⚠️  无效数值，自动掷骰", _YELLOW))
+                print(_color(f"  无效数值，自动掷骰", _YELLOW))
                 from src.tools.dice import roll_d100
                 _, _, roll_value = roll_d100()
 
@@ -594,9 +616,93 @@ class CliAdapter(AbstractAdapter):
 
         except Exception as e:
             logger.error(f"掷骰结果提交失败: {e}")
-            print(_color(f"❌ 掷骰结果提交失败: {e}", _RED))
+            print(_color(f"掷骰结果提交失败: {e}", _RED))
 
         print()
+
+    # ================================================================
+    # Workers 生命周期管理
+    # ================================================================
+
+    async def _ensure_workers(self):
+        """初始化三个后台 Worker 并启动它们的后台任务。
+
+        先通过 EventStore 和 VectorStore 构建存储层实例，
+        再创建 MemorizerWorker、WorldSummarizer、BackgroundSync，
+        最后用 asyncio.create_task 启动。各 Worker 内部已处理
+        存储层为 None 的降级逻辑，初始化失败不影响游戏主循环。
+        """
+        if self._memorizer is not None:
+            return
+
+        try:
+            from src.memory.event_store import EventStore
+            from src.memory.vector_store import VectorStore
+
+            event_store = EventStore()
+            vector_store = await VectorStore.get_instance(
+                domain="world", llm_tier="standard", use_local_storage=True,
+            )
+
+            self._memorizer = MemorizerWorker(
+                event_store=event_store, vector_store=vector_store, interval=300,
+            )
+            self._summarizer = WorldSummarizer(
+                event_store=event_store, vector_store=vector_store, interval=600,
+            )
+            self._sync = BackgroundSync(
+                event_store=event_store, vector_store=vector_store,
+            )
+
+            self._worker_tasks = [
+                asyncio.create_task(self._memorizer.start(), name="memorizer"),
+                asyncio.create_task(self._summarizer.start(), name="summarizer"),
+                asyncio.create_task(self._sync.start(), name="sync"),
+            ]
+            logger.info("Phase13: 三个后台 Worker 已启动")
+        except Exception as e:
+            logger.warning(f"Phase13: Worker 初始化跳过 ({e})")
+
+    async def _stop_workers(self):
+        """依次停止所有 Worker，等待各自任务结束。"""
+        for w, name in [
+            (self._memorizer, "memorizer"),
+            (self._summarizer, "summarizer"),
+            (self._sync, "sync"),
+        ]:
+            if w is not None:
+                try:
+                    await w.stop()
+                except Exception as e:
+                    logger.debug(f"Phase13: {name} stop 异常 ({e})")
+
+        for t in self._worker_tasks:
+            if not t.done():
+                t.cancel()
+        if self._worker_tasks:
+            await asyncio.gather(*self._worker_tasks, return_exceptions=True)
+            self._worker_tasks.clear()
+            logger.info("Phase13: 所有 Worker 已停止")
+
+    async def _trigger_memorizer(self, session_id: str):
+        """每轮交互后触发 MemorizerWorker 固化当前轮叙事。
+
+        若 EventStore 中有待固化的事件，则调用 consolidate_session
+        写入 VectorStore。实现采用 try-and-ignore 模式，失败不影响
+        游戏主循环。
+        """
+        if self._memorizer is None:
+            return
+        try:
+            if self._memorizer._event_store is not None:
+                events = await self._memorizer._event_store.get_events(
+                    session_id, since_version=0,
+                )
+                if events:
+                    await self._memorizer.consolidate_session(session_id, events)
+                    await self._memorizer.trigger_now()
+        except Exception as e:
+            logger.debug(f"Phase13: 记忆触发跳过 ({e})")
 
 
 # ====================================================================
