@@ -7,6 +7,7 @@
   - 所有游戏状态的唯一权威来源
   - LLM 不直接修改 state，仅通过 event → reducer 变更
   - 支持快照与时间线回溯
+  - 模组载入（从 EventStore 读取已摄入数据）
 """
 
 from src.state.game_state import (
@@ -26,6 +27,7 @@ from src.state.event_log import EventLog
 from src.state.snapshot import SnapshotManager
 from src.state.player_state import PlayerLoader
 from src.state.world_state import WorldManager
+from src.state.module_loader import ModuleLoader
 
 __all__ = [
     # game_state
@@ -47,4 +49,6 @@ __all__ = [
     "PlayerLoader",
     # world_state
     "WorldManager",
+    # module_loader
+    "ModuleLoader",
 ]

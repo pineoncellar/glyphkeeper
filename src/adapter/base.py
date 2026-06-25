@@ -142,13 +142,26 @@ class AbstractAdapter(ABC):
 
         if cmd in ("/help", "/h"):
             return OutboundMessage.system_msg(
-                "可用命令: /help, /status, /reset, /ingest, /quit\n"
-                "  /ingest list        - 列出可用模组\n"
-                "  /ingest <模组名>    - 摄入指定模组 (如 /ingest book)\n"
-                "  /ingest file <路径> - 从文件路径摄入\n"
-                "直接输入文本开始游戏。",
+                "可用命令:\n"
+                "  /help           - 显示此帮助\n"
+                "  /status         - 查看当前会话状态\n"
+                "  /reset          - 重置当前会话\n"
+                "  /modules        - 列出已摄入的模组\n"
+                "  /start [模组名]  - 开始新游戏（加载模组）\n"
+                "  /ingest ...     - 摄入模组数据\n"
+                "  /ingest list    - 列出可摄入的模组文件\n"
+                "  /quit           - 退出\n"
+                "直接输入文本开始探索。",
                 session_id=session_id,
             )
+
+        # ── /modules 命令 — 列出已摄入模组 ──
+        if cmd in ("/modules", "/list"):
+            return await self._handle_modules_cmd(session_id)
+
+        # ── /start 命令 — 开始游戏 ──
+        if cmd.startswith("/start"):
+            return await self._handle_start_cmd(cmd, session_id)
 
         # ── /ingest 命令 — 模组数据摄入 ──
         if cmd.startswith("/ingest"):
@@ -267,6 +280,93 @@ class AbstractAdapter(ABC):
         return OutboundMessage.system_msg(
             f"[FAIL] 模组 '{module_name}' 摄入失败（未找到或处理出错）",
             level="error",
+            session_id=session_id,
+        )
+
+    # ── 模组列表命令 ──
+
+    async def _handle_modules_cmd(self, session_id: str) -> OutboundMessage:
+        """处理 /modules — 列出已摄入的模组"""
+        from src.state.module_loader import ModuleLoader
+
+        loader = ModuleLoader()
+        modules = await loader.list_modules()
+
+        if not modules:
+            return OutboundMessage.system_msg(
+                "尚未摄入任何模组。使用 /ingest list 查看可摄入的文件。",
+                level="warn",
+                session_id=session_id,
+            )
+
+        lines = [f"已摄入模组 ({len(modules)} 个):"]
+        for mod in modules:
+            name = mod.get("name", "?")
+            locs = mod.get("locations", 0)
+            lines.append(f"  - {name}  ({locs} 个场景)")
+        lines.append('使用 /start <模组名> 开始游戏。')
+        return OutboundMessage.system_msg("\n".join(lines), session_id=session_id)
+
+    # ── 开始游戏命令 ──
+
+    async def _handle_start_cmd(self, cmd: str, session_id: str) -> OutboundMessage:
+        """处理 /start [模组名] — 加载模组并开始游戏"""
+        parts = cmd.split(maxsplit=1)
+        module_name = parts[1].strip() if len(parts) > 1 else ""
+
+        from src.state.module_loader import ModuleLoader
+
+        loader = ModuleLoader()
+
+        # 未指定模组名 → 列出已摄入模组
+        if not module_name:
+            modules = await loader.list_modules()
+            if not modules:
+                return OutboundMessage.system_msg(
+                    "尚未摄入任何模组。使用 /ingest list 查看可摄入的文件。",
+                    level="warn",
+                    session_id=session_id,
+                )
+            if len(modules) == 1:
+                module_name = modules[0]["name"]
+            else:
+                names = "、".join(m["name"] for m in modules)
+                return OutboundMessage.system_msg(
+                    f"请指定模组名: /start <模组名>\n可用模组: {names}",
+                    session_id=session_id,
+                )
+
+        # 加载模组
+        state = await loader.load(session_id, module_name)
+        if state is None:
+            return OutboundMessage.system_msg(
+                f"模组 '{module_name}' 未找到。使用 /modules 查看已摄入的模组。",
+                level="error",
+                session_id=session_id,
+            )
+
+        # 将会话状态注入 scheduler
+        self._ensure_engine()
+        from src.runtime.scheduler import SessionSlot
+        from src.runtime.context import ExecutionContext as ECtx
+
+        await self._scheduler.remove_session(session_id)
+        slot = SessionSlot(
+            session_id=session_id,
+            state=state,
+            ctx=ECtx(session_id=session_id),
+        )
+        self._scheduler._sessions[session_id] = slot
+
+        narrative = state.get("narrative", "")
+        if narrative:
+            return OutboundMessage.narrative(
+                text=narrative,
+                session_id=session_id,
+                game_phase="exploration",
+            )
+        return OutboundMessage.system_msg(
+            f"模组 '{module_name}' 已加载，开始你的调查吧。",
             session_id=session_id,
         )
 

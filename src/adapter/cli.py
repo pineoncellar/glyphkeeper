@@ -62,6 +62,7 @@ class CliAdapter(AbstractAdapter):
     ):
         super().__init__(engine, scheduler, session_id)
         self._turn_count = 0
+        self._available_module: Optional[str] = None
 
     # ── AbstractAdapter 接口实现 ──
 
@@ -150,6 +151,16 @@ class CliAdapter(AbstractAdapter):
                 print()
                 continue
 
+            # 特殊处理 /start /modules（不是游戏回合）
+            lower = msg.text.strip().lower()
+            if msg.type == MessageType.SYSTEM_CMD and (
+                lower.startswith("/start") or lower in ("/modules", "/list")
+            ):
+                out = await self.handle(msg)
+                await self.send(out)
+                print()
+                continue
+
             # 常规处理
             self._turn_count += 1
             if msg.type == MessageType.PLAYER_INPUT:
@@ -185,6 +196,23 @@ class CliAdapter(AbstractAdapter):
 
 async def main_async():
     adapter = CliAdapter()
+    # 启动时尝试载入已摄入的模组
+    try:
+        from src.state.module_loader import ModuleLoader
+        loader = ModuleLoader()
+        modules = await loader.list_modules()
+        if modules:
+            mod = modules[0]
+            name = mod["name"]
+            print(_color(f"\n📖 检测到已摄入模组: {name}", _GREEN))
+            print(_color(f"   {mod.get('locations', 0)} 个场景", _DIM))
+            print()
+            # 将模组名存入 adapter，供 /start 命令使用
+            adapter._available_module = name
+    except Exception as e:
+        logger.debug(f"模组检测跳过: {e}")
+        adapter._available_module = None
+
     await adapter.run()
 
 
