@@ -159,41 +159,18 @@ def _parse_llm_response(response_text: str) -> dict | None:
     return None
 
 
+from src.tools.llm_client import call_llm as _call_llm
+
+
 async def _call_llm_for_adjudication(action_desc: str, context: str) -> str | None:
     """调用 LLM 获取裁决参数"""
     try:
-        import sys, os
-        old_src_path = None
-        for p in [
-            os.path.join(os.path.dirname(__file__), "../../../backup_old_structure/old_src"),
-            os.path.join(os.path.dirname(__file__), "../../backup_old_structure/old_src"),
-        ]:
-            ap = os.path.abspath(p)
-            if os.path.isdir(ap):
-                old_src_path = ap
-                break
-
-        if old_src_path and old_src_path not in sys.path:
-            sys.path.insert(0, old_src_path)
-
-        from llm import LLMFactory
-        llm = LLMFactory.get_llm("standard")
-
         messages = [
             {"role": "system", "content": ADJUDICATOR_SYSTEM_PROMPT},
             {"role": "user", "content": f"玩家行动: {action_desc}\n情境: {context}"},
         ]
+        return await _call_llm("standard", messages)
 
-        full_response = ""
-        async for chunk in llm.chat(messages):
-            if isinstance(chunk, str):
-                full_response += chunk
-
-        return full_response
-
-    except ImportError:
-        logger.debug("adjudicator_node: LLMFactory 不可用，使用规则兜底")
-        return None
     except Exception as e:
         logger.warning(f"adjudicator_node: LLM 调用失败: {e}")
         return None

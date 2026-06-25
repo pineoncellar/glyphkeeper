@@ -39,6 +39,12 @@ from src.tools.ingestion import (
     find_module_files,
 )
 
+from src.tools.llm_client import (
+    call_llm,
+    call_llm_stream,
+    ask_llm,
+)
+
 __all__ = [
     # config
     "PROJECT_ROOT",
@@ -62,4 +68,8 @@ __all__ = [
     "ingest_by_path",
     "list_available_modules",
     "find_module_files",
+    # llm_client
+    "call_llm",
+    "call_llm_stream",
+    "ask_llm",
 ]

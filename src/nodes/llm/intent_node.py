@@ -224,48 +224,23 @@ def _parse_llm_response(response_text: str) -> dict | None:
     return None
 
 
+from src.tools.llm_client import call_llm as _call_llm
+
+
 async def _call_llm_for_intent(player_input: str, context: str) -> str | None:
     """
     调用 LLM 获取意图分析结果。
 
-    尝试使用 LLMFactory，如果不可用则返回 None。
+    使用 src.tools.llm_client 统一客户端；
+    不可用时返回 None，调用方自动降级到规则兜底。
     """
     try:
-        # 尝试动态导入旧 LLMFactory
-        import sys
-        old_src_path = None
-        import os
-        possible_paths = [
-            os.path.join(os.path.dirname(__file__), "../../../backup_old_structure/old_src"),
-            os.path.join(os.path.dirname(__file__), "../../backup_old_structure/old_src"),
-        ]
-        for p in possible_paths:
-            ap = os.path.abspath(p)
-            if os.path.isdir(ap):
-                old_src_path = ap
-                break
-
-        if old_src_path and old_src_path not in sys.path:
-            sys.path.insert(0, old_src_path)
-
-        from llm import LLMFactory
-        llm = LLMFactory.get_llm("fast")
-
         messages = [
             {"role": "system", "content": INTENT_SYSTEM_PROMPT},
             {"role": "user", "content": f"当前游戏阶段: {context}\n玩家输入: {player_input}"},
         ]
+        return await _call_llm("fast", messages)
 
-        full_response = ""
-        async for chunk in llm.chat(messages):
-            if isinstance(chunk, str):
-                full_response += chunk
-
-        return full_response
-
-    except ImportError:
-        logger.debug("intent_node: LLMFactory 不可用，使用规则兜底")
-        return None
     except Exception as e:
         logger.warning(f"intent_node: LLM 调用失败: {e}")
         return None

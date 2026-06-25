@@ -127,6 +127,9 @@ def _template_combat_narrative(resolution: dict) -> str:
         return template.format(actor=actor, target=target)
 
 
+from src.tools.llm_client import call_llm as _call_llm
+
+
 async def _call_llm_for_narrative(
     intent: dict,
     resolution: dict,
@@ -136,23 +139,6 @@ async def _call_llm_for_narrative(
 ) -> str | None:
     """调用 LLM 生成叙事文本"""
     try:
-        import sys, os
-        old_src_path = None
-        for p in [
-            os.path.join(os.path.dirname(__file__), "../../../backup_old_structure/old_src"),
-            os.path.join(os.path.dirname(__file__), "../../backup_old_structure/old_src"),
-        ]:
-            ap = os.path.abspath(p)
-            if os.path.isdir(ap):
-                old_src_path = ap
-                break
-
-        if old_src_path and old_src_path not in sys.path:
-            sys.path.insert(0, old_src_path)
-
-        from llm import LLMFactory
-        llm = LLMFactory.get_llm("standard")
-
         context = (
             f"游戏阶段: {game_phase}\n"
             f"玩家意图: {intent.get('data', {}).get('action', '未知')}\n"
@@ -160,22 +146,12 @@ async def _call_llm_for_narrative(
             f"世界知识上下文: {world_context[:500] if world_context else '无'}\n"
             f"叙事历史: {narrative_history[-300:] if narrative_history else '无'}"
         )
-
         messages = [
             {"role": "system", "content": NARRATOR_SYSTEM_PROMPT},
             {"role": "user", "content": context},
         ]
+        return await _call_llm("standard", messages)
 
-        full_response = ""
-        async for chunk in llm.chat(messages):
-            if isinstance(chunk, str):
-                full_response += chunk
-
-        return full_response.strip()
-
-    except ImportError:
-        logger.debug("narrator_node: LLMFactory 不可用，使用模板兜底")
-        return None
     except Exception as e:
         logger.warning(f"narrator_node: LLM 调用失败: {e}")
         return None
