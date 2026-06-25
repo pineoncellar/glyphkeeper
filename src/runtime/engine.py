@@ -19,6 +19,7 @@ from langgraph.graph.state import CompiledStateGraph as CompiledGraph
 from src.state.game_state import GameState, create_initial_state
 from src.state.event_log import EventLog
 from src.state.snapshot import SnapshotManager
+from src.state.world_state import WorldManager
 from src.memory.event_store import EventStore
 from src.runtime.context import ExecutionContext
 from src.runtime.dispatcher import (
@@ -74,6 +75,7 @@ class GraphEngine:
         event_store: Optional[EventStore] = None,
         event_log: Optional[EventLog] = None,
         snapshot_mgr: Optional[SnapshotManager] = None,
+        world_mgr: Optional[WorldManager] = None,
         dispatcher: Optional[NodeDispatcher] = None,
     ):
         """
@@ -83,6 +85,7 @@ class GraphEngine:
             event_store:  事件溯源存储（None 则自动创建）
             event_log:    事件日志管理器（None 则自动创建）
             snapshot_mgr: 状态快照管理器（None 则自动创建）
+            world_mgr:    世界状态管理器（None 则懒加载）
             dispatcher:   Node 分发器（None 则自动创建，仅 full 模式使用）
         """
         self.graph = graph
@@ -90,6 +93,7 @@ class GraphEngine:
         self._event_store = event_store
         self._event_log = event_log
         self._snapshot_mgr = snapshot_mgr
+        self._world_manager = world_mgr
         self._dispatcher = dispatcher or NodeDispatcher(
             default_max_retries=3,
             default_timeout=30.0,
@@ -105,6 +109,16 @@ class GraphEngine:
     def snapshot_mgr(self) -> Optional[SnapshotManager]:
         return self._snapshot_mgr
 
+    @property
+    def world_manager(self) -> Optional[WorldManager]:
+        """获取 WorldManager 实例（懒加载）"""
+        if self._world_manager is None and self._event_store is not None:
+            self._world_manager = WorldManager(
+                event_store=self._event_store,
+                event_log=self._event_log,
+            )
+        return self._world_manager
+
     # ── 核心执行 ──
 
     async def run(
@@ -114,7 +128,7 @@ class GraphEngine:
         previous_state: Optional[GameState] = None,
         context: Optional[ExecutionContext] = None,
         auto_snapshot: bool = False,
-    ) -> str:
+    ) -> tuple[str, GameState]:
         """执行一次完整的 Graph 遍历
 
         参数:
@@ -125,7 +139,8 @@ class GraphEngine:
             auto_snapshot:  是否在执行后自动创建快照
 
         返回:
-            narrative: 叙事文本（执行失败时返回错误描述）
+            (narrative, new_state): 叙事文本与更新后的游戏状态
+            执行失败时 narrative 为错误描述
         """
         ctx = context or ExecutionContext(session_id=session_id)
 
@@ -136,6 +151,19 @@ class GraphEngine:
             previous_state=previous_state,
         )
 
+        # ── 执行前：注入场景上下文（如果 WorldManager 可用且有当前位置） ──
+        current_loc = state.get("current_location", "")
+        if current_loc and self.world_manager:
+            try:
+                loc_view = await self.world_manager.get_location_view(
+                    session_id, current_loc
+                )
+                # 只在不为空时覆盖，保留 lookup_node 的结果
+                if loc_view and not state.get("world_context"):
+                    state["world_context"] = loc_view
+            except Exception as e:
+                logger.debug(f"Engine.run: 场景上下文注入失败: {e}")
+
         logger.info(
             f"Engine.run: session={session_id[:8]} "
             f"mode={self.mode} "
@@ -145,14 +173,35 @@ class GraphEngine:
         # 执行
         try:
             if self.mode == ENGINE_MODE_LANGGRAPH:
-                narrative = await self._run_langgraph(state, ctx)
+                narrative, new_state = await self._run_langgraph(state, ctx)
             else:
-                narrative = await self._run_full(state, ctx)
+                narrative, new_state = await self._run_full(state, ctx)
 
-            # 自动快照
+            # ── 执行后：处理 MOVE 意图 → 更新角色位置 ──
+            intent = new_state.get("intent") or {}
+            if intent.get("type") == "MOVE" and self.world_manager:
+                character = new_state.get("character") or {}
+                target = intent.get("data", {}).get("target", "")
+                char_name = character.get("name", "")
+                if target and char_name:
+                    try:
+                        await self.world_manager.move_entity(
+                            session_id=session_id,
+                            entity_key=char_name,
+                            target_location_key=target,
+                            source_node="engine",
+                        )
+                        new_state["current_location"] = target
+                        logger.info(
+                            f"Engine.run: 角色 '{char_name}' 移动到 '{target}'"
+                        )
+                    except Exception as e:
+                        logger.debug(f"Engine.run: 移动失败: {e}")
+
+            # 自动快照（对 new_state 做）
             if auto_snapshot and self._snapshot_mgr:
                 try:
-                    snap_id = await self._snapshot_mgr.create(state, label="auto")
+                    snap_id = await self._snapshot_mgr.create(new_state, label="auto")
                     logger.debug(f"Engine.run: 快照已创建 {snap_id[:8]}")
                 except Exception as e:
                     logger.warning(f"Engine.run: 快照创建失败: {e}")
@@ -161,12 +210,12 @@ class GraphEngine:
                 f"Engine.run: OK session={session_id[:8]} "
                 f"narrative_len={len(narrative)}"
             )
-            return narrative
+            return narrative, new_state
 
         except Exception as e:
             error_msg = f"{type(e).__name__}: {e}"
             logger.error(f"Engine.run: FAILED {error_msg}\n{traceback.format_exc()}")
-            return f"（系统异常：{error_msg}）"
+            return f"（系统异常：{error_msg}）", state
 
     # ── langgraph 模式 ──
 
@@ -174,8 +223,8 @@ class GraphEngine:
         self,
         state: GameState,
         ctx: ExecutionContext,
-    ) -> str:
-        """委托模式：直接调用 CompiledGraph.ainvoke()"""
+    ) -> tuple[str, GameState]:
+        """委托模式：直接调用 CompiledGraph.ainvoke()，返回 (叙事文本, 新状态)"""
         result = await self.graph.ainvoke(state)
 
         # 记录追踪
@@ -188,7 +237,7 @@ class GraphEngine:
         if self._event_log:
             await self._record_graph_event(result, ctx)
 
-        return narrative
+        return narrative, result
 
     # ── full 模式 ──
 
@@ -260,7 +309,7 @@ class GraphEngine:
             logger.warning(f"Engine: 达到最大执行步数 {MAX_STEPS}")
             self._add_error(state, f"达到最大执行步数 {MAX_STEPS}")
 
-        return narrative
+        return narrative, state
 
     # ── 辅助方法 ──
 
@@ -337,24 +386,84 @@ class GraphEngine:
         result: dict,
         ctx: ExecutionContext,
     ):
-        """记录整个 Graph 执行结果的事件"""
+        """记录 Graph 执行的完整事件流
+
+        根据 intent/resolution 内容差异化记录事件类型，确保事件溯源可回放。
+        """
         if not self._event_log:
             return
         try:
+            intent = result.get("intent") or {}
+            resolution = result.get("resolution") or {}
+            intent_type = intent.get("type", "")
+            player_input = result.get("player_input", "")
+            session_id = result.get("session_id", "")
+
+            # 1. 始终记录 PlayerInput 事件
             await self._event_log.record_and_apply(
-                current=result,  # type: ignore
+                current=result,
                 patch={
-                    "narrative": result.get("narrative", ""),
                     "beat_counter": result.get("beat_counter", 0),
                 },
-                event_type="GraphExecution",
+                event_type="PlayerInput",
                 source_node="engine",
                 parent_event_id=ctx.execution_id,
                 extra_data={
-                    "intent": result.get("intent"),
-                    "resolution": result.get("resolution"),
+                    "text": player_input,
+                    "intent_type": intent_type,
                 },
             )
+
+            # 2. 根据 resolution 内容判定事件子类型
+            check_type = resolution.get("check_type", "")
+            success_label = resolution.get("success_label", "")
+
+            if intent_type == "COMBAT_ACTION" or result.get("game_phase") == "combat":
+                await self._event_log.record_and_apply(
+                    current=result,
+                    patch={},
+                    event_type="CombatRound",
+                    source_node="engine",
+                    parent_event_id=ctx.execution_id,
+                    extra_data={
+                        "action": intent.get("data", {}).get("action", ""),
+                        "target": intent.get("data", {}).get("target", ""),
+                        "success": success_label,
+                        "resolution": resolution,
+                    },
+                )
+
+            elif check_type in ("skill", "stat", "opposed") and success_label:
+                await self._event_log.record_and_apply(
+                    current=result,
+                    patch={},
+                    event_type="SkillCheck",
+                    source_node="engine",
+                    parent_event_id=ctx.execution_id,
+                    extra_data={
+                        "check_type": check_type,
+                        "skill_name": resolution.get("skill_name", ""),
+                        "success_label": success_label,
+                        "roll_value": resolution.get("roll_value"),
+                        "resolution": resolution,
+                    },
+                )
+
+            # 3. narrative 更新事件（兜底 / 非战斗非检定轮）
+            narrative = result.get("narrative", "")
+            if narrative and not success_label and intent_type != "COMBAT_ACTION":
+                await self._event_log.record_and_apply(
+                    current=result,
+                    patch={"narrative": narrative},
+                    event_type="NarrativeOutput",
+                    source_node="engine",
+                    parent_event_id=ctx.execution_id,
+                    extra_data={
+                        "intent_type": intent_type,
+                        "player_input": player_input[:60],
+                    },
+                )
+
         except Exception as e:
             logger.warning(f"Engine: Graph 事件记录失败: {e}")
 

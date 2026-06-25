@@ -129,7 +129,7 @@ class InputScheduler:
                 f"input={player_input[:40]}..."
             )
 
-            narrative = await self.engine.run(
+            narrative, new_state = await self.engine.run(
                 player_input=player_input,
                 session_id=session_id,
                 previous_state=slot.state,
@@ -137,9 +137,10 @@ class InputScheduler:
                 auto_snapshot=auto_snapshot,
             )
 
-            # 更新会话状态
-            slot.ctx = ctx
+            # 保存返回的新状态，保证多轮对话的 state 持续累积
+            slot.state = new_state
             slot.state["player_input"] = player_input
+            slot.ctx = ctx
 
             return narrative
 
@@ -178,14 +179,15 @@ class InputScheduler:
             slot.turn_count += 1
 
             ctx = ExecutionContext(session_id=session_id)
-            narrative = await self.engine.run(
+            narrative, new_state = await self.engine.run(
                 player_input=player_input,
                 session_id=session_id,
                 previous_state=slot.state,
                 context=ctx,
             )
-            slot.ctx = ctx
+            slot.state = new_state
             slot.state["player_input"] = player_input
+            slot.ctx = ctx
 
         # 处理队列中的剩余输入
         asyncio.create_task(self._drain_queue(slot))
@@ -207,14 +209,15 @@ class InputScheduler:
                 slot.turn_count += 1
 
                 ctx = ExecutionContext(session_id=slot.session_id)
-                await self.engine.run(
+                _, new_state = await self.engine.run(
                     player_input=player_input,
                     session_id=slot.session_id,
                     previous_state=slot.state,
                     context=ctx,
                 )
-                slot.ctx = ctx
+                slot.state = new_state
                 slot.state["player_input"] = player_input
+                slot.ctx = ctx
 
             await asyncio.sleep(0)  # 让出事件循环
 
