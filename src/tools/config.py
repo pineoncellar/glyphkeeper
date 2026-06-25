@@ -329,5 +329,7 @@ def get_logger(name: str = "GlyphKeeper") -> logging.Logger:
         配置好的 Logger 实例
     """
     if name not in _loggers:
-        _loggers[name] = setup_logger(name)
+        # debug=true 时自动使用 DEBUG 级别
+        level = logging.DEBUG if _DEBUG_MODE else logging.INFO
+        _loggers[name] = setup_logger(name, log_level=level)
     return _loggers[name]
