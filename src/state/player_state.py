@@ -26,7 +26,9 @@ from src.state.game_state import GameState
 from src.state.event_log import EventLog
 from src.domain.character import Character, Stats
 from src.memory.event_store import EventStore
-from src.tools import PROJECT_ROOT
+from src.tools import PROJECT_ROOT, get_logger
+
+logger = get_logger(__name__)
 
 
 # ── 玩家数据键名常量 ──
