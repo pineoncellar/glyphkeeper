@@ -4,22 +4,20 @@
 @Note     :   编译为 CompiledStateGraph，作为节点嵌入 keeper_graph
 
 流程:
-    START → skill_check → [有技能名] → resolve_skill → END
-                           [无技能名] → END
+    START → lookup → [有技能名] → resolve_skill → END
+                     [无技能名] → END
 
 节点说明:
-  - skill_check: 调用 skill_node，执行技能检定
-  - 简单线性流程：检定完成后回到主图由 narrator 生成叙事
-
-扩展预留:
-  - 后续可加入 ClueDiscoveryNode / KnowledgeGrantNode
-  - 线索发现的多对多映射逻辑
+  - lookup:       调用 lookup_node，从 RAG/EventStore 检索世界知识上下文
+  - resolve_skill: 调用 skill_node，执行技能检定
+  - lookup 先于技能检定执行，将世界上下文注入 state.world_context
 """
 
 from __future__ import annotations
 
 from langgraph.graph import StateGraph, START, END
 from src.state.game_state import GameState
+from src.nodes.tools.lookup_node import lookup_node as lookup_node_fn
 from src.nodes.rules.skill_node import skill_node as skill_node_fn
 from src.tools import get_logger
 
@@ -42,12 +40,14 @@ def build_investigation_subgraph() -> StateGraph:
     """构建并返回调查/探索子 StateGraph"""
     builder = StateGraph(GameState)
 
+    builder.add_node("lookup", lookup_node_fn)
     builder.add_node("resolve_skill", skill_node_fn)
 
-    # 从 START 直接进入 resolve_skill（如果 intent 中有技能名）
-    # 否则直接结束
+    # 流程: START → lookup → [有技能名] → resolve_skill → END
+    #                       [无技能名] → END
+    builder.add_edge(START, "lookup")
     builder.add_conditional_edges(
-        START,
+        "lookup",
         _has_skill_name,
         {"resolve_skill": "resolve_skill", "end": END},
     )

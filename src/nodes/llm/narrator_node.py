@@ -23,15 +23,16 @@ logger = get_logger(__name__)
 
 NARRATOR_SYSTEM_PROMPT = """你是克苏鲁的呼唤 TRPG 的守密人 (Keeper) — 沉浸式叙事者。
 
-请基于玩家的意图和规则裁决结果，生成一段克苏鲁风格的叙事文本。
+请基于玩家的意图、世界知识上下文和规则裁决结果，生成一段克苏鲁风格的叙事文本。
 
 要求:
 1. 使用中文，第一人称或第二人称叙述
 2. 营造克苏鲁特有的氛围：压抑、神秘、不可名状
 3. 准确反映检定结果（成功/失败/大成功/大失败）
-4. 加入感官细节（视觉、听觉、嗅觉、触觉）
-5. 保持简洁，不要过度描述（2-4 句话）
-6. 严格基于裁决结果，不要编造未给定的信息
+4. 利用【世界知识上下文】中的场景信息丰富描述，但不要直接复述
+5. 加入感官细节（视觉、听觉、嗅觉、触觉）
+6. 保持简洁，不要过度描述（2-4 句话）
+7. 严格基于裁决结果和世界知识，不要编造未给定的信息
 
 输出纯文本，不要包含角色名或引号外的格式标记。"""
 
@@ -68,6 +69,7 @@ def _template_narrative(state: GameState) -> str:
     """基于模板的叙事生成（兜底方案）"""
     intent = state.get("intent") or {}
     resolution = state.get("resolution") or {}
+    world_context = state.get("world_context", "")
     game_phase = state.get("game_phase", "exploration")
     player_input = state.get("player_input", "")
 
@@ -80,6 +82,15 @@ def _template_narrative(state: GameState) -> str:
     action = intent.get("data", {}).get("action", player_input[:20])
     detail = resolution.get("detail") or resolution.get("description", "")
 
+    # 如果有世界上下文则附加场景描述
+    if world_context:
+        # 取上下文的前一句作为场景点缀
+        scene_hint = world_context.strip().split("。" )[0] if world_context.strip() else ""
+        if scene_hint and detail:
+            detail = f"{detail} 你注意到{scene_hint}。"
+        elif scene_hint:
+            detail = f"你注意到{scene_hint}。"
+
     if resolution.get("is_success"):
         template = _SUCCESS_TEMPLATES.get(success_label, "你{action}了。{detail}")
         return template.format(action=action, detail=detail)
@@ -88,8 +99,11 @@ def _template_narrative(state: GameState) -> str:
         template = _FAILURE_TEMPLATES.get(success_label, "你{action}失败了。{detail}")
         return template.format(action=action, detail=detail)
 
-    # 无检定 — 简单回复
+    # 无检定 — 使用世界上下文或默认回复
     if not resolution:
+        if world_context:
+            scene_hint = world_context.strip().split("。" )[0]
+            return f"你{action}。{scene_hint}。"
         return f"你{action}。空气中弥漫着陈旧的灰尘味。"
 
     return f"你{action}。{detail}"
@@ -118,6 +132,7 @@ async def _call_llm_for_narrative(
     resolution: dict,
     game_phase: str,
     narrative_history: str,
+    world_context: str = "",
 ) -> str | None:
     """调用 LLM 生成叙事文本"""
     try:
@@ -142,6 +157,7 @@ async def _call_llm_for_narrative(
             f"游戏阶段: {game_phase}\n"
             f"玩家意图: {intent.get('data', {}).get('action', '未知')}\n"
             f"裁决结果: {resolution}\n"
+            f"世界知识上下文: {world_context[:500] if world_context else '无'}\n"
             f"叙事历史: {narrative_history[-300:] if narrative_history else '无'}"
         )
 
@@ -169,17 +185,22 @@ async def narrate_node(state: GameState) -> dict:
     """
     叙事生成节点。
 
-    读取 intent + resolution → 调用 LLM → 失败用模板兜底 → 返回 narrative。
+    读取 intent + resolution + world_context → 调用 LLM → 失败用模板兜底 → 返回 narrative。
 
-    本节点只负责生成文本，不修改任何游戏状态。
+    world_context 由 investigation_graph 中的 lookup_node 预先注入，
+    包含从 LightRAG 检索到的世界知识和 EventStore 事件历史。
     """
     intent = state.get("intent") or {}
     resolution = state.get("resolution") or {}
+    world_context = state.get("world_context", "")
     game_phase = state.get("game_phase", "exploration")
     narrative_history = state.get("narrative", "")
 
     # ── 尝试 LLM ──
-    llm_text = await _call_llm_for_narrative(intent, resolution, game_phase, narrative_history)
+    llm_text = await _call_llm_for_narrative(
+        intent, resolution, game_phase, narrative_history,
+        world_context=world_context,
+    )
 
     if llm_text:
         narrative = llm_text

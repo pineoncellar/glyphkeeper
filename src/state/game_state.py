@@ -38,6 +38,7 @@ class GameState(TypedDict):
     # ── 当前处理结果 ──
     intent: Optional[dict]              # IntentNode 的输出
     resolution: Optional[dict]          # RuleNode 的输出
+    world_context: str                  # LookupNode 的世界知识上下文
     narrative: str                      # NarratorNode 的叙事文本
 
     # ── 游戏控制 ──
@@ -77,6 +78,7 @@ def create_initial_state(
         "player_input": "",
         "intent": None,
         "resolution": None,
+        "world_context": "",
         "narrative": "",
         "game_phase": "exploration",
         "active_tags": [],
@@ -97,4 +99,4 @@ def create_state_view(state: GameState, view_keys: list[str]) -> dict:
 # 常用视图模板
 INTENT_VIEW = ["session_id", "player_input", "game_phase", "active_tags", "narrative"]
 RULE_VIEW = ["session_id", "intent", "game_phase", "active_tags", "combat_active", "combatants"]
-NARRATE_VIEW = ["session_id", "intent", "resolution", "narrative", "game_phase", "active_tags"]
+NARRATE_VIEW = ["session_id", "intent", "resolution", "world_context", "narrative", "game_phase", "active_tags"]

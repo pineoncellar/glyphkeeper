@@ -5,7 +5,7 @@
 
 Node 签名:
     async def lookup_node(state: GameState) -> dict:
-        返回: {"resolution": lookup_result_dict}
+        返回: {"world_context": context_text_str}
 """
 
 from __future__ import annotations
@@ -51,15 +51,7 @@ async def lookup_node(state: GameState) -> dict:
 
     if not query or not query.strip():
         logger.debug("lookup_node: 无查询内容")
-        return {
-            "resolution": {
-                "success": False,
-                "error": "无查询内容",
-                "context": "",
-                "rules": "",
-                "history": [],
-            },
-        }
+        return {"world_context": ""}
 
     session_id = state.get("session_id", "")
 
@@ -86,19 +78,11 @@ async def lookup_node(state: GameState) -> dict:
         }
 
         logger.info(f"lookup_node: query={query[:30]}... ctx={len(ctx_text)} rules={len(rules_text)}")
-        return {"resolution": result}
+        return {"world_context": ctx_text}
 
     except Exception as e:
         logger.error(f"lookup_node: 检索失败: {e}")
-        return {
-            "resolution": {
-                "success": False,
-                "error": str(e),
-                "context": "",
-                "rules": "",
-                "history": [],
-            },
-        }
+        return {"world_context": ""}
 
 
 async def simple_lookup(query: str, session_id: str = "") -> dict:
