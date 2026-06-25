@@ -402,3 +402,13 @@ class AbstractAdapter(ABC):
                 await self._engine.close()
         except Exception as e:
             logger.warning(f"清理异常: {e}")
+
+        # 显式关闭 PG，避免 atexit 阶段被 Ctrl+C 截断
+        try:
+            from src.tools.pg_manager import PgManager
+            mgr = await PgManager.get_instance()
+            if mgr.available and mgr._started:
+                await mgr.stop()
+                logger.info("PgManager: 已显式停止")
+        except Exception:
+            pass

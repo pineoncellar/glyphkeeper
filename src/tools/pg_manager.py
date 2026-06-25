@@ -21,6 +21,8 @@ from enum import Enum
 from pathlib import Path
 from typing import Optional
 
+import psutil
+
 from src.tools import get_logger, PROJECT_ROOT
 
 logger = get_logger(__name__)
@@ -158,14 +160,26 @@ class PgManager:
             pgdata = str(self._pgdata_dir)
             os.makedirs(pgdata, exist_ok=True)
 
+            # ── 防御：清理上次非干净关闭残留的 postmaster.pid ──
+            pid_file = Path(pgdata) / "postmaster.pid"
+            if pid_file.exists():
+                # 检查 pid 文件中的进程是否还在运行
+                try:
+                    raw_pid = int(pid_file.read_text().splitlines()[0].strip())
+                    proc_exists = psutil.pid_exists(raw_pid)
+                except (ValueError, IndexError, OSError):
+                    proc_exists = False
+                if not proc_exists:
+                    pid_file.unlink(missing_ok=True)
+                    logger.debug("pgembed: 已清理残留的 postmaster.pid")
+
             self._pg_server = get_server(pgdata, cleanup_mode="stop")
             self._pg_server.ensure_pgdata_inited()
             logger.info("pgembed: 数据目录已初始化")
 
             self._pg_server.ensure_postgres_running()
-            logger.info("pgembed: PostgreSQL 已启动")
 
-            # 更新 URI 和端口
+            # ── 防御：启动后验证连通性 ──
             uri = self._pg_server.get_uri(database=self._dbname)
             if uri:
                 self._uri = uri
@@ -173,6 +187,22 @@ class PgManager:
                 m = re.search(r":(\d+)/", uri)
                 if m:
                     self._port = m.group(1)
+                # 尝试连接验证，最多重试 3 次
+                import asyncpg
+                for attempt in range(3):
+                    try:
+                        _test_conn = await asyncpg.connect(uri, timeout=5.0)
+                        await _test_conn.close()
+                        break
+                    except asyncpg.exceptions.CannotConnectNowError:
+                        if attempt < 2:
+                            logger.warning(
+                                f"pgembed: 连接被拒绝(PG仍在关闭中)，重试中 ({attempt+1}/3)"
+                            )
+                            await asyncio.sleep(1.0)
+                            continue
+                        raise
+            logger.info("pgembed: PostgreSQL 已启动")
 
             # 创建项目数据库（如果不存在）
             dbs = self._pg_server.psql("SELECT datname FROM pg_database")
@@ -183,7 +213,6 @@ class PgManager:
             # 安装 pgvector 扩展
             try:
                 uri_no_db = self._uri.rsplit("/", 1)[0] + "/postgres"
-                import asyncpg
                 _vconn = await asyncpg.connect(uri_no_db)
                 await _vconn.execute("CREATE EXTENSION IF NOT EXISTS vector")
                 ver = await _vconn.fetchval(
