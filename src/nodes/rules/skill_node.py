@@ -15,7 +15,7 @@ from src.state.game_state import GameState
 from src.domain.checks import skill_check, CheckResult
 from src.domain.coc_rules import Difficulty, SuccessLevel
 from src.domain.character import Character
-from src.config import get_logger
+from src.tools import get_logger
 
 logger = get_logger(__name__)
 

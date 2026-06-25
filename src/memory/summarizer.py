@@ -24,7 +24,7 @@ import re
 from abc import ABC, abstractmethod
 from typing import Optional
 
-from src.config import get_logger
+from src.tools import get_logger
 
 logger = get_logger(__name__)
 
@@ -38,7 +38,7 @@ except Exception:
 
 
 # ====================================================================
-# 1. Token 计数工具
+# Token 计数工具
 # ====================================================================
 
 
@@ -53,7 +53,7 @@ def count_tokens(text: str) -> int:
 
 
 # ====================================================================
-# 2. 摘要策略
+# 摘要策略
 # ====================================================================
 
 
@@ -132,7 +132,7 @@ class TimeBasedStrategy(ConsolidationStrategy):
 
 
 # ====================================================================
-# 3. 摘要器
+# 摘要器
 # ====================================================================
 
 
@@ -240,7 +240,7 @@ class Summarizer:
         # 兜底：lazy import（依赖外部 llm 模块）
         try:
             from lightrag.llm.openai import openai_complete_if_cache
-            from src.config import get_settings
+            from src.tools import get_settings
 
             settings = get_settings()
             model_config, provider_config = settings.get_full_model_config(self.llm_tier)

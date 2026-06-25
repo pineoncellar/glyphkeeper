@@ -29,7 +29,7 @@ from src.nodes.llm.narrator_node import narrate_node
 from src.graph.router_graph import route_by_intent
 from src.graph.combat_graph import combat_subgraph
 from src.graph.investigation_graph import investigation_subgraph
-from src.config import get_logger
+from src.tools import get_logger
 
 logger = get_logger(__name__)
 

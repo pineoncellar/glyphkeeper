@@ -14,7 +14,7 @@ from typing import Any
 from src.state.game_state import GameState
 from src.tools.dice import roll_d100, roll_bonus_dice, roll_penalty_dice, roll_dice as roll_expression
 from src.domain.coc_rules import determine_success_level, SuccessLevel
-from src.config import get_logger
+from src.tools import get_logger
 
 logger = get_logger(__name__)
 

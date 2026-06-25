@@ -24,7 +24,7 @@
 
 from typing import Optional
 
-from src.config import get_logger
+from src.tools import get_logger
 from src.memory.event_store import EventStore
 from src.memory.vector_store import VectorStore
 
@@ -96,7 +96,7 @@ class Retriever:
 
         parts: list[str] = []
 
-        # 1. 向量检索（世界知识）
+        # 向量检索（世界知识）
         try:
             vs = await self.vector_store
             semantic_result = await vs.query(question=query, top_k=top_k)
@@ -106,7 +106,7 @@ class Retriever:
             logger.warning(f"向量检索失败: {e}")
             parts.append("（相关知识检索暂不可用）")
 
-        # 2. 事件历史
+        # 事件历史
         try:
             es = await self.event_store
             events = await es.get_events(session_id)
@@ -119,7 +119,7 @@ class Retriever:
         except Exception as e:
             logger.warning(f"事件历史检索失败: {e}")
 
-        # 3. 拼接
+        # 拼接
         return "\n\n".join(parts)
 
     async def retrieve_rules(self, query: str, top_k: int = 10) -> str:

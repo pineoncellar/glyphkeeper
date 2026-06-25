@@ -22,7 +22,7 @@ from langgraph.graph import StateGraph, START, END
 from src.state.game_state import GameState, create_initial_state
 from src.nodes.tools.dice_node import dice_node as dice_node_fn
 from src.nodes.rules.combat_node import combat_node as combat_node_fn
-from src.config import get_logger
+from src.tools import get_logger
 
 logger = get_logger(__name__)
 

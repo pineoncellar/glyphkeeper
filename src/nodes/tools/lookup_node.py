@@ -12,7 +12,7 @@ from __future__ import annotations
 
 from typing import Optional
 from src.state.game_state import GameState
-from src.config import get_logger
+from src.tools import get_logger
 from src.memory.retriever import Retriever
 
 logger = get_logger(__name__)

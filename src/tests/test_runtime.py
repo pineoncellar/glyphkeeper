@@ -1,6 +1,6 @@
 """
 @File     :   test_runtime.py
-@Desc     :   Phase 6 — Runtime 层测试
+@Desc     :   Runtime 层测试
 @Note     :   覆盖 context / dispatcher / engine / scheduler 四个模块
 
 测试范围:
@@ -34,7 +34,7 @@ from src.runtime.scheduler import InputScheduler
 
 
 # ====================================================================
-# 1. ExecutionContext 测试
+# ExecutionContext 测试
 # ====================================================================
 
 class TestExecutionContext:
@@ -138,7 +138,7 @@ class TestExecutionContext:
 
 
 # ====================================================================
-# 2. ExecutionResult 测试
+# ExecutionResult 测试
 # ====================================================================
 
 class TestExecutionResult:
@@ -220,7 +220,7 @@ class TestExecutionResult:
 
 
 # ====================================================================
-# 3. dispatch_with_retry 测试
+# dispatch_with_retry 测试
 # ====================================================================
 
 class TestDispatchWithRetry:
@@ -311,7 +311,7 @@ class TestDispatchWithRetry:
 
 
 # ====================================================================
-# 4. NodeDispatcher 测试
+# NodeDispatcher 测试
 # ====================================================================
 
 class TestNodeDispatcher:
@@ -373,7 +373,7 @@ class TestNodeDispatcher:
 
 
 # ====================================================================
-# 5. GraphEngine 测试
+# GraphEngine 测试
 # ====================================================================
 
 class TestGraphEngine:
@@ -542,7 +542,7 @@ class TestGraphEngine:
 
 
 # ====================================================================
-# 6. InputScheduler 测试
+# InputScheduler 测试
 # ====================================================================
 
 class TestInputScheduler:

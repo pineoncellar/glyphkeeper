@@ -26,7 +26,7 @@ from src.runtime.dispatcher import (
     dispatch_with_retry,
     NodeDispatcher,
 )
-from src.config import get_logger, get_settings
+from src.tools import get_logger, get_settings
 
 logger = get_logger(__name__)
 
@@ -129,7 +129,7 @@ class GraphEngine:
         """
         ctx = context or ExecutionContext(session_id=session_id)
 
-        # 1. 构建初始 state
+        # 构建初始 state
         state = self._prepare_state(
             player_input=player_input,
             session_id=session_id,
@@ -142,14 +142,14 @@ class GraphEngine:
             f"input={player_input[:50]}..."
         )
 
-        # 2. 执行
+        # 执行
         try:
             if self.mode == ENGINE_MODE_LANGGRAPH:
                 narrative = await self._run_langgraph(state, ctx)
             else:
                 narrative = await self._run_full(state, ctx)
 
-            # 3. 自动快照
+            # 自动快照
             if auto_snapshot and self._snapshot_mgr:
                 try:
                     snap_id = await self._snapshot_mgr.create(state, label="auto")

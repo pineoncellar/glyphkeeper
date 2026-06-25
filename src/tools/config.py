@@ -1,51 +1,33 @@
+# -*- coding: utf-8 -*-
 """
-@File     :   config/__init__.py
-@Desc     :   配置已迁移至 src/tools/config.py — 此文件为向后兼容 shim
-@Note     :   请将导入改为 from src.tools import ...
+@File     :   tools/config.py
+@Desc     :   GlyphKeeper 配置管理模块 — 整合入 tools 层
+@Note     :   原 src/config/__init__.py 迁移至此
+
+职责:
+  - 从 config.yaml + providers.ini 加载全局配置
+  - 提供 Settings 懒加载单例（get_settings()）
+  - 提供分级 Logger 工厂（get_logger()）
+  - LLM 提供商与模型分级配置
+  - 世界/模组切换配置
 """
 
-import warnings
-warnings.warn(
-    "src.config 已迁移至 src.tools，请更新导入语句",
-    DeprecationWarning,
-    stacklevel=2,
-)
+import sys
+import yaml
+import configparser
+import logging
+from logging.handlers import RotatingFileHandler
+from pathlib import Path
+from datetime import datetime
+from typing import Dict, Optional, List, Any
+from pydantic import BaseModel, Field, model_validator
 
-from src.tools import (  # noqa: F401, F811
-    PROJECT_ROOT,
-    LOG_DIR,
-    Settings,
-    ProjectConfig,
-    DatabaseConfig,
-    ProviderConfig,
-    ModelConfig,
-    VectorStoreConfig,
-    get_settings,
-    reload_config,
-    get_logger,
-    setup_logger,
-    _early_log,
-    _settings_instance,
-    _DEBUG_MODE,
-)
+# ── 项目根目录 ──
+PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 
-__all__ = [
-    "PROJECT_ROOT",
-    "LOG_DIR",
-    "Settings",
-    "ProjectConfig",
-    "DatabaseConfig",
-    "ProviderConfig",
-    "ModelConfig",
-    "VectorStoreConfig",
-    "get_settings",
-    "reload_config",
-    "get_logger",
-    "setup_logger",
-    "_early_log",
-    "_settings_instance",
-    "_DEBUG_MODE",
-]
+# ── 日志目录 ──
+LOG_DIR = PROJECT_ROOT / "logs"
+LOG_DIR.mkdir(exist_ok=True)
 
 
 # ====================================================================
@@ -332,26 +314,20 @@ def setup_logger(name: str = "GlyphKeeper", log_level: int = logging.INFO) -> lo
     return logger
 
 
-def get_logger(module_name: str, log_level: str = "INFO") -> logging.Logger:
+# ── 全局 Logger 缓存 ──
+_loggers: dict[str, logging.Logger] = {}
+
+
+def get_logger(name: str = "GlyphKeeper") -> logging.Logger:
     """
-    获取带统一格式的日志记录器。
+    获取分级 Logger。
 
-    参数：
-        module_name: 模块名称（通常为 __name__）
-        log_level: 日志级别字符串（DEBUG/INFO/WARNING/ERROR/CRITICAL）
+    Args:
+        name: Logger 名称（默认 GlyphKeeper）
 
-    如果配置开启了 debug 模式且请求级别为 INFO，自动升级为 DEBUG。
+    Returns:
+        配置好的 Logger 实例
     """
-    level_map = {
-        "DEBUG": logging.DEBUG,
-        "INFO": logging.INFO,
-        "WARNING": logging.WARNING,
-        "ERROR": logging.ERROR,
-        "CRITICAL": logging.CRITICAL,
-    }
-
-    if _DEBUG_MODE and log_level.upper() == "INFO":
-        log_level = "DEBUG"
-
-    actual_level = level_map.get(log_level.upper(), logging.INFO)
-    return setup_logger(name=module_name, log_level=actual_level)
+    if name not in _loggers:
+        _loggers[name] = setup_logger(name)
+    return _loggers[name]

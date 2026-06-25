@@ -18,7 +18,7 @@ from src.domain.combat_rules import (
     apply_armor, parse_damage_bonus,
 )
 from src.domain.coc_rules import SuccessLevel
-from src.config import get_logger
+from src.tools import get_logger
 
 logger = get_logger(__name__)
 

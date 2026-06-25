@@ -26,7 +26,7 @@ from typing import Any, Optional
 from src.state.game_state import GameState, create_initial_state
 from src.state.reducer import apply_events_to_state
 from src.memory.event_store import EventStore
-from src.config import PROJECT_ROOT
+from src.tools import PROJECT_ROOT
 
 
 # 快照保留策略

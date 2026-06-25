@@ -15,7 +15,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Callable, Coroutine, Optional
 
-from src.config import get_logger
+from src.tools import get_logger
 from src._protocols import NodeOutput, Event
 
 logger = get_logger(__name__)

@@ -19,7 +19,7 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from typing import Any, Optional
 
-from src.config import get_logger
+from src.tools import get_logger
 from src.runtime.engine import GraphEngine, ENGINE_MODE_LANGGRAPH
 from src.runtime.scheduler import InputScheduler
 from src.graph.keeper_graph import keeper_graph

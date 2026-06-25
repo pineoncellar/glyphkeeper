@@ -1,6 +1,6 @@
 """
 @File     :   test_nodes.py
-@Desc     :   Phase 4 Node 层单元测试
+@Desc     :   Node 层单元测试
 @Note     :   测试 Tool / Rule / LLM 节点函数，不依赖 LLM 和外部存储
 
 测试范围:

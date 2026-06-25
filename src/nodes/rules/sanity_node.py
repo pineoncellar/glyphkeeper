@@ -19,7 +19,7 @@ from src.domain.sanity_rules import (
     SanityLoss,
     InsanityResult,
 )
-from src.config import get_logger
+from src.tools import get_logger
 
 logger = get_logger(__name__)
 

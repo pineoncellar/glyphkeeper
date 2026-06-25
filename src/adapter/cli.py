@@ -14,7 +14,7 @@ import asyncio
 import sys
 from typing import Any, Optional
 
-from src.config import get_logger
+from src.tools import get_logger
 from src.runtime.engine import GraphEngine
 from src.runtime.scheduler import InputScheduler
 from src.adapter.base import AbstractAdapter

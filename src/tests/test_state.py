@@ -1,6 +1,6 @@
 """
 @File     :   test_state.py
-@Desc     :   State 层单元测试 — Phase 3 验证
+@Desc     :   State 层单元测试
 @Note     :   测试 game_state / reducer / event_log / snapshot / player_state / world_state
 
 测试范围:

@@ -20,7 +20,7 @@ from typing import Any, Optional
 from src.state.game_state import GameState
 from src.runtime.engine import GraphEngine
 from src.runtime.context import ExecutionContext
-from src.config import get_logger
+from src.tools import get_logger
 
 logger = get_logger(__name__)
 

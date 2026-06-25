@@ -31,7 +31,7 @@ from typing import Optional, Literal
 
 from lightrag import LightRAG, QueryParam
 
-from src.config import get_settings, get_logger, PROJECT_ROOT
+from src.tools import get_settings, get_logger, PROJECT_ROOT
 
 logger = get_logger(__name__)
 

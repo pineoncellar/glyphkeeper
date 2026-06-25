@@ -21,7 +21,7 @@ from __future__ import annotations
 from langgraph.graph import StateGraph, START, END
 from src.state.game_state import GameState
 from src.nodes.rules.skill_node import skill_node as skill_node_fn
-from src.config import get_logger
+from src.tools import get_logger
 
 logger = get_logger(__name__)
 

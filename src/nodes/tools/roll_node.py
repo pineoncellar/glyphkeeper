@@ -16,7 +16,7 @@ from src.domain.checks import skill_check, stat_check, opposed_check, push_roll,
 from src.domain.coc_rules import Difficulty, SuccessLevel
 from src.domain.character import Character
 from src.tools.dice import roll_d100
-from src.config import get_logger
+from src.tools import get_logger
 
 logger = get_logger(__name__)
 

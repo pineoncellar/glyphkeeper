@@ -1,5 +1,5 @@
 """
-Phase 2 — 基础设施层单元测试
+基础设施层单元测试
 
 测试范围:
   - config: Settings 加载、配置项访问
@@ -13,7 +13,7 @@ import pytest
 import asyncio
 from pathlib import Path
 
-from src.config import get_settings, Settings, PROJECT_ROOT
+from src.tools import get_settings, Settings, PROJECT_ROOT
 from src.memory.event_store import EventStore
 from src.memory.summarizer import (
     Summarizer,
@@ -32,11 +32,11 @@ class TestConfig:
     def test_get_settings(self, monkeypatch):
         """Settings 可加载且字段可正常访问（使用干净配置）"""
         # 注入纯净配置，避免被 config.yaml / providers.ini 干扰
-        from src.config import _settings_instance
+        from src.tools import _settings_instance
         clean = Settings()
-        monkeypatch.setattr('src.config._settings_instance', clean)
+        monkeypatch.setattr('src.tools._settings_instance', clean)
         # 重新导入以获取 clean 引用
-        from src.config import get_settings as gs
+        from src.tools import get_settings as gs
         s = gs()
         assert s.project.name == "GlyphKeeper"
         assert s.project.debug is False
@@ -44,18 +44,18 @@ class TestConfig:
 
     def test_model_tiers_default(self, monkeypatch):
         """无配置时 model_tiers 为空字典"""
-        from src.config import _settings_instance
-        monkeypatch.setattr('src.config._settings_instance', Settings())
-        from src.config import get_settings as gs
+        from src.tools import _settings_instance
+        monkeypatch.setattr('src.tools._settings_instance', Settings())
+        from src.tools import get_settings as gs
         s = gs()
         assert isinstance(s.model_tiers, dict)
         assert len(s.model_tiers) == 0
 
     def test_providers_default(self, monkeypatch):
         """无配置时 providers 为空字典"""
-        from src.config import _settings_instance
-        monkeypatch.setattr('src.config._settings_instance', Settings())
-        from src.config import get_settings as gs
+        from src.tools import _settings_instance
+        monkeypatch.setattr('src.tools._settings_instance', Settings())
+        from src.tools import get_settings as gs
         s = gs()
         assert isinstance(s.providers, dict)
         assert len(s.providers) == 0
@@ -452,9 +452,9 @@ class TestVectorStoreConfig:
     def test_build_storage_config_default(self, monkeypatch):
         """无 PG 配置时使用 NanoVectorDB + JsonKV"""
         # 注入无数据库配置的 Settings
-        from src.config import Settings
+        from src.tools import Settings
         clean = Settings()
-        monkeypatch.setattr('src.config._settings_instance', clean)
+        monkeypatch.setattr('src.tools._settings_instance', clean)
 
         from src.memory.vector_store import VectorStore
         vs = VectorStore(domain="world")

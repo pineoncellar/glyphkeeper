@@ -1,7 +1,6 @@
 """
 @File     :   runtime/__init__.py
 @Desc     :   runtime 包 — Graph 执行引擎（系统 CPU）
-@Note     :   Phase 6 实现完成
 
 职责:
   - 执行 Graph 拓扑（通过 CompiledGraph）

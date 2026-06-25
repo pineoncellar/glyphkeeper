@@ -34,7 +34,7 @@ import aiosqlite
 from pathlib import Path
 from datetime import datetime, timezone
 from typing import AsyncGenerator, Optional
-from src.config import get_settings, PROJECT_ROOT
+from src.tools import get_settings, PROJECT_ROOT
 
 
 class EventStore:
