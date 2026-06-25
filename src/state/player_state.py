@@ -1,28 +1,33 @@
 """
 @File     :   player_state.py
-@Desc     :   玩家/调查员状态管理 — 从 GameState 到数据库的读写接口
+@Desc     :   玩家/调查员状态管理 — 从 GameState 到持久化的读写接口
 @Note     :   适配旧 entity_repo + investigator_profile_repo 到新的 state 架构
+              Phase 10: 新增 JSON 文件持久化（不依赖 EventStore）
 
 职责:
   - 管理单个调查员的完整状态（属性、技能、物品、位置）
   - 提供状态查询接口（供 Nodes 读取）
-  - 状态变更通过 Event → Reducer 模式进行
-  - 每次变更记录为 Event 写入 EventStore
+  - 提供 JSON 文件持久化（无需数据库即可使用）
 
 使用方式:
-    loader = PlayerLoader(event_store)
-    char = await loader.load_player(session_id, character_id)
-    await loader.update_skill(session_id, character_id, "侦查", 65)
+    loader = PlayerLoader()
+    char = loader.load_character("session-001")
+    loader.save_character("session-001", character)
 """
 
 from __future__ import annotations
 
 import json
+import uuid
+from dataclasses import asdict
+from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Optional
 from src.state.game_state import GameState
 from src.state.event_log import EventLog
 from src.domain.character import Character, Stats
 from src.memory.event_store import EventStore
+from src.tools import PROJECT_ROOT
 
 
 # ── 玩家数据键名常量 ──
@@ -30,20 +35,65 @@ from src.memory.event_store import EventStore
 PLAYER_DATA_KEY = "player_data"
 """GameState 中存储玩家数据的字段前缀"""
 
+# ── 角色 JSON 持久化路径 ──
+_CHARACTER_DIR = PROJECT_ROOT / "data" / "characters"
+
+
+def _char_dir() -> Path:
+    _CHARACTER_DIR.mkdir(parents=True, exist_ok=True)
+    return _CHARACTER_DIR
+
 
 class PlayerLoader:
     """
     玩家/调查员状态加载器。
 
     职责:
-      - 从 EventStore 或 GameState 中读取/写入调查员数据
+      - 通过 EventStore 或 JSON 文件读写调查员数据
       - 将领域对象 (Character) 转换为 dict 存储
-      - 通过 EventLog 记录变更事件
+      - 提供零依赖的 JSON 文件持久化（Phase 10 推荐方式）
     """
 
-    def __init__(self, event_store: EventStore, event_log: Optional[EventLog] = None):
+    def __init__(self, event_store: Optional[EventStore] = None, event_log: Optional[EventLog] = None):
         self._event_store = event_store
         self._event_log = event_log
+
+    # ── JSON 文件持久化（零依赖，Phase 10 推荐） ──
+
+    def character_exists(self, session_id: str) -> bool:
+        """检查指定会话是否有已保存的角色"""
+        path = _char_dir() / f"{session_id}.json"
+        return path.exists()
+
+    def save_character(self, session_id: str, character: Character):
+        """将角色保存为 JSON 文件"""
+        data = {
+            "session_id": session_id,
+            "saved_at": datetime.now(timezone.utc).isoformat(),
+            "character": _character_to_dict(character),
+        }
+        path = _char_dir() / f"{session_id}.json"
+        path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    def load_character(self, session_id: str) -> Optional[Character]:
+        """从 JSON 文件加载角色"""
+        path = _char_dir() / f"{session_id}.json"
+        if not path.exists():
+            return None
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+            char_data = data.get("character", {})
+            return _dict_to_character(char_data)
+        except Exception:
+            return None
+
+    def delete_character(self, session_id: str):
+        """删除已保存的角色文件"""
+        path = _char_dir() / f"{session_id}.json"
+        if path.exists():
+            path.unlink()
+
+    # ── EventStore 持久化（旧接口） ──
 
     # ── 查询接口 ──
 
@@ -308,20 +358,48 @@ class PlayerLoader:
 
     def _character_to_dict(self, char: Character) -> dict:
         """将 Character 对象转为可 JSON 序列化的 dict"""
-        return {
-            "id": char.id,
-            "name": char.name,
-            "occupation": char.occupation,
-            "stats": char.stats.to_dict() if hasattr(char.stats, "to_dict") else vars(char.stats),
-            "skills": char.skills,
-            "sanity": char.sanity,
-            "max_sanity": char.max_sanity,
-            "hit_points": char.hit_points,
-            "max_hit_points": char.max_hit_points,
-            "magic_points": char.magic_points,
-            "max_magic_points": char.max_magic_points,
-            "damage_bonus": char.damage_bonus,
-            "build": char.build,
-            "move": char.move,
-            "armor": char.armor,
-        }
+        return _character_to_dict(char)
+
+
+def _character_to_dict(char: Character) -> dict:
+    """将 Character 对象转为可 JSON 序列化的 dict（模块级函数）"""
+    return {
+        "id": char.id,
+        "name": char.name,
+        "occupation": char.occupation,
+        "stats": char.stats.to_dict() if hasattr(char.stats, "to_dict") else vars(char.stats),
+        "skills": char.skills,
+        "sanity": char.sanity,
+        "max_sanity": char.max_sanity,
+        "hit_points": char.hit_points,
+        "max_hit_points": char.max_hit_points,
+        "magic_points": char.magic_points,
+        "max_magic_points": char.max_magic_points,
+        "damage_bonus": char.damage_bonus,
+        "build": char.build,
+        "move": char.move,
+        "armor": char.armor,
+    }
+
+
+def _dict_to_character(data: dict) -> Character:
+    """从 dict 还原 Character 对象"""
+    stats_data = data.get("stats", {})
+    stats = Stats.from_dict(stats_data) if isinstance(stats_data, dict) else Stats()
+    return Character(
+        id=data.get("id", ""),
+        name=data.get("name", ""),
+        occupation=data.get("occupation", ""),
+        stats=stats,
+        skills=data.get("skills", {}),
+        sanity=data.get("sanity", 0),
+        max_sanity=data.get("max_sanity", 0),
+        hit_points=data.get("hit_points", 0),
+        max_hit_points=data.get("max_hit_points", 0),
+        magic_points=data.get("magic_points", 0),
+        max_magic_points=data.get("max_magic_points", 0),
+        damage_bonus=data.get("damage_bonus", "0"),
+        build=data.get("build", 0),
+        move=data.get("move", 8),
+        armor=data.get("armor", 0),
+    )

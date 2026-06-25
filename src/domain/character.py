@@ -264,3 +264,88 @@ def apply_skill_growth(character: Character, skill_name: str, roll_value: int) -
         return True
 
     return False
+
+
+# ====================================================================
+# 职业模板
+# ====================================================================
+
+
+@dataclass
+class Occupation:
+    """CoC 7版 职业模板"""
+    name: str
+    description: str
+    skills: list[str]                  # 本职技能列表
+    skill_points_formula: str          # 职业技能点公式，如 "EDU*4", "EDU*2+DEX*2"
+    credit_range: tuple[int, int]      # 信用评级范围 (min, max)
+
+
+OCCUPATIONS: list[Occupation] = [
+    Occupation("会计师", "精通财务与审计的专业人士", ["会计", "法律", "图书馆利用", "聆听", "说服", "心理学", "侦查"], "EDU*4", (10, 40)),
+    Occupation("作家", "以文字为生的创作者", ["历史", "图书馆利用", "神秘学", "母语", "心理学", "侦查"], "EDU*4", (10, 30)),
+    Occupation("医生", "受过专业医学训练的医师", ["医学", "急救", "精神分析", "科学(生物学)", "图书馆利用", "母语", "心理学"], "EDU*4", (30, 60)),
+    Occupation("工程师", "建筑、机械或电气领域的专家", ["电气维修", "图书馆利用", "机械维修", "科学(物理学)", "操作重型机械", "侦查"], "EDU*4", (30, 50)),
+    Occupation("记者", "追寻真相的新闻工作者", ["历史", "图书馆利用", "母语", "心理学", "侦查", "话术", "汽车驾驶"], "EDU*4", (10, 30)),
+    Occupation("警官", "维护法律的执法人员", ["汽车驾驶", "斗殴", "手枪", "法律", "心理学", "侦查", "潜行"], "EDU*4", (20, 40)),
+    Occupation("教授", "高等教育机构的研究者", ["图书馆利用", "母语", "心理学", "侦查", "科学(任一)", "历史", "神秘学"], "EDU*4", (20, 50)),
+    Occupation("考古学家", "挖掘与研究古代文明的学者", ["考古学", "历史", "图书馆利用", "母语", "科学(任一)", "侦查", "攀爬"], "EDU*4", (10, 40)),
+    Occupation("私家侦探", "独立调查案件的探员", ["法律", "心理学", "侦查", "潜行", "话术", "斗殴", "图书馆利用"], "EDU*4", (20, 45)),
+    Occupation("退役军人", "曾在军队服役的退伍士兵", ["斗殴", "射击(步枪/霰弹枪)", "闪避", "潜行", "急救", "攀爬", "驾驶"], "EDU*4", (10, 30)),
+    Occupation("古董商", "经营古物与艺术品的商人", ["会计", "估价", "历史", "艺术与手艺", "魅惑", "心理学", "侦查"], "EDU*4", (30, 50)),
+]
+
+
+# ====================================================================
+# 属性骰点
+# ====================================================================
+
+
+def roll_standard_stats() -> Stats:
+    """标准 CoC 7版 骰点法生成八项属性
+
+    规则:
+      - STR/CON/DEX/APP/POW:       3D6 × 5
+      - SIZ/INT/EDU:               (2D6+6) × 5
+    """
+    return Stats(
+        strength=roll_dice("3D6") * 5,
+        constitution=roll_dice("3D6") * 5,
+        size=(roll_dice("2D6") + 6) * 5,
+        dexterity=roll_dice("3D6") * 5,
+        appearance=roll_dice("3D6") * 5,
+        intelligence=(roll_dice("2D6") + 6) * 5,
+        power=roll_dice("3D6") * 5,
+        education=(roll_dice("2D6") + 6) * 5,
+    )
+
+
+def calculate_skill_points(occupation: Occupation, stats: Stats) -> int:
+    """根据职业公式计算可用职业技能点"""
+    return _eval_formula(occupation.skill_points_formula, stats)
+
+
+def calculate_interest_points(stats: Stats) -> int:
+    """兴趣技能点 = INT × 2"""
+    return stats.intelligence * 2
+
+
+def _eval_formula(formula: str, stats: Stats) -> int:
+    """解析职业技能点公式
+
+    支持格式: "EDU*4", "EDU*2+DEX*2"
+    """
+    total = 0
+    stat_map = stats.to_dict()
+    for token in formula.replace(" ", "").split("+"):
+        token = token.strip()
+        if not token:
+            continue
+        if "*" in token:
+            name, mul = token.split("*")
+            value = stat_map.get(name.upper(), 0)
+            total += value * int(mul)
+        else:
+            value = stat_map.get(token.upper(), 0)
+            total += value
+    return total

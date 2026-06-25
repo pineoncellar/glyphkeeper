@@ -45,6 +45,10 @@ class GameState(TypedDict):
     game_phase: str                     # 游戏阶段: exploration / combat / dialogue
     active_tags: list[str]              # 当前激活的全局标签（条件性内容解锁）
 
+    # ── 角色数据 ──
+    character: Optional[dict]           # 调查员角色数据（由角色创建流程注入）
+    current_location: str               # 玩家当前所在场景 key
+
     # ── 交互挂起 ──
     pending_dice: Optional[dict]        # 等待玩家掷骰: {reason, skill_name, difficulty, bonus_dice, penalty_dice}
 
@@ -81,6 +85,8 @@ def create_initial_state(
         "world_context": "",
         "narrative": "",
         "game_phase": "exploration",
+        "character": None,
+        "current_location": "",
         "active_tags": [],
         "pending_dice": None,
         "combat_active": False,
@@ -97,6 +103,6 @@ def create_state_view(state: GameState, view_keys: list[str]) -> dict:
 
 
 # 常用视图模板
-INTENT_VIEW = ["session_id", "player_input", "game_phase", "active_tags", "narrative"]
-RULE_VIEW = ["session_id", "intent", "game_phase", "active_tags", "combat_active", "combatants"]
-NARRATE_VIEW = ["session_id", "intent", "resolution", "world_context", "narrative", "game_phase", "active_tags"]
+INTENT_VIEW = ["session_id", "player_input", "game_phase", "active_tags", "narrative", "character", "current_location"]
+RULE_VIEW = ["session_id", "intent", "game_phase", "active_tags", "combat_active", "combatants", "character"]
+NARRATE_VIEW = ["session_id", "intent", "resolution", "world_context", "narrative", "game_phase", "active_tags", "character", "current_location"]
