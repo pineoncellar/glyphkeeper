@@ -2,7 +2,6 @@
 """
 @File     :   memorizer_worker.py
 @Desc     :   长期记忆提取后台任务 — 定期固化对话记录到 RAG/向量库
-@Note     :   Phase 7 — Worker 层实现
 
 工作流程:
   1. 轮询 EventStore 获取未固化的新事件
@@ -21,7 +20,7 @@ import asyncio
 from datetime import datetime, timezone
 from typing import Optional
 
-from src.config import get_logger
+from src.tools import get_logger
 from src.memory.event_store import EventStore
 from src.memory.vector_store import VectorStore
 from src.memory.summarizer import Summarizer
@@ -177,7 +176,7 @@ class MemorizerWorker:
             return False
 
         try:
-            # 1. 提取叙事文本
+            # 提取叙事文本
             narratives = [
                 e.get("data", {}).get("patch", {}).get("narrative", "")
                 for e in events
@@ -188,16 +187,16 @@ class MemorizerWorker:
             if not narratives:
                 return True
 
-            # 2. 生成摘要
+            # 生成摘要
             summary = await self._summarizer.summarize(
                 [{"text": n, "role": "assistant"} for n in narratives]
             )
 
-            # 3. 提取事实
+            # 提取事实
             combined_text = "\n".join(narratives[-5:])  # 最近 5 条
             facts = await self._summarizer.extract_facts(combined_text)
 
-            # 4. 写入 VectorStore
+            # 写入 VectorStore
             if summary:
                 await self._vector_store.insert(
                     text=summary,

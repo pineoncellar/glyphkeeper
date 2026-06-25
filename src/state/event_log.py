@@ -77,10 +77,10 @@ class EventLog:
         if not session_id:
             raise ValueError("session_id 不能为空")
 
-        # 1. 应用 Reducer
+        # 应用 Reducer
         new_state = reduce_state(current, patch)
 
-        # 2. 构建事件记录
+        # 构建事件记录
         event_data: dict = {"patch": patch}
         if extra_data:
             event_data.update(extra_data)
@@ -93,7 +93,7 @@ class EventLog:
             parent_event_id=parent_event_id,
         )
 
-        # 3. 通知订阅者
+        # 通知订阅者
         await self._notify(event_record)
 
         return new_state, event_record

@@ -2,7 +2,6 @@
 """
 @File     :   world_summarizer.py
 @Desc     :   世界状态压缩后台任务 — 周期生成世界简报与 NPC 关系摘要
-@Note     :   Phase 7 — Worker 层实现
 
 工作流程:
   1. 读取最新 Event Log
@@ -21,7 +20,7 @@ import asyncio
 from datetime import datetime, timezone
 from typing import Any, Optional
 
-from src.config import get_logger
+from src.tools import get_logger
 from src.memory.event_store import EventStore
 from src.memory.vector_store import VectorStore
 from src.memory.summarizer import Summarizer
@@ -146,7 +145,7 @@ class WorldSummarizer:
             return None
 
         try:
-            # 1. 提取关键事件用于摘要
+            # 提取关键事件用于摘要
             relevant = []
             for e in events:
                 etype = e.get("type", "")
@@ -164,7 +163,7 @@ class WorldSummarizer:
             if not relevant:
                 return None
 
-            # 2. 拼接为摘要文本
+            # 拼接为摘要文本
             lines = [f"【会话 {session_id[:8]}】世界状态摘要"]
             lines.append(f"生成时间: {datetime.now(timezone.utc).isoformat()}")
             lines.append(f"事件总数: {len(events)}")
@@ -191,7 +190,7 @@ class WorldSummarizer:
 
             summary = "\n".join(lines)
 
-            # 3. 写入 VectorStore
+            # 写入 VectorStore
             if self._vector_store:
                 await self._vector_store.insert(
                     text=summary,

@@ -2,7 +2,6 @@
 """
 @File     :   background_sync.py
 @Desc     :   后台数据同步任务 — 健康检查、备份、一致性校验
-@Note     :   Phase 7 — Worker 层实现
 
 定时任务:
   - 每小时: 数据库连接池健康检查
@@ -23,7 +22,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
-from src.config import get_logger, PROJECT_ROOT
+from src.tools import get_logger, PROJECT_ROOT
 from src.memory.event_store import EventStore
 from src.memory.vector_store import VectorStore
 
@@ -220,20 +219,20 @@ class BackgroundSync:
         try:
             backup_path.mkdir(parents=True, exist_ok=True)
 
-            # 1. 备份 EventStore (SQLite)
+            # 备份 EventStore (SQLite)
             if self._event_store:
                 db_path = getattr(self._event_store, "db_path", None)
                 if db_path and Path(db_path).exists():
                     shutil.copy2(db_path, backup_path / "events.db")
                     logger.info(f"BackgroundSync: EventStore 已备份 ({db_path})")
 
-            # 2. 备份配置文件
+            # 备份配置文件
             for config_file in ["config.yaml", "providers.ini"]:
                 src = PROJECT_ROOT / config_file
                 if src.exists():
                     shutil.copy2(src, backup_path / config_file)
 
-            # 3. 写入备份元数据
+            # 写入备份元数据
             meta = {
                 "timestamp": timestamp,
                 "version": "0.1.0",
