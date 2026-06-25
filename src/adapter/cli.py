@@ -871,7 +871,7 @@ class CliAdapter(AbstractAdapter):
 
             event_store = EventStore()
             vector_store = await VectorStore.get_instance(
-                domain="world", llm_tier="standard", use_local_storage=True,
+                domain="world", llm_tier="standard",
             )
 
             self._memorizer = MemorizerWorker(

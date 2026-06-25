@@ -55,7 +55,6 @@ class VectorStore:
         domain: str = "world",
         llm_tier: str = "standard",
         force_reinit: bool = False,
-        use_local_storage: bool = False,
     ) -> "VectorStore":
         """获取指定 domain 的 VectorStore 实例（单例）
 
@@ -63,12 +62,11 @@ class VectorStore:
             domain: 数据域 ("world" / "rules")
             llm_tier: LLM 模型层级
             force_reinit: 强制重新初始化
-            use_local_storage: 强制使用本地 JSON 存储（即使配置了 PostgreSQL）
         """
         async with cls._lock:
             if domain not in cls._instances or force_reinit:
                 cls._instances[domain] = cls(domain)
-                await cls._instances[domain]._initialize(llm_tier, use_local_storage)
+                await cls._instances[domain]._initialize(llm_tier)
             return cls._instances[domain]
 
     @classmethod
@@ -80,20 +78,14 @@ class VectorStore:
 
     # ── 初始化 ──
 
-    async def _initialize(self, llm_tier: str = "standard", use_local_storage: bool = False):
-        """初始化 LightRAG 实例
-
-        参数:
-            llm_tier: LLM 模型层级
-            use_local_storage: 强制使用本地 JSON 存储（即使配置了 PostgreSQL）
-        """
+    async def _initialize(self, llm_tier: str = "standard"):
+        """初始化 LightRAG 实例"""
         if self._initialized:
             logger.warning(f"VectorStore({self.domain}) 已初始化，跳过")
             return
 
         settings = get_settings()
 
-        # 确定工作目录和 workspace
         if self.domain == "rules":
             working_dir = PROJECT_ROOT / "data" / "rules"
             workspace = "rules"
@@ -104,12 +96,9 @@ class VectorStore:
 
         working_dir.mkdir(parents=True, exist_ok=True)
 
-        # 通过 lazy import 获取 LLM/Embedding 函数
         llm_func = self._create_llm_func(llm_tier)
         embedding_func = self._create_embedding_func()
-
-        # 构建存储配置（如果 use_local_storage=True，强制本地存储）
-        storage_config = self._build_storage_config(str(working_dir), workspace, use_local_storage)
+        storage_config = self._build_storage_config(str(working_dir), workspace)
 
         try:
             self.rag = LightRAG(
@@ -234,16 +223,9 @@ class VectorStore:
             func=embedding_func,
         )
 
-    def _build_storage_config(self, working_dir: str, workspace: str, use_local_storage: bool = False) -> dict:
-        """构建 LightRAG 存储配置
-
-        参数:
-            working_dir: 工作目录
-            workspace: 工作空间名称
-            use_local_storage: 强制使用本地 JSON 存储（即使配置了 PostgreSQL）
-        """
+    def _build_storage_config(self, working_dir: str, workspace: str) -> dict:
+        """构建 LightRAG 存储配置 — PG 优先，本地 JSON 兜底"""
         settings = get_settings()
-        db_config = settings.database
 
         config: dict = {
             "working_dir": working_dir,
@@ -254,38 +236,40 @@ class VectorStore:
             "doc_status_storage": "JsonDocStatusStorage",
         }
 
-        # 如果强制使用本地存储，跳过 PG 配置
-        if use_local_storage:
-            logger.info("VectorStore: 强制使用本地 JSON 存储")
-            return config
+        # 通过 PgManager 检测 PG 可用性
+        try:
+            from src.tools.pg_manager import PgManager
+            import asyncio
+            try:
+                loop = asyncio.get_running_loop()
+                import concurrent.futures
+                with concurrent.futures.ThreadPoolExecutor() as pool:
+                    future = pool.submit(
+                        lambda: asyncio.run(PgManager.get_instance())
+                    )
+                    mgr = future.result()
+            except RuntimeError:
+                mgr = asyncio.run(PgManager.get_instance())
 
-        # 如果配置了 PostgreSQL，升级存储
-        if db_config.host:
-            config.update({
-                "vector_storage": "PGVectorStorage",
-                "kv_storage": "PGKVStorage",
-                "doc_status_storage": "PGDocStatusStorage",
-                "vector_db_storage_cls_kwargs": {
-                    "cosine_better_than_threshold": 0.2,
-                    "embedding_dim": settings.vector_store.embedding_dim,
-                },
-                "addon_params": {
-                    "db_url": self._build_postgres_url(),
-                    "use_jsonb": True,
-                },
-            })
+            if mgr.available and mgr._started:
+                config.update({
+                    "vector_storage": "PGVectorStorage",
+                    "kv_storage": "PGKVStorage",
+                    "doc_status_storage": "PGDocStatusStorage",
+                    "vector_db_storage_cls_kwargs": {
+                        "cosine_better_than_threshold": 0.2,
+                        "embedding_dim": settings.vector_store.embedding_dim,
+                    },
+                    "addon_params": {
+                        "db_url": mgr.uri,
+                        "use_jsonb": True,
+                    },
+                })
+                logger.info(f"VectorStore: 使用 PG 后端 (pgvector, {mgr.backend.value})")
+        except Exception as e:
+            logger.debug(f"VectorStore: PG 检测跳过: {e}")
 
         return config
-
-    def _build_postgres_url(self) -> str:
-        settings = get_settings()
-        db = settings.database
-        user = db.username or "postgres"
-        password = db.password or ""
-        host = db.host or "localhost"
-        port = db.port or "5432"
-        dbname = db.project_name or "glyphkeeper"
-        return f"postgresql://{user}:{password}@{host}:{port}/{dbname}"
 
     # ── 核心操作 ──
 

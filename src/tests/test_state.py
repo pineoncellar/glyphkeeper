@@ -241,8 +241,20 @@ class TestEventLog:
     """EventLog 记录与回放"""
 
     @pytest.fixture
-    async def event_store(self, tmp_path):
-        store = EventStore(db_path=str(tmp_path / "test_events.db"))
+    async def pg(self):
+        from src.tools.pg_manager import PgManager
+        await PgManager.reset_instance()
+        mgr = await PgManager.get_instance()
+        if not mgr.available:
+            pytest.skip("pgembed 不可用")
+        await mgr.start()
+        yield mgr
+        await mgr.stop()
+
+    @pytest.fixture
+    async def event_store(self, pg):
+        store = EventStore(pg_uri=pg.uri)
+        await store.clear_all()
         yield store
         await store.close()
 
@@ -371,17 +383,27 @@ class TestSnapshotManager:
     """快照创建与恢复"""
 
     @pytest.fixture
-    async def event_store(self, tmp_path):
-        store = EventStore(db_path=str(tmp_path / "snap_events.db"))
+    async def pg(self):
+        from src.tools.pg_manager import PgManager
+        await PgManager.reset_instance()
+        mgr = await PgManager.get_instance()
+        if not mgr.available:
+            pytest.skip("pgembed 不可用，跳过 PG 快照测试")
+        await mgr.start()
+        yield mgr
+        await mgr.stop()
+
+    @pytest.fixture
+    async def event_store(self, pg):
+        store = EventStore(pg_uri=pg.uri)
+        await store.clear_all()
         yield store
         await store.close()
 
     @pytest.fixture
-    async def snapshot_mgr(self, tmp_path, event_store):
-        mgr = SnapshotManager(
-            event_store=event_store,
-            db_path=str(tmp_path / "snapshots" / "snapshots.db"),
-        )
+    async def snapshot_mgr(self, event_store, pg):
+        mgr = SnapshotManager(event_store=event_store, pg_uri=pg.uri)
+        await mgr.clear_all()
         yield mgr
         await mgr.close()
 
@@ -457,8 +479,20 @@ class TestEventLogSnapshotIntegration:
     """EventLog + Snapshot 集成"""
 
     @pytest.fixture
-    async def event_store(self, tmp_path):
-        store = EventStore(db_path=str(tmp_path / "integ_events.db"))
+    async def pg(self):
+        from src.tools.pg_manager import PgManager
+        await PgManager.reset_instance()
+        mgr = await PgManager.get_instance()
+        if not mgr.available:
+            pytest.skip("pgembed 不可用")
+        await mgr.start()
+        yield mgr
+        await mgr.stop()
+
+    @pytest.fixture
+    async def event_store(self, pg):
+        store = EventStore(pg_uri=pg.uri)
+        await store.clear_all()
         yield store
         await store.close()
 
@@ -467,11 +501,10 @@ class TestEventLogSnapshotIntegration:
         return EventLog(event_store)
 
     @pytest.fixture
-    async def snapshot_mgr(self, tmp_path, event_store):
-        mgr = SnapshotManager(
-            event_store=event_store,
-            db_path=str(tmp_path / "snapshots" / "integ.db"),
-        )
+    async def snapshot_mgr(self, event_store, pg):
+        mgr = SnapshotManager(event_store=event_store, pg_uri=pg.uri)
+        await mgr.clear_all()
+        await event_store.clear_all()
         yield mgr
         await mgr.close()
 

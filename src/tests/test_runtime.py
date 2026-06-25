@@ -399,16 +399,24 @@ class TestGraphEngine:
         engine = GraphEngine(keeper_graph, mode=ENGINE_MODE_FULL)
         assert engine.mode == ENGINE_MODE_FULL
 
-    def test_create_with_components(self):
+    @pytest.mark.asyncio
+    async def test_create_with_components(self):
         """创建带组件的 Engine"""
         from src.graph.keeper_graph import keeper_graph
         from src.memory.event_store import EventStore
         from src.state.event_log import EventLog
         from src.state.snapshot import SnapshotManager
+        from src.tools.pg_manager import PgManager
 
-        store = EventStore(":memory:")
+        await PgManager.reset_instance()
+        mgr = await PgManager.get_instance()
+        if not mgr.available:
+            pytest.skip("pgembed 不可用")
+        await mgr.start()
+
+        store = EventStore(pg_uri=mgr.uri)
         elog = EventLog(store)
-        snap = SnapshotManager(event_store=store, db_path=":memory:")
+        snap = SnapshotManager(event_store=store, pg_uri=mgr.uri)
 
         engine = GraphEngine(
             graph=keeper_graph,
@@ -418,6 +426,7 @@ class TestGraphEngine:
         )
         assert engine.event_log is elog
         assert engine.snapshot_mgr is snap
+        await mgr.stop()
 
     @pytest.mark.asyncio
     async def test_initial_state_building(self):

@@ -58,7 +58,7 @@ class Retriever:
 
     @property
     async def vector_store(self) -> VectorStore:
-        """获取 VectorStore 实例（懒加载）"""
+        """获取 VectorStore 实例（懒加载，默认本地存储）"""
         if self._vector_store is None:
             self._vector_store = await VectorStore.get_instance(domain="world")
         return self._vector_store

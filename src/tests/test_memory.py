@@ -90,11 +90,18 @@ class TestConfig:
 class TestEventStore:
     @pytest.fixture
     async def store(self):
-        """创建内存 EventStore"""
-        es = EventStore(":memory:")
-        await es._init_db()
+        """创建 PG EventStore（自动启动 pgembed）"""
+        from src.tools.pg_manager import PgManager
+        await PgManager.reset_instance()
+        mgr = await PgManager.get_instance()
+        if not mgr.available:
+            pytest.skip("pgembed 不可用，跳过 PG 测试")
+        await mgr.start()
+        es = EventStore(pg_uri=mgr.uri)
+        await es.clear_all()
         yield es
         await es.close()
+        await mgr.stop()
 
     @pytest.mark.asyncio
     async def test_append_event(self, store):
@@ -420,12 +427,18 @@ class TestRetriever:
         """空会话返回空列表"""
         from src.memory.retriever import Retriever
         from src.memory.event_store import EventStore
-        store = EventStore(":memory:")
-        await store._init_db()
+        from src.tools.pg_manager import PgManager
+        await PgManager.reset_instance()
+        mgr = await PgManager.get_instance()
+        if not mgr.available:
+            pytest.skip("pgembed 不可用")
+        await mgr.start()
+        store = EventStore(pg_uri=mgr.uri)
         r = Retriever(event_store=store)
         events = await r.retrieve_history("nonexistent")
         assert events == []
         await store.close()
+        await mgr.stop()
 
     async def test_retrieve_rules_fallback(self):
         """检索规则时如无连接返回降级文本"""
@@ -449,19 +462,11 @@ class TestRetriever:
 class TestVectorStoreConfig:
     """VectorStore 纯逻辑方法测试（无需真实 LightRAG 连接）"""
 
-    def test_build_storage_config_default(self, monkeypatch):
-        """无 PG 配置时使用 NanoVectorDB + JsonKV"""
-        # 注入无数据库配置的 Settings
-        from src.tools.config import Settings
-        clean = Settings()
-        monkeypatch.setattr('src.tools.config._settings_instance', clean)
-
+    def test_build_storage_config_default(self):
+        """默认配置包含所有必要键"""
         from src.memory.vector_store import VectorStore
         vs = VectorStore(domain="world")
         config = vs._build_storage_config("/tmp/test", "test_world")
-        assert config["vector_storage"] == "NanoVectorDBStorage"
-        assert config["kv_storage"] == "JsonKVStorage"
-        assert config["graph_storage"] == "NetworkXStorage"
         assert config["workspace"] == "test_world"
         assert config["working_dir"] == "/tmp/test"
 
@@ -474,12 +479,22 @@ class TestVectorStoreConfig:
                          "vector_storage", "kv_storage", "doc_status_storage"}
         assert required_keys.issubset(config.keys())
 
-    def test_build_postgres_url_format(self):
-        """PostgreSQL URL 格式正确"""
-        from src.memory.vector_store import VectorStore
-        vs = VectorStore(domain="world")
-        url = vs._build_postgres_url()
-        assert url.startswith("postgresql://")
+    async def test_build_postgres_url_format(self):
+        """PostgreSQL URL 格式正确（通过 PgManager）"""
+        from src.tools.pg_manager import PgManager, PgBackend
+
+        await PgManager.reset_instance()
+        mgr = await PgManager.get_instance()
+
+        print(f"[test] backend={mgr.backend.value} uri='{mgr.uri}'")
+        if mgr.backend == PgBackend.NONE:
+            print("[test] PG 不可用，跳过 URI 格式断言（SQLite 降级模式）")
+            return
+
+        assert mgr.uri.startswith("postgresql://"), (
+            f"URI should start with postgresql://, "
+            f"got uri='{mgr.uri}' backend={mgr.backend.value}"
+        )
 
     def test_domain_immutable(self):
         """domain 在初始化后不可变"""

@@ -16,7 +16,6 @@ from src.tools.config import (
     # 配置模型
     Settings,
     ProjectConfig,
-    DatabaseConfig,
     ProviderConfig,
     ModelConfig,
     VectorStoreConfig,
@@ -45,13 +44,22 @@ from src.tools.llm_client import (
     ask_llm,
 )
 
+from src.tools.pg_manager import (
+    PgManager,
+    PgBackend,
+    PgSession,
+    get_pg_uri,
+    is_pg_available,
+    get_pg_backend,
+    ensure_pg_started,
+)
+
 __all__ = [
     # config
     "PROJECT_ROOT",
     "LOG_DIR",
     "Settings",
     "ProjectConfig",
-    "DatabaseConfig",
     "ProviderConfig",
     "ModelConfig",
     "VectorStoreConfig",
@@ -72,4 +80,12 @@ __all__ = [
     "call_llm",
     "call_llm_stream",
     "ask_llm",
+    # pg_lite
+    "PgManager",
+    "PgBackend",
+    "PgSession",
+    "get_pg_uri",
+    "is_pg_available",
+    "get_pg_backend",
+    "ensure_pg_started",
 ]

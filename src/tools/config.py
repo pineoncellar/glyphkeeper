@@ -45,15 +45,6 @@ class ProjectConfig(BaseModel):
     active_world: str = Field("default_world", description="当前激活的世界/模组名称")
 
 
-class DatabaseConfig(BaseModel):
-    """数据库配置"""
-    host: Optional[str] = Field(None, description="数据库主机")
-    port: Optional[str] = Field(None, description="数据库端口")
-    username: Optional[str] = Field(None, description="数据库用户名")
-    password: Optional[str] = Field(None, description="数据库密码")
-    project_name: Optional[str] = Field(None, description="项目名称，与项目基础配置中的名称保持一致")
-
-
 class ProviderConfig(BaseModel):
     """AI 提供方配置"""
     base_url: str = Field(description="API 基础 URL")
@@ -90,19 +81,9 @@ class VectorStoreConfig(BaseModel):
 class Settings(BaseModel):
     """应用总配置 — 聚合所有子配置"""
     project: ProjectConfig = Field(default_factory=ProjectConfig)
-    database: DatabaseConfig = Field(default_factory=DatabaseConfig)
     providers: Dict[str, ProviderConfig] = Field(default_factory=dict)
     model_tiers: Dict[str, ModelConfig] = Field(default_factory=dict)
     vector_store: VectorStoreConfig = Field(default_factory=VectorStoreConfig)
-
-    @model_validator(mode='after')
-    def sync_database_project_name(self):
-        """使数据库配置中的项目名称、用户名称与全局项目名称一致"""
-        if self.database.project_name is None:
-            self.database.project_name = self.project.name
-        if self.database.username is None:
-            self.database.username = self.project.name
-        return self
 
     @property
     def PROJECT_NAME(self) -> str:
@@ -169,25 +150,17 @@ class Settings(BaseModel):
                 section_lower = section.lower()
                 try:
                     if section_lower == 'database':
-                        result['database'] = DatabaseConfig(
-                            host=config.get(section, 'host', fallback=None),
-                            port=config.get(section, 'port', fallback=None),
-                            username=config.get(section, 'username', fallback=None),
-                            password=config.get(section, 'password', fallback=None),
-                        )
-                    else:
-                        providers[section_lower] = ProviderConfig(
-                            base_url=config.get(section, 'base_url'),
-                            api_key=config.get(section, 'api_key'),
-                        )
+                        continue  # 数据库配置已由 pgembed 管理
+                    providers[section_lower] = ProviderConfig(
+                        base_url=config.get(section, 'base_url'),
+                        api_key=config.get(section, 'api_key'),
+                    )
                 except Exception as e:
                     _early_log("WARNING", f"无法加载配置节 [{section}]: {e}")
 
             if providers:
                 result['providers'] = providers
             _early_log("INFO", f"成功加载 {len(providers)} 个 AI 提供方配置")
-            if 'database' in result:
-                _early_log("INFO", "成功加载数据库配置")
         except Exception as e:
             _early_log("WARNING", f"无法读取 providers.ini: {e}")
 
@@ -219,9 +192,6 @@ class Settings(BaseModel):
                 f"请检查 providers.ini 文件是否包含 [{model_config.provider.upper()}] 配置节"
             )
         return model_config, provider_config
-
-    def get_database_config(self) -> DatabaseConfig:
-        return self.database
 
     def get_api_key(self, provider: str) -> Optional[str]:
         provider_config = self.get_provider_config(provider)

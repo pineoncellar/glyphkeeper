@@ -77,7 +77,7 @@ class ModuleIngestor:
             self._vector_store = await VectorStore.get_instance(
                 domain="world",
                 llm_tier="standard",
-                use_local_storage=True,
+
             )
         return self._vector_store
 
@@ -450,7 +450,6 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
         epilog=(
             "示例:\n"
             "  uv run python -m src.tools.ingestion --name book\n"
-            "  uv run python -m src.tools.ingestion --file data_backup/intermediate/book.json\n"
             "  uv run python -m src.tools.ingestion --list\n"
         ),
     )
