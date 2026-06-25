@@ -26,6 +26,7 @@
 
 import asyncio
 import logging
+import os
 from pathlib import Path
 from typing import Optional, Literal
 
@@ -252,6 +253,21 @@ class VectorStore:
                 mgr = asyncio.run(PgManager.get_instance())
 
             if mgr.available and mgr._started:
+                # LightRAG 的 PG 存储通过环境变量获取连接信息
+                # pgembed 使用匿名认证，无需密码
+                from urllib.parse import urlparse
+                parsed = urlparse(mgr.uri)
+                pg_host = parsed.hostname or "localhost"
+                pg_port = str(parsed.port or 5432)
+                pg_user = parsed.username or "postgres"
+                pg_pass = parsed.password or ""
+                pg_db = parsed.path.lstrip("/") or "glyphkeeper"
+                os.environ.setdefault("POSTGRES_USER", pg_user)
+                os.environ.setdefault("POSTGRES_PASSWORD", pg_pass)
+                os.environ.setdefault("POSTGRES_DATABASE", pg_db)
+                os.environ.setdefault("POSTGRES_HOST", pg_host)
+                os.environ.setdefault("POSTGRES_PORT", pg_port)
+
                 config.update({
                     "vector_storage": "PGVectorStorage",
                     "kv_storage": "PGKVStorage",
