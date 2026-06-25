@@ -24,7 +24,7 @@ from src.domain.character import (
     create_investigator, roll_standard_stats,
     calculate_skill_points, calculate_interest_points,
 )
-from src.state.player_state import PlayerLoader
+from src.state.player_state import CharacterStore
 from src.state.snapshot import SnapshotManager
 from src.workers.memorizer_worker import MemorizerWorker
 from src.workers.world_summarizer import WorldSummarizer
@@ -73,7 +73,7 @@ class CliAdapter(AbstractAdapter):
         super().__init__(engine, scheduler, session_id)
         self._turn_count = 0
         self._available_module: Optional[str] = None
-        self._player_loader = PlayerLoader()
+        self._player_loader: Optional[CharacterStore] = None
         self._snapshot_mgr = SnapshotManager()
         self._character: Optional[Character] = None
 
@@ -234,7 +234,8 @@ class CliAdapter(AbstractAdapter):
 
         # 最后完成角色创建
         self._character = character
-        self._player_loader.save_character(self.session_id, character)
+        if self._player_loader:
+            await self._player_loader.save(self.session_id, character)
 
         print()
         print(_color("═" * 50, _GREEN))
@@ -281,8 +282,10 @@ class CliAdapter(AbstractAdapter):
         print(_BANNER)
 
         # 检测已有角色
-        if self._player_loader.character_exists(self.session_id):
-            loaded = self._player_loader.load_character(self.session_id)
+        self._player_loader = CharacterStore()
+        exists = await self._player_loader.exists(self.session_id)
+        if exists:
+            loaded = await self._player_loader.load(self.session_id)
             if loaded:
                 self._character = loaded
                 print(_color(f"\n📋 检测到已有角色: {_color(loaded.name, _GREEN)} ({loaded.occupation})", _DIM))
