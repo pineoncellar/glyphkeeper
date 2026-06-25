@@ -55,8 +55,19 @@ async def dice_node(state: GameState) -> dict:
     bonus_dice = pending.get("bonus_dice", 0)
     penalty_dice = pending.get("penalty_dice", 0)
 
+    # 支持外部注入的 roll_value（来自 CLI 输入）
+    roll_value_override = pending.get("roll_value")
+
     # ── 执行掷骰 ──
-    if expression:
+    if roll_value_override is not None:
+        # 使用玩家输入的掷骰值（用于 CLI 交互式掷骰）
+        roll_total = int(roll_value_override)
+        tens, ones = roll_total // 10, roll_total % 10
+        if tens == 10:  # 100 → 十位骰 0, 个位骰 0
+            tens, ones = 0, 0
+        all_rolls = [roll_total]
+        logger.info(f"dice_node: 使用外部注入掷骰值 {roll_total}")
+    elif expression:
         # 自定义骰子表达式（如 "1D6", "2D6+2"）
         roll_total = roll_expression(expression)
         tens, ones = 0, 0

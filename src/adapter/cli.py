@@ -312,11 +312,11 @@ class CliAdapter(AbstractAdapter):
                 await self.send(OutboundMessage.system_msg("正在退出..."))
                 break
 
-            # 特殊处理 /roll 或 /r 技能名
+            # 处理 /roll 或 /r — 专业掷骰处理器
             if msg.type == MessageType.SYSTEM_CMD and msg.text.strip().lower().startswith(("/roll", "/r ")):
-                parts = msg.text.strip().split(maxsplit=1)
-                skill = parts[1] if len(parts) > 1 else ""
-                await self._manual_roll(skill)
+                out = await self._handle_roll_cmd(msg.text.strip(), self.session_id)
+                await self.send(out)
+                print()
                 continue
 
             # 处理 /sheet
@@ -348,39 +348,254 @@ class CliAdapter(AbstractAdapter):
 
             out = await self.handle(msg)
             await self.send(out)
+
+            # 🔥 Phase 12: 检测 state 中是否有 pending_dice，进入交互式掷骰子循环
+            await self._resolve_pending_dice_interactive(session_id=self.session_id)
+
             print()
 
         print(_color("\n👋 感谢使用 GlyphKeeper！", _CYAN))
 
     # ── 工具方法 ──
 
-    async def _manual_roll(self, skill_name: str = ""):
-        """手动掷 D100 测试，支持指定技能"""
-        from src.tools.dice import roll_d100
+    # ================================================================
+    # Phase 12: 增强型掷骰系统
+    # ================================================================
+
+    async def _handle_roll_cmd(self, cmd: str, session_id: str) -> OutboundMessage:
+        """
+        处理 /roll 命令。
+
+        支持:
+          /roll              — D100 测试（参考多个技能等级）
+          /roll <技能名>     — 用角色的技能值检定
+          /roll <数值>       — 用指定数值检定
+          /roll <表达式>     — 任意骰子表达式（3D6, 1D3+1D4 等）
+          /roll help         — 显示用法
+        """
+        from src.tools.dice import roll_d100, roll_dice as roll_expression
         from src.domain.coc_rules import determine_success_level
 
-        tens, ones, value = roll_d100()
-        print()
-        print(_color("─ 掷骰结果 ───────────────────────", _BOLD))
-        print(f"  掷骰值:       {_color(str(value), _YELLOW)} ({tens * 10} + {ones})")
+        parts = cmd.split(maxsplit=1)
+        arg = parts[1].strip().lower() if len(parts) > 1 else ""
 
-        if skill_name and self._character:
-            skill_val = self._character.skills.get(skill_name, 0)
-            if skill_val:
-                level = determine_success_level(skill_val, value)
-                color = _GREEN if level.value in ("CRITICAL", "EXTREME", "HARD", "REGULAR") else _RED
-                print(f"  技能 [{skill_name}]: {skill_val}")
-                print(f"  结果:          {_color(level.value, color)}")
-            else:
-                print(f"  未知技能: {skill_name}")
-        else:
-            for skill in [10, 30, 50, 70, 90]:
-                level = determine_success_level(skill, value)
+        if arg in ("help", "-h", "--help"):
+            return OutboundMessage.system_msg(
+                "/roll 用法:\n"
+                "  /roll               — D100 参考检定（显示多个技能等级的判定）\n"
+                "  /roll <技能名>       — 用角色技能值检定（如: /roll 侦查）\n"
+                "  /roll <数值>         — 用指定阈值检定（如: /roll 50）\n"
+                "  /roll <表达式>       — 任意骰子（如: /roll 3D6, /roll 1D3+1D4）\n"
+                "  /r <技能名>          — 同上（快捷方式）",
+                session_id=session_id,
+            )
+
+        # ── 骰子表达式模式 — 包含 D/d 字符 ──
+        if "d" in arg or "D" in arg:
+            try:
+                total = roll_expression(arg.upper())
+                return OutboundMessage.system_msg(
+                    f"🎲 {arg.upper()} = {_color(str(total), _YELLOW)}",
+                    session_id=session_id,
+                )
+            except Exception as e:
+                return OutboundMessage.system_msg(
+                    f"无效的骰子表达式: {arg} ({e})", level="error", session_id=session_id
+                )
+
+        # ── 数值模式 — 纯数字 ──
+        try:
+            threshold = int(arg)
+            tens, ones, value = roll_d100()
+            from src.domain.coc_rules import determine_success_level
+            level = determine_success_level(threshold, value)
+            color = _GREEN if level.value in ("CRITICAL", "EXTREME", "HARD", "REGULAR") else _RED
+            return OutboundMessage.system_msg(
+                f"🎲 D100 = {_color(str(value), _YELLOW)}  "
+                f"阈值 [{threshold}] → {_color(level.value, color)}"
+                f"{' (大成功!)' if level.value == 'CRITICAL' else ''}"
+                f"{' (大失败!)' if level.value == 'FUMBLE' else ''}",
+                session_id=session_id,
+            )
+        except ValueError:
+            pass
+
+        # ── 技能名模式 — 从角色数据查找技能值 ──
+        skill_name = arg
+        skill_value = 0
+
+        # 先查角色技能
+        if self._character:
+            skill_value = self._character.skills.get(skill_name, 0)
+
+        # 查不到则查基础技能表
+        if not skill_value:
+            base_skills = _get_base_skill_values(
+                self._character.stats if self._character else None
+            ) if hasattr(self, '_character') and self._character else {}
+            skill_value = base_skills.get(skill_name, 0)
+
+        # 仍查不到则查 CoC 属性快捷名
+        if not skill_value and self._character:
+            stat_map = {
+                "str": self._character.stats.strength,
+                "con": self._character.stats.constitution,
+                "siz": self._character.stats.size,
+                "dex": self._character.stats.dexterity,
+                "app": self._character.stats.appearance,
+                "int": self._character.stats.intelligence,
+                "pow": self._character.stats.power,
+                "edu": self._character.stats.education,
+            }
+            if skill_name.upper() in stat_map:
+                skill_value = stat_map[skill_name.upper()]
+                skill_name = skill_name.upper()
+                # 属性检定 ×5
+                threshold_display = f"{skill_value} (属性×5={skill_value * 5})"
+                skill_value = skill_value * 5
+
+        if not skill_value:
+            # 无对应技能 / 属性 — 降级为纯 D100 参考检定
+            tens, ones, value = roll_d100()
+            lines = [f"🎲 D100 = {_color(str(value), _YELLOW)} ({tens * 10}+{ones})"]
+            for ref in [10, 30, 50, 70, 90]:
+                level = determine_success_level(ref, value)
                 marker = " ◀" if level.value in ("CRITICAL", "FUMBLE") else ""
-                colored = _color(f"{level.value:>10}", _GREEN)
-                print(f"  技能 {skill:>3}: {colored}{marker}")
+                lines.append(f"  技能 {ref:>3}: {_color(f'{level.value:>10}', _GREEN)}{marker}")
+            return OutboundMessage.system_msg(
+                "\n".join(lines) + f"\n(未找到技能 '{skill_name}'，显示参考检定)",
+                session_id=session_id,
+            )
 
-        print(_color("──────────────────────────────────", _DIM))
+        # 正常技能检定
+        tens, ones, value = roll_d100()
+        level = determine_success_level(skill_value, value)
+        is_success = level.value in ("CRITICAL", "EXTREME", "HARD", "REGULAR")
+        color = _GREEN if is_success else _RED
+        emoji = "🎲"
+        extra = ""
+        if level.value == "CRITICAL":
+            extra = " 大成功!! 🎉"
+            emoji = "🌟"
+        elif level.value == "FUMBLE":
+            extra = " 大失败!! 💀"
+
+        return OutboundMessage.system_msg(
+            f"{emoji} [{skill_name}] D100 = {_color(str(value), _YELLOW)}  "
+            f"技能 {skill_value} → {_color(level.value, color)}{extra}",
+            session_id=session_id,
+        )
+
+    async def _resolve_pending_dice_interactive(self, session_id: str):
+        """
+        🔥 Phase 12: 检测 state 中是否有 pending_dice，进入交互式掷骰子循环。
+
+        在每次引擎执行后调用。如果 state 中有 pending_dice：
+          1. 显示掷骰请求信息
+          2. 提示玩家输入掷骰值
+          3. 注入 roll_value → 重新提交给引擎
+          4. 显示结果
+        """
+        state = self._scheduler.get_session_state(session_id) if self._scheduler else None
+        if not state:
+            return
+
+        pending = state.get("pending_dice")
+        if not pending:
+            return
+
+        # 如果已经有 roll_value 了（来自上一轮注入），跳过
+        if pending.get("roll_value") is not None:
+            return
+
+        reason = pending.get("reason", "掷骰检定")
+        skill_name = pending.get("skill_name", "")
+        difficulty = pending.get("difficulty", "REGULAR")
+        bonus_dice = pending.get("bonus_dice", 0)
+        penalty_dice = pending.get("penalty_dice", 0)
+
+        # 显示掷骰请求
+        print()
+        print(_color("═" * 50, _YELLOW))
+        print(_color(f"  🎲 需要掷骰!", _BOLD))
+        print(_color(f"  原因: {reason}", _YELLOW))
+        if skill_name:
+            # 尝试从角色数据读取技能值
+            skill_val = 0
+            if self._character:
+                skill_val = self._character.skills.get(skill_name, 0)
+            if skill_val:
+                print(f"  技能: {skill_name} ({skill_val})")
+            else:
+                print(f"  技能: {skill_name}")
+        print(f"  难度: {difficulty}")
+        if bonus_dice:
+            print(f"  奖励骰: +{bonus_dice}")
+        if penalty_dice:
+            print(f"  惩罚骰: +{penalty_dice}")
+        print(_color("═" * 50, _YELLOW))
+        print(_color("  输入你的掷骰结果 (1-100)，或直接回车自动掷骰", _DIM))
+        print()
+
+        # 等待玩家输入
+        try:
+            raw = await asyncio.get_event_loop().run_in_executor(
+                None,
+                lambda: input(f"{_color('掷骰值', _GREEN)} > "),
+            )
+        except (KeyboardInterrupt, EOFError):
+            print()
+            return
+
+        raw = raw.strip()
+
+        # 确定掷骰值
+        if not raw:
+            # 自动掷骰
+            from src.tools.dice import roll_d100
+            _, _, roll_value = roll_d100()
+            print(_color(f"  自动掷骰: {roll_value}", _DIM))
+        else:
+            try:
+                roll_value = int(raw)
+                if not (1 <= roll_value <= 100):
+                    print(_color("⚠️  掷骰值必须在 1-100 之间，使用 50", _YELLOW))
+                    roll_value = 50
+            except ValueError:
+                print(_color(f"⚠️  无效数值，自动掷骰", _YELLOW))
+                from src.tools.dice import roll_d100
+                _, _, roll_value = roll_d100()
+
+        # 注入 roll_value 到 pending_dice
+        pending["roll_value"] = roll_value
+
+        # 重新提交到引擎（带 roll_value）
+        try:
+            self._turn_count += 1
+            narrative = await self._scheduler.submit(session_id, state.get("player_input", ""))
+            if narrative:
+                print()
+                print(_color("━" * 50, _DIM))
+                print(_color(narrative, _CYAN))
+                print(_color("━" * 50, _DIM))
+
+            # 显示检定结果
+            new_state = self._scheduler.get_session_state(session_id)
+            if new_state:
+                resolution = new_state.get("resolution") or {}
+                roll_val = resolution.get("roll_value", roll_value)
+                succ_level = resolution.get("success_level", "")
+                if succ_level:
+                    level_color = _GREEN if succ_level in ("CRITICAL", "EXTREME", "HARD", "REGULAR") else _RED
+                    print(
+                        f"  🎲 检定: {_color(str(roll_val), _YELLOW)} "
+                        f"→ {_color(succ_level, level_color)}"
+                    )
+
+        except Exception as e:
+            logger.error(f"掷骰结果提交失败: {e}")
+            print(_color(f"❌ 掷骰结果提交失败: {e}", _RED))
+
         print()
 
 
