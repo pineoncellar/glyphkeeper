@@ -131,21 +131,43 @@ class VectorStore:
         settings = get_settings()
         model_config, provider_config = settings.get_full_model_config(tier)
 
+        # 创建禁用代理的 httpx 客户端
+        # TODO: 优化此处代码
+        import httpx
+        _no_proxy_client = httpx.AsyncClient(proxy=None, timeout=120.0)
+
         async def llm_model_func(
             prompt: str,
             system_prompt: Optional[str] = None,
             history_messages: Optional[list] = None,
             **kwargs,
         ) -> str:
-            return await openai_complete_if_cache(
-                model=model_config.model_name,
-                prompt=prompt,
-                system_prompt=system_prompt,
-                history_messages=history_messages or [],
-                api_key=provider_config.api_key,
-                base_url=provider_config.base_url,
-                **kwargs,
+            logger.debug(
+                f"[LLM] model={model_config.model_name} "
+                f"url={provider_config.base_url} "
+                f"prompt_len={len(prompt)}"
             )
+            try:
+                import httpx
+                client = httpx.AsyncClient(proxy=None, timeout=120.0)
+                try:
+                    result = await openai_complete_if_cache(
+                        model=model_config.model_name,
+                        prompt=prompt,
+                        system_prompt=system_prompt,
+                        history_messages=history_messages or [],
+                        api_key=provider_config.api_key,
+                        base_url=provider_config.base_url,
+                        openai_client_configs={"http_client": client},
+                        **kwargs,
+                    )
+                finally:
+                    await client.aclose()
+                logger.debug(f"[LLM] OK: len={len(result)}")
+                return result
+            except Exception as e:
+                logger.error(f"[LLM] FAILED: {type(e).__name__}: {e}")
+                raise
 
         return llm_model_func
 
@@ -167,13 +189,44 @@ class VectorStore:
 
         raw_openai_embed = openai_embed.func
 
+        # 每个 embedding 调用使用独立的无代理 httpx 客户端
+        import httpx
+
+        async def _make_embedding(texts: list[str]) -> np.ndarray:
+            """执行单次 embedding 调用（独立 httpx 客户端）"""
+            client = httpx.AsyncClient(proxy=None, timeout=120.0)
+            try:
+                return await raw_openai_embed(
+                    texts=texts,
+                    model=vector_config.embedding_model_name,
+                    api_key=provider_config.api_key,
+                    base_url=provider_config.base_url,
+                    client_configs={
+                        "http_client": client,
+                        "max_retries": 0,   # httpx 客户端自身不重试
+                        "timeout": 120.0,
+                    },
+                )
+            finally:
+                await client.aclose()
+
         async def embedding_func(texts: list[str]) -> np.ndarray:
-            return await raw_openai_embed(
-                texts=texts,
-                model=vector_config.embedding_model_name,
-                api_key=provider_config.api_key,
-                base_url=provider_config.base_url,
+            logger.debug(
+                f"[EMBED] model={vector_config.embedding_model_name} "
+                f"url={provider_config.base_url} "
+                f"texts={len(texts)} chunks"
             )
+            try:
+                result = await _make_embedding(texts)
+                logger.debug(f"[EMBED] OK: shape={result.shape}")
+                return result
+            except Exception as e:
+                logger.error(
+                    f"[EMBED] FAILED: {type(e).__name__}: {e} "
+                    f"url={provider_config.base_url} "
+                    f"model={vector_config.embedding_model_name}"
+                )
+                raise
 
         return EmbeddingFunc(
             embedding_dim=vector_config.embedding_dim,
