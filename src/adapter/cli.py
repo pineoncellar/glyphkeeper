@@ -25,6 +25,7 @@ from src.domain.character import (
     calculate_skill_points, calculate_interest_points,
 )
 from src.state.player_state import PlayerLoader
+from src.state.snapshot import SnapshotManager
 from src.workers.memorizer_worker import MemorizerWorker
 from src.workers.world_summarizer import WorldSummarizer
 from src.workers.background_sync import BackgroundSync
@@ -73,6 +74,7 @@ class CliAdapter(AbstractAdapter):
         self._turn_count = 0
         self._available_module: Optional[str] = None
         self._player_loader = PlayerLoader()
+        self._snapshot_mgr = SnapshotManager()
         self._character: Optional[Character] = None
 
         # Workers -- 懒初始化，由 _ensure_workers 创建
@@ -336,6 +338,42 @@ class CliAdapter(AbstractAdapter):
                 self._show_character_sheet()
                 continue
 
+            # 处理 /save /load — 存档系统
+            if msg.type == MessageType.SYSTEM_CMD:
+                cmd_lower = msg.text.strip().lower()
+                if cmd_lower.startswith("/save"):
+                    out = await self._handle_save_cmd(cmd_lower, self.session_id)
+                    await self.send(out)
+                    continue
+                if cmd_lower.startswith("/load"):
+                    out = await self._handle_load_cmd(cmd_lower, self.session_id)
+                    await self.send(out)
+                    continue
+
+            # 处理 /inventory — 背包
+            if msg.type == MessageType.SYSTEM_CMD and msg.text.strip().lower() in ("/inventory", "/inv", "/i"):
+                out = await self._handle_inventory_cmd(self.session_id)
+                await self.send(out)
+                continue
+
+            # 处理 /time — 游戏时间
+            if msg.type == MessageType.SYSTEM_CMD and msg.text.strip().lower() in ("/time", "/t"):
+                out = await self._handle_time_cmd(self.session_id)
+                await self.send(out)
+                continue
+
+            # 处理 /debug — 原始状态
+            if msg.type == MessageType.SYSTEM_CMD and msg.text.strip().lower() in ("/debug", "/d"):
+                out = await self._handle_debug_cmd(self.session_id)
+                await self.send(out)
+                continue
+
+            # 处理 /list — 存档列表（覆盖 base 的 /list→modules 路由）
+            if msg.type == MessageType.SYSTEM_CMD and msg.text.strip().lower() in ("/list", "/saves"):
+                out = await self._handle_list_saves_cmd(self.session_id)
+                await self.send(out)
+                continue
+
             # 处理 /ingest（不是游戏回合）
             if msg.type == MessageType.SYSTEM_CMD and msg.text.strip().lower().startswith("/ingest"):
                 out = await self.handle(msg)
@@ -346,7 +384,7 @@ class CliAdapter(AbstractAdapter):
             # 处理 /start /modules（不是游戏回合）
             lower = msg.text.strip().lower()
             if msg.type == MessageType.SYSTEM_CMD and (
-                lower.startswith("/start") or lower in ("/modules", "/list")
+                lower.startswith("/start") or lower in ("/modules",)
             ):
                 out = await self.handle(msg)
                 await self.send(out)
@@ -619,6 +657,198 @@ class CliAdapter(AbstractAdapter):
             print(_color(f"掷骰结果提交失败: {e}", _RED))
 
         print()
+
+    # ================================================================
+    # 存档系统
+    # ================================================================
+
+    async def _handle_save_cmd(self, cmd: str, session_id: str) -> OutboundMessage:
+        """处理 /save [存档名] — 创建游戏快照。
+
+        先获取当前会话的 GameState，再用 SnapshotManager 创建快照。
+        存档名缺省时使用时间戳标签。保留策略由 SnapshotManager 内部
+        的 MAX_SNAPSHOTS_PER_SESSION 控制（默认 20 个）。
+        """
+        parts = cmd.split(maxsplit=1)
+        label = parts[1].strip() if len(parts) > 1 else ""
+
+        state = self._scheduler.get_session_state(session_id) if self._scheduler else None
+        if state is None:
+            return OutboundMessage.system_msg("当前无活跃会话，无法存档", level="warn", session_id=session_id)
+
+        from datetime import datetime
+        snap_label = label or f"auto_{datetime.now().strftime('%m%d_%H%M')}"
+
+        try:
+            snap_id = await self._snapshot_mgr.create(state, label=snap_label)
+            return OutboundMessage.system_msg(
+                f"存档完成: [{snap_label}] (ID: {snap_id[:8]}...)",
+                session_id=session_id,
+            )
+        except Exception as e:
+            logger.error(f"存档失败: {e}")
+            return OutboundMessage.system_msg(f"存档失败: {e}", level="error", session_id=session_id)
+
+    async def _handle_load_cmd(self, cmd: str, session_id: str) -> OutboundMessage:
+        """处理 /load [存档名] — 读取游戏快照。
+
+        先按标签名查找快照，匹配到后调用 SnapshotManager.restore()
+        恢复状态并写入 scheduler 会话。若缺省存档名则加载最新快照。
+        """
+        parts = cmd.split(maxsplit=1)
+        label = parts[1].strip() if len(parts) > 1 else ""
+
+        try:
+            snapshots = await self._snapshot_mgr.list_snapshots(session_id)
+
+            if not snapshots:
+                return OutboundMessage.system_msg("没有找到存档", level="warn", session_id=session_id)
+
+            target_id = ""
+            if label:
+                # 按标签匹配
+                matches = [s for s in snapshots if s.get("label", "") == label]
+                if not matches:
+                    available = ", ".join(s.get("label", "?") for s in snapshots[:10])
+                    return OutboundMessage.system_msg(
+                        f"未找到存档 [{label}]。可用存档: {available}",
+                        level="warn", session_id=session_id,
+                    )
+                target_id = matches[0]["id"]
+            else:
+                # 取最新
+                target_id = snapshots[0]["id"]
+
+            restored = await self._snapshot_mgr.restore(target_id)
+            if restored is None:
+                return OutboundMessage.system_msg("存档数据损坏，无法读取", level="error", session_id=session_id)
+
+            # 写入 scheduler 当前会话
+            if self._scheduler:
+                # 用空输入重新提交以重建会话状态
+                await self._scheduler.submit(session_id, "", previous_state=restored)
+                # 恢复角色引用
+                char_data = restored.get("character")
+                if char_data and self._player_loader:
+                    from src.state.player_state import _dict_to_character
+                    loaded_char = _dict_to_character(char_data)
+                    if loaded_char:
+                        self._character = loaded_char
+
+            return OutboundMessage.system_msg(
+                f"读档完成: [{label or snapshots[0].get('label', 'latest')}] "
+                f"(轮次 {restored.get('beat_counter', 0)})",
+                session_id=session_id,
+            )
+
+        except Exception as e:
+            logger.error(f"读档失败: {e}")
+            return OutboundMessage.system_msg(f"读档失败: {e}", level="error", session_id=session_id)
+
+    async def _handle_list_saves_cmd(self, session_id: str) -> OutboundMessage:
+        """处理 /list — 列出当前会话的所有存档。"""
+        try:
+            snapshots = await self._snapshot_mgr.list_snapshots(session_id)
+            if not snapshots:
+                return OutboundMessage.system_msg(
+                    "没有存档。使用 /save <存档名> 创建存档。",
+                    session_id=session_id,
+                )
+
+            lines = [f"存档列表 ({len(snapshots)} 个):"]
+            for s in snapshots:
+                lbl = s.get("label", "")
+                ver = s.get("version", 0)
+                ts = s.get("created_at", "")[:19]  # ISO 前19字符
+                lines.append(f"  [{lbl}]  v{ver}  ({ts})")
+            lines.append("使用 /load <存档名> 读取存档。")
+            return OutboundMessage.system_msg("\n".join(lines), session_id=session_id)
+
+        except Exception as e:
+            logger.error(f"列出存档失败: {e}")
+            return OutboundMessage.system_msg(f"列出存档失败: {e}", level="error", session_id=session_id)
+
+    # ================================================================
+    # 信息查询命令
+    # ================================================================
+
+    async def _handle_inventory_cmd(self, session_id: str) -> OutboundMessage:
+        """处理 /inventory — 查看背包物品。
+
+        从 state 或角色数据中读取 inventory 字段。若角色数据中
+        无物品信息，返回空背包提示。
+        """
+        state = self._scheduler.get_session_state(session_id) if self._scheduler else None
+        items = []
+
+        if state:
+            char = state.get("character") or {}
+            items = char.get("inventory", [])
+
+        if not items:
+            return OutboundMessage.system_msg(
+                "背包是空的。\n(物品系统待完善 — 当前仅记录角色创建后的基础物品)",
+                session_id=session_id,
+            )
+
+        lines = [f"背包 ({len(items)} 件):"]
+        for it in items:
+            name = it if isinstance(it, str) else it.get("name", str(it))
+            qty = ""
+            if isinstance(it, dict):
+                qty = f" x{it.get('quantity', 1)}" if it.get("quantity", 1) > 1 else ""
+            lines.append(f"  - {name}{qty}")
+        return OutboundMessage.system_msg("\n".join(lines), session_id=session_id)
+
+    async def _handle_time_cmd(self, session_id: str) -> OutboundMessage:
+        """处理 /time — 显示游戏内时间。"""
+        state = self._scheduler.get_session_state(session_id) if self._scheduler else None
+        if state is None:
+            return OutboundMessage.system_msg("当前无活跃会话", level="warn", session_id=session_id)
+
+        from src.tools.time import TimeSlot, get_time_description
+        slot_str = state.get("time_slot", "MORNING")
+        slot = TimeSlot(slot_str) if slot_str in TimeSlot._value2member_map_ else TimeSlot.MORNING
+        desc = get_time_description(slot)
+        beat = state.get("beat_counter", 0)
+        phase = state.get("game_phase", "exploration")
+        scenario = state.get("scenario_name", "") or "未命名模组"
+
+        return OutboundMessage.system_msg(
+            f"游戏时间:\n"
+            f"  模组:    {scenario}\n"
+            f"  时段:    {slot_str} ({desc})\n"
+            f"  阶段:    {phase}\n"
+            f"  节拍:    第 {beat} 轮",
+            session_id=session_id,
+        )
+
+    async def _handle_debug_cmd(self, session_id: str) -> OutboundMessage:
+        """处理 /debug — 显示完整 GameState 原始 JSON。
+
+        调试用命令，输出当前会话状态的所有字段。
+        """
+        state = self._scheduler.get_session_state(session_id) if self._scheduler else None
+        if state is None:
+            return OutboundMessage.system_msg("当前无活跃会话", level="warn", session_id=session_id)
+
+        import json
+        # 移除 node_trace（太长）和 character 技能详情
+        debug_state = dict(state)
+        debug_state.pop("node_trace", None)
+        char = debug_state.get("character")
+        if char and isinstance(char, dict):
+            char_copy = dict(char)
+            if "skills" in char_copy:
+                # 只显示技能数量而非全部列表
+                char_copy["skills"] = f"<{len(char_copy['skills'])} 项技能>"
+            debug_state["character"] = char_copy
+
+        text = json.dumps(debug_state, ensure_ascii=False, indent=2, default=str)
+        # 截断过长输出
+        if len(text) > 3000:
+            text = text[:3000] + "\n  ... (截断)"
+        return OutboundMessage.system_msg(f"GameState:\n{text}", session_id=session_id)
 
     # ================================================================
     # Workers 生命周期管理
