@@ -123,9 +123,12 @@ class AbstractAdapter(ABC):
             state = self._scheduler.get_session_state(session_id)
             if state is None:
                 return OutboundMessage.system_msg("当前无活跃会话", level="warn", session_id=session_id)
+            char = state.get("character") if state else None
             return OutboundMessage.session_info(
                 {
                     "session_id": session_id,
+                    "character_name": (char or {}).get("name", "未创建") if char else "未创建",
+                    "occupation": (char or {}).get("occupation", "") if char else "",
                     "game_phase": state.get("game_phase", "unknown"),
                     "combat_active": state.get("combat_active", False),
                     "active_tags": state.get("active_tags", []),
