@@ -44,6 +44,8 @@ class EventStore:
         if db_path is None:
             db_path = str(PROJECT_ROOT / "data" / "events.db")
         self.db_path = db_path
+        # 确保父目录存在
+        Path(self.db_path).parent.mkdir(parents=True, exist_ok=True)
         self._conn: Optional[aiosqlite.Connection] = None
 
     # ── 连接管理 ──
