@@ -120,7 +120,7 @@ class AbstractAdapter(ABC):
         cmd = cmd.lower().strip()
 
         if cmd == "/status":
-            state = await self._scheduler.get_session_state(session_id)
+            state = self._scheduler.get_session_state(session_id)
             if state is None:
                 return OutboundMessage.system_msg("当前无活跃会话", level="warn", session_id=session_id)
             return OutboundMessage.session_info(
@@ -159,7 +159,7 @@ class AbstractAdapter(ABC):
                 return OutboundMessage.error("无效的掷骰值", session_id=session_id)
 
         # 注入 pending_dice 到 state
-        state = await self._scheduler.get_session_state(session_id)
+        state = self._scheduler.get_session_state(session_id)
         if state and state.get("pending_dice"):
             state["pending_dice"]["roll_value"] = value
         return OutboundMessage.system_msg(f"掷骰结果: {value}", session_id=session_id)
@@ -171,7 +171,7 @@ class AbstractAdapter(ABC):
 
         try:
             narrative = await self._scheduler.submit(session_id, text)
-            state = await self._scheduler.get_session_state(session_id)
+            state = self._scheduler.get_session_state(session_id)
             game_phase = state.get("game_phase", "") if state else ""
 
             if narrative and narrative != "（系统异常：...）":
