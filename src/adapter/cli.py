@@ -913,7 +913,16 @@ class CliAdapter(AbstractAdapter):
             if not t.done():
                 t.cancel()
         if self._worker_tasks:
-            await asyncio.gather(*self._worker_tasks, return_exceptions=True)
+            try:
+                await asyncio.wait_for(
+                    asyncio.gather(*self._worker_tasks, return_exceptions=True),
+                    timeout=5.0,
+                )
+            except asyncio.TimeoutError:
+                logger.warning("Phase13: Worker 停止超时，强制放弃")
+                for t in self._worker_tasks:
+                    if not t.done():
+                        t.cancel()
             self._worker_tasks.clear()
             logger.info("Phase13: 所有 Worker 已停止")
 

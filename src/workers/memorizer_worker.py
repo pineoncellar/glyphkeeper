@@ -84,6 +84,7 @@ class MemorizerWorker:
             f"batch_size={self.batch_size}"
         )
 
+        self._task = asyncio.current_task()
         try:
             while self._running:
                 try:

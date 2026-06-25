@@ -83,6 +83,7 @@ class WorldSummarizer:
             f"window={self.summary_window}"
         )
 
+        self._task = asyncio.current_task()
         try:
             while self._running:
                 try:

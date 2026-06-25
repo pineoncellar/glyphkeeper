@@ -92,6 +92,7 @@ class BackgroundSync:
             f"backup={self.backup_interval}s"
         )
 
+        self._task = asyncio.current_task()
         try:
             # 任务计数器
             tick = 0
