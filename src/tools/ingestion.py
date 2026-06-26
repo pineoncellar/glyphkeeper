@@ -4,7 +4,7 @@
 @Desc     :   模组数据摄入 — 双脑分流管线
 @Note     :   左脑: locations/entities/interactables/clues → EventStore + CQRS 投影 → PG
               右脑: global_knowledge + NPC 深度人设 → 合并降噪 → LightRAG (gleaning 关闭)
-@TODO     :   实现断点续传
+@TODO     :   实现断点续传、优化rag输入的拼接（？）逻辑
 使用方式:
     uv run python -m src.tools.ingestion --name book
     uv run python -m src.tools.ingestion --list
@@ -315,16 +315,13 @@ class ModuleIngestor:
         total_chars = sum(len(d) for d in docs)
         logger.info(f"  右脑: {len(docs)} 篇合并文档, 共 {total_chars} 字符")
 
-        all_ok = True
-        for i, doc in enumerate(docs):
-            try:
-                await vs.insert(doc, source_type="narrative")
-                logger.info(f"  [OK] 右脑文档 {i+1}/{len(docs)} 已写入 ({len(doc)} 字符)")
-            except Exception as e:
-                logger.error(f"  [FAIL] 右脑文档 {i+1} 写入失败: {e}")
-                all_ok = False
-
-        return all_ok
+        try:
+            await vs.insert(docs, source_type="narrative")
+            logger.info(f"  [OK] 右脑 {len(docs)} 篇文档已批量写入")
+            return True
+        except Exception as e:
+            logger.error(f"  [FAIL] 右脑批量写入失败: {e}")
+            return False
 
 
 # ====================================================================

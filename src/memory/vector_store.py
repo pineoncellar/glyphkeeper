@@ -105,6 +105,8 @@ class VectorStore:
             self.rag = LightRAG(
                 llm_model_func=llm_func,
                 embedding_func=embedding_func,
+                entity_extract_max_gleaning=0,
+                embedding_func_max_async=16,
                 **storage_config,
             )
             await self.rag.initialize_storages()
@@ -311,14 +313,15 @@ class VectorStore:
             logger.error(f"VectorStore 查询失败: {e}")
             raise
 
-    async def insert(self, text: str, source_type: str = "narrative") -> bool:
-        """插入文本内容到知识库"""
+    async def insert(self, text: str | list[str], source_type: str = "narrative") -> bool:
+        """插入文本内容到知识库（支持单篇或批量列表，批量时并发处理）"""
         if not self._initialized or self.rag is None:
             raise RuntimeError("VectorStore 未初始化")
 
         try:
             await self.rag.ainsert(text)
-            logger.debug(f"VectorStore.insert OK: len={len(text)}, type={source_type}")
+            count = len(text) if isinstance(text, list) else 1
+            logger.debug(f"VectorStore.insert OK: {count} docs, type={source_type}")
             return True
         except Exception as e:
             logger.error(f"VectorStore 插入失败: {e}")
