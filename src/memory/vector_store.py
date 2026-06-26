@@ -49,18 +49,6 @@ for _h in _lightrag_logger.handlers:
     _h.setFormatter(logging.Formatter(_LIGHTRAG_FORMAT, datefmt=_LIGHTRAG_DATE_FMT))
     _h.setLevel(logging.DEBUG if _DEBUG_MODE else logging.WARNING)
 _lightrag_logger.setLevel(logging.DEBUG if _DEBUG_MODE else logging.WARNING)
-# 同时保持文件日志与项目一致，给根日志器添加 handler（若尚无）
-_root = logging.getLogger()
-if not _root.handlers:
-    from src.tools.config import LOG_DIR
-    from logging.handlers import RotatingFileHandler
-    _rfh = RotatingFileHandler(
-        LOG_DIR / f"{datetime.now().strftime('%Y-%m-%d')}.log",
-        maxBytes=10 * 1024 * 1024,
-        encoding="utf-8",
-    )
-    _rfh.setFormatter(logging.Formatter(_LIGHTRAG_FORMAT, datefmt=_LIGHTRAG_DATE_FMT))
-    _root.addHandler(_rfh)
 
 # LightRAG 内部 shared_storage.direct_log() 直接用 print() 输出到 stderr，
 # 格式为 "DEBUG: xxx"，无时间戳无模块名。patch 为走 lightrag logger。
@@ -139,7 +127,7 @@ class VectorStore:
 
         llm_func = self._create_llm_func(llm_tier)
         embedding_func = self._create_embedding_func()
-        storage_config = self._build_storage_config(str(working_dir), workspace)
+        storage_config = await self._build_storage_config(str(working_dir), workspace)
 
         try:
             self.rag = LightRAG(
@@ -266,68 +254,55 @@ class VectorStore:
             func=embedding_func,
         )
 
-    def _build_storage_config(self, working_dir: str, workspace: str) -> dict:
-        """构建 LightRAG 存储配置 — PG 优先，本地 JSON 兜底"""
+    async def _build_storage_config(self, working_dir: str, workspace: str) -> dict:
+        """构建 LightRAG 存储配置
+
+        要求 PostgreSQL (pgembed) 必须可用，否则抛出异常。
+        """
         settings = get_settings()
 
-        config: dict = {
+        # ── 启动 PG ──
+        from src.tools.pg_manager import PgManager
+        mgr = await PgManager.get_instance()
+
+        if not mgr.available:
+            raise RuntimeError(
+                "PostgreSQL (pgembed) 不可用，LightRAG 需要 PG 存储。"
+                "请检查 pgembed 是否已安装。"
+            )
+
+        await mgr.start()
+
+        # ── 设置环境变量（LightRAG 的 PG 存储通过环境变量获取连接信息） ──
+        from urllib.parse import urlparse
+        parsed = urlparse(mgr.uri)
+        os.environ["POSTGRES_USER"] = parsed.username or "postgres"
+        os.environ["POSTGRES_PASSWORD"] = parsed.password or ""
+        os.environ["POSTGRES_DATABASE"] = parsed.path.lstrip("/") or "glyphkeeper"
+        os.environ["POSTGRES_HOST"] = parsed.hostname or "localhost"
+        os.environ["POSTGRES_PORT"] = str(parsed.port or 5432)
+
+        logger.info(
+            f"VectorStore: 使用 PG 后端 (pgvector, {mgr.backend.value}, "
+            f"host={parsed.hostname}, port={parsed.port})"
+        )
+
+        return {
             "working_dir": working_dir,
             "workspace": workspace,
             "graph_storage": "NetworkXStorage",
-            "vector_storage": "NanoVectorDBStorage",
-            "kv_storage": "JsonKVStorage",
-            "doc_status_storage": "JsonDocStatusStorage",
+            "vector_storage": "PGVectorStorage",
+            "kv_storage": "PGKVStorage",
+            "doc_status_storage": "PGDocStatusStorage",
+            "vector_db_storage_cls_kwargs": {
+                "cosine_better_than_threshold": 0.2,
+                "embedding_dim": settings.vector_store.embedding_dim,
+            },
+            "addon_params": {
+                "db_url": mgr.uri,
+                "use_jsonb": True,
+            },
         }
-
-        # 通过 PgManager 检测 PG 可用性
-        try:
-            from src.tools.pg_manager import PgManager
-            import asyncio
-            try:
-                loop = asyncio.get_running_loop()
-                import concurrent.futures
-                with concurrent.futures.ThreadPoolExecutor() as pool:
-                    future = pool.submit(
-                        lambda: asyncio.run(PgManager.get_instance())
-                    )
-                    mgr = future.result()
-            except RuntimeError:
-                mgr = asyncio.run(PgManager.get_instance())
-
-            if mgr.available and mgr._started:
-                # LightRAG 的 PG 存储通过环境变量获取连接信息
-                # pgembed 使用匿名认证，无需密码
-                from urllib.parse import urlparse
-                parsed = urlparse(mgr.uri)
-                pg_host = parsed.hostname or "localhost"
-                pg_port = str(parsed.port or 5432)
-                pg_user = parsed.username or "postgres"
-                pg_pass = parsed.password or ""
-                pg_db = parsed.path.lstrip("/") or "glyphkeeper"
-                os.environ.setdefault("POSTGRES_USER", pg_user)
-                os.environ.setdefault("POSTGRES_PASSWORD", pg_pass)
-                os.environ.setdefault("POSTGRES_DATABASE", pg_db)
-                os.environ.setdefault("POSTGRES_HOST", pg_host)
-                os.environ.setdefault("POSTGRES_PORT", pg_port)
-
-                config.update({
-                    "vector_storage": "PGVectorStorage",
-                    "kv_storage": "PGKVStorage",
-                    "doc_status_storage": "PGDocStatusStorage",
-                    "vector_db_storage_cls_kwargs": {
-                        "cosine_better_than_threshold": 0.2,
-                        "embedding_dim": settings.vector_store.embedding_dim,
-                    },
-                    "addon_params": {
-                        "db_url": mgr.uri,
-                        "use_jsonb": True,
-                    },
-                })
-                logger.info(f"VectorStore: 使用 PG 后端 (pgvector, {mgr.backend.value})")
-        except Exception as e:
-            logger.debug(f"VectorStore: PG 检测跳过: {e}")
-
-        return config
 
     # ── 核心操作 ──
 

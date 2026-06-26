@@ -460,24 +460,43 @@ class TestRetriever:
 # ====================================================================
 
 class TestVectorStoreConfig:
-    """VectorStore 纯逻辑方法测试（无需真实 LightRAG 连接）"""
+    """VectorStore 纯逻辑方法测试（需要 PG 可用，否则测试会跳过）"""
 
-    def test_build_storage_config_default(self):
-        """默认配置包含所有必要键"""
+    async def test_build_storage_config_requires_pg(self):
+        """PG 不可用时抛出 RuntimeError"""
         from src.memory.vector_store import VectorStore
+        from src.tools.pg_manager import PgManager, PgBackend
+
         vs = VectorStore(domain="world")
-        config = vs._build_storage_config("/tmp/test", "test_world")
-        assert config["workspace"] == "test_world"
-        assert config["working_dir"] == "/tmp/test"
 
-    def test_build_storage_config_has_required_keys(self):
-        """配置字典应包含所有必要键"""
+        mgr = await PgManager.get_instance()
+        if mgr.backend == PgBackend.NONE:
+            with pytest.raises(RuntimeError, match="PostgreSQL"):
+                await vs._build_storage_config("/tmp/test", "test_world")
+        else:
+            config = await vs._build_storage_config("/tmp/test", "test_world")
+            assert config["workspace"] == "test_world"
+            assert config["working_dir"] == "/tmp/test"
+            assert config["vector_storage"] == "PGVectorStorage"
+            assert config["kv_storage"] == "PGKVStorage"
+
+    async def test_build_storage_config_has_required_keys(self):
+        """PG 可用时配置应包含 PG 存储后端"""
         from src.memory.vector_store import VectorStore
+        from src.tools.pg_manager import PgManager, PgBackend
+
         vs = VectorStore(domain="rules")
-        config = vs._build_storage_config("/tmp/rules", "rules")
-        required_keys = {"working_dir", "workspace", "graph_storage",
-                         "vector_storage", "kv_storage", "doc_status_storage"}
-        assert required_keys.issubset(config.keys())
+
+        mgr = await PgManager.get_instance()
+        if mgr.backend == PgBackend.NONE:
+            with pytest.raises(RuntimeError, match="PostgreSQL"):
+                await vs._build_storage_config("/tmp/rules", "rules")
+        else:
+            config = await vs._build_storage_config("/tmp/rules", "rules")
+            required_keys = {"working_dir", "workspace", "graph_storage",
+                             "vector_storage", "kv_storage", "doc_status_storage"}
+            assert required_keys.issubset(config.keys())
+            assert config["vector_storage"] == "PGVectorStorage"
 
     async def test_build_postgres_url_format(self):
         """PostgreSQL URL 格式正确（通过 PgManager）"""
