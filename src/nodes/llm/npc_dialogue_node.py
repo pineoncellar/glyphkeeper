@@ -313,6 +313,51 @@ async def npc_dialogue_node(state: GameState) -> dict:
         if t not in updated_tags:
             updated_tags.append(t)
 
+    # 如果有新线索 → 发出 ClueDiscovered 事件
+    emitted_events = [
+        {
+            "type": "NPCDialogue",
+            "data": {
+                "npc_name": npc_name,
+                "attitude": attitude,
+                "talk_count": rel["talk_count"],
+                "tags_granted": new_tags,
+            },
+        },
+    ]
+    if new_tags:
+        for tag in new_tags:
+            try:
+                from src.memory.event_store import EventStore
+                es = EventStore()
+                await es.append(
+                    session_id=session_id,
+                    event_type="ClueDiscovered",
+                    data={
+                        "session_id": session_id,
+                        "knowledge_id": tag,  # 以 tag 作为临时 knowledge_id
+                        "source": "dialogue",
+                        "character_name": "",
+                        "flavor_text": f"通过与 {npc_name} 的对话，你获得了一条线索。",
+                    },
+                    source_node="npc_dialogue",
+                )
+                # 投影到 session_knowledge_state（尽力而为）
+                from src.state.projector import StateProjector
+                projector = StateProjector()
+                await projector.handle({
+                    "type": "ClueDiscovered",
+                    "data": {
+                        "session_id": session_id,
+                        "knowledge_id": tag,
+                        "source": "dialogue",
+                        "character_name": "",
+                    },
+                })
+                logger.info(f"npc_dialogue: ClueDiscovered 事件已发出: {tag}")
+            except Exception as e:
+                logger.warning(f"npc_dialogue: ClueDiscovered 事件失败: {e}")
+
     # 更新 npc_relations
     updated_relations = dict(npc_relations)
     updated_relations[npc_name] = rel
@@ -334,15 +379,5 @@ async def npc_dialogue_node(state: GameState) -> dict:
         },
         "npc_relations": updated_relations,
         "active_tags": updated_tags,
-        "emitted_events": [
-            {
-                "type": "NPCDialogue",
-                "data": {
-                    "npc_name": npc_name,
-                    "attitude": attitude,
-                    "talk_count": rel["talk_count"],
-                    "tags_granted": new_tags,
-                },
-            },
-        ],
+        "emitted_events": emitted_events,
     }

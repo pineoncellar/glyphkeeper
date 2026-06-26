@@ -28,6 +28,9 @@ from src.state.snapshot import SnapshotManager
 from src.state.player_state import CharacterStore, _character_to_dict, _dict_to_character
 from src.state.world_state import WorldManager
 from src.state.module_loader import ModuleLoader
+from src.state.read_models import StaticReadStore
+from src.state.session_state import SessionKnowledgeState
+from src.state.projector import StateProjector
 
 __all__ = [
     # game_state

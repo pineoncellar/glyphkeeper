@@ -14,8 +14,15 @@
         ├──► VectorStore (LightRAG)   ← 语义检索
         │     global_knowledge / locations / entities
         │
-        └──► EventStore (SQLite)      ← 事件溯源
-              WorldInitialized 事件 (重建世界状态)
+        ├──► EventStore (PG)          ← 事件溯源
+        │     WorldInitialized 事件 (含完整数据)
+        │
+        └──► StateProjector           ← 投影到 CQRS 读模型
+              on_world_initialized()
+              ├── locations           ← 插入静态表
+              ├── interactables       ← 插入静态表
+              ├── clue_discoveries    ← 插入静态表
+              └── knowledge_registry  ← 插入静态表
 """
 
 from __future__ import annotations
@@ -109,24 +116,28 @@ class ModuleIngestor:
 
         success = True
 
-        # 1. 摄入全局知识 → LightRAG
+        # 先摄入知识到 LightRAG（语义检索层）
         if "global_knowledge" in json_data:
             ok = await self._ingest_knowledge(json_data["global_knowledge"])
             success = success and ok
 
-        # 2. 摄入场景/实体/物品 → LightRAG + EventStore
+        # 再摄入场景/实体/物品：同样进 LightRAG
         if "locations" in json_data:
             for loc_data in json_data["locations"]:
                 ok = await self._ingest_location(loc_data, module_name)
                 success = success and ok
 
-        # 3. 摄入开场配置 → EventStore
+        # 开场配置写入 EventStore 的模板会话
         if "opening" in json_data:
             ok = await self._ingest_opening(module_name, json_data["opening"])
             success = success and ok
 
-        # 4. 写入 WorldInitialized 事件（标记模组已加载）
-        await self._record_world_initialized(module_name, json_data)
+        # 构建知识注册表并写入 EventStore + 投影到读模型
+        knowledge_registry = self._build_knowledge_registry(json_data)
+        ok = await self._record_world_initialized(
+            module_name, json_data, knowledge_registry,
+        )
+        success = success and ok
 
         if success:
             logger.info(f"[OK] 模组 '{module_name}' 摄入完成")
@@ -308,18 +319,100 @@ class ModuleIngestor:
 
     # ── 世界初始化事件 ──
 
-    async def _record_world_initialized(self, module_name: str, json_data: dict):
-        """记录 WorldInitialized 事件，供 WorldManager 重建世界
+    @staticmethod
+    def _build_knowledge_registry(json_data: dict) -> list[dict]:
+        """从模组数据构建知识注册表
 
-        事件包含所有场景/实体/物品的完整结构快照。
+        收集 global_knowledge + 所有线索中引用的知识，
+        为每条知识生成 UUID。
+        """
+        import uuid
+
+        registry_map: dict[str, dict] = {}
+
+        # 先从 global_knowledge 构建基础注册表
+        for k in json_data.get("global_knowledge", []):
+            kid = k.get("key", "")
+            if kid:
+                registry_map[kid] = {
+                    "id": str(uuid.uuid4()),
+                    "knowledge_id": kid,
+                    "rag_key": kid,
+                    "description": k.get("rag_content", "")[:200],
+                    "tags_granted": k.get("tags_granted", []),
+                }
+
+        # 再扫描所有线索中引用的知识，确保不遗漏
+        for loc_data in json_data.get("locations", []):
+            for item in loc_data.get("interactables", []):
+                for clue in item.get("clues", []):
+                    target = clue.get("target_knowledge")
+                    if target and target not in registry_map:
+                        registry_map[target] = {
+                            "id": str(uuid.uuid4()),
+                            "knowledge_id": target,
+                            "rag_key": target,
+                            "description": clue.get("flavor_text", "")[:200],
+                            "tags_granted": [],
+                        }
+            for entity in loc_data.get("entities", []):
+                for clue in entity.get("dialogue_clues", []):
+                    target = clue.get("target_knowledge")
+                    if target and target not in registry_map:
+                        registry_map[target] = {
+                            "id": str(uuid.uuid4()),
+                            "knowledge_id": target,
+                            "rag_key": target,
+                            "description": clue.get("flavor_text", "")[:200],
+                            "tags_granted": [],
+                        }
+
+        return list(registry_map.values())
+
+    async def _record_world_initialized(
+        self, module_name: str, json_data: dict,
+        knowledge_registry: list[dict],
+    ) -> bool:
+        """记录 WorldInitialized 事件 + 投影到读模型
+
+        事件包含读模型投影所需的全部数据：
+          - knowledge_registry: 知识注册表（供投影用）
+          - locations: 场景摘要（供 WorldManager 重建用）
+          - raw_locations: 原始场景数据（含线索/物品/NPC，供投影用）
         """
         es = await self.event_store
 
-        # 构建 locations 快照
+        # 为 locations/items 生成 UUID（与 projector 共享）
+        import uuid as _uuid
+
+        # 构建 locations 摘要（供 WorldManager 使用）
         locations = {}
+        raw_locations = []
         for loc_data in json_data.get("locations", []):
             loc_key = loc_data.get("key", "unknown")
+            loc_id = str(_uuid.uuid4())
+
+            # 为每个物品生成 UUID
+            raw_interactables = []
+            for item in loc_data.get("interactables", []):
+                item_copy = dict(item)
+                item_copy["id"] = str(_uuid.uuid4())
+                raw_interactables.append(item_copy)
+
+            raw_locations.append({
+                "id": loc_id,
+                "key": loc_key,
+                "name": loc_data.get("name", ""),
+                "base_desc": loc_data.get("base_desc", ""),
+                "tags": loc_data.get("tags", []),
+                "exits": loc_data.get("exits", {}),
+                "entities": loc_data.get("entities", []),  # 原始数据（含 dialogue_clues）
+                "interactables": raw_interactables,          # 原始数据（含 clues）
+            })
+
+            # 摘要（仅 key 列表，供 WorldManager 使用）
             locations[loc_key] = {
+                "id": loc_id,
                 "key": loc_key,
                 "name": loc_data.get("name", ""),
                 "base_desc": loc_data.get("base_desc", ""),
@@ -331,20 +424,33 @@ class ModuleIngestor:
                                   for i in loc_data.get("interactables", [])],
             }
 
+        event_data = {
+            "module_name": module_name,
+            "locations": locations,
+            "raw_locations": raw_locations,
+            "knowledge_registry": knowledge_registry,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        }
+
         try:
-            await es.append(
+            event = await es.append(
                 session_id=TEMPLATE_SESSION_ID,
                 event_type="WorldInitialized",
-                data={
-                    "module_name": module_name,
-                    "locations": locations,
-                    "timestamp": datetime.now(timezone.utc).isoformat(),
-                },
+                data=event_data,
                 source_node="ingestion",
             )
             logger.info(f"  [OK] WorldInitialized 事件已记录 ({len(locations)} 个场景)")
+
+            # ── 投影到读模型（同一事务，保证强一致） ──
+            from src.state.projector import StateProjector
+            projector = StateProjector()
+            await projector.handle(event)
+            logger.info(f"  [OK] 读模型投影完成")
+
+            return True
         except Exception as e:
-            logger.error(f"  [FAIL] WorldInitialized 事件记录失败: {e}")
+            logger.error(f"  [FAIL] WorldInitialized 事件记录/投影失败: {e}")
+            return False
 
     # ── 辅助方法 ──
 

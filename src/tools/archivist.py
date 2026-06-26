@@ -1,0 +1,226 @@
+# -*- coding: utf-8 -*-
+"""
+@File     :   archivist.py
+@Desc     :   线索管理员 — 技能检定成功后检查是否有线索可发现
+@Note     :   不作为独立 Graph Node，而是由 skill_node 调用的工具函数
+"""
+
+from __future__ import annotations
+
+from typing import Optional
+
+from src.tools import get_logger
+
+logger = get_logger(__name__)
+
+
+class Archivist:
+    """线索管理员 — 在技能检定成功后检查是否有线索可发现
+
+    连接到静态读模型（StaticReadStore）和事件存储（EventStore），
+    为检定成功的目标查找并触发线索发现。
+    """
+
+    def __init__(self, static_store=None, event_store=None, session_state=None):
+        self._static_store = static_store
+        self._event_store = event_store
+        self._session_state = session_state
+
+    # ── 懒加载 ──
+
+    @property
+    async def static_store(self):
+        if self._static_store is None:
+            from src.state.read_models import StaticReadStore
+            self._static_store = StaticReadStore()
+        return self._static_store
+
+    @property
+    async def event_store(self):
+        if self._event_store is None:
+            from src.memory.event_store import EventStore
+            self._event_store = EventStore()
+        return self._event_store
+
+    @property
+    async def session_state(self):
+        if self._session_state is None:
+            from src.state.session_state import SessionKnowledgeState
+            self._session_state = SessionKnowledgeState()
+        return self._session_state
+
+    # ── 主入口 ──
+
+    async def inspect_target(
+        self,
+        session_id: str,
+        target_key: str,
+        skill_name: str = "",
+        roll_value: int = 0,
+        character_name: str = "",
+    ) -> Optional[dict]:
+        """检查目标是否有可发现的线索
+
+        先查物品线索（clue_discoveries WHERE interactable_id = target），
+        无匹配再查 NPC 线索（clue_discoveries WHERE entity_key = target）。
+        均无匹配时返回 None。
+
+        发现线索时返回含 knowledge_id、flavor_text、source 的字典，
+        其中 source 为 "examine"（物品）或 "dialogue"（NPC）。
+        """
+        store = await self.static_store
+
+        # 先查物品线索
+        item_clues = await store.get_clues_for_interactable(target_key)
+        if item_clues:
+            return await self._process_clues(
+                clues=item_clues,
+                session_id=session_id,
+                skill_name=skill_name,
+                roll_value=roll_value,
+                character_name=character_name,
+                source="examine",
+            )
+
+        # 再查 NPC 线索
+        entity_clues = await store.get_clues_for_entity(target_key)
+        if entity_clues:
+            return await self._process_clues(
+                clues=entity_clues,
+                session_id=session_id,
+                skill_name=skill_name,
+                roll_value=roll_value,
+                character_name=character_name,
+                source="dialogue",
+            )
+
+        logger.debug(f"archivist: 目标 '{target_key}' 无关联线索")
+        return None
+
+    # ── 内部处理 ──
+
+    async def _process_clues(
+        self,
+        clues: list[dict],
+        session_id: str,
+        skill_name: str,
+        roll_value: int,
+        character_name: str,
+        source: str,
+    ) -> Optional[dict]:
+        """逐条检查线索的发现条件是否满足
+
+        无 required_check 的线索视为自动发现（如纯 flavor_text 的剧情提示）。
+        有检定条件的线索需比对技能名和掷骰结果，通过则授予。
+        """
+        for clue in clues:
+            required_check = clue.get("required_check", {}) or {}
+
+            if not required_check:
+                return await self._grant_clue(
+                    session_id=session_id,
+                    knowledge_id=clue.get("knowledge_id", ""),
+                    flavor_text=clue.get("flavor_text", ""),
+                    source=source,
+                    character_name=character_name,
+                )
+
+            # 有检定条件：先比对技能名
+            required_skill = required_check.get("skill", "")
+            if required_skill and required_skill.lower() != skill_name.lower():
+                continue
+
+            # 再比对掷骰结果 — 注意此处简化处理，实际应使用角色卡 skill_value
+            # 参与 determine_success_level 精确判定；当前用固定阈值做近似
+            if roll_value > 0:
+                from src.domain.coc_rules import Difficulty
+
+                difficulty_str = required_check.get("difficulty", "Regular")
+                try:
+                    difficulty = Difficulty[difficulty_str.upper()]
+                except (KeyError, AttributeError):
+                    difficulty = Difficulty.REGULAR
+
+                threshold = self._get_threshold_for_difficulty(difficulty)
+                if roll_value <= threshold:
+                    return await self._grant_clue(
+                        session_id=session_id,
+                        knowledge_id=clue.get("knowledge_id", ""),
+                        flavor_text=clue.get("flavor_text", ""),
+                        source=source,
+                        character_name=character_name,
+                    )
+
+        return None
+
+    async def _grant_clue(
+        self,
+        session_id: str,
+        knowledge_id: str,
+        flavor_text: str,
+        source: str,
+        character_name: str,
+    ) -> dict:
+        """颁发线索：发出 ClueDiscovered 事件，随后投影到 session_knowledge_state
+
+        返回含 knowledge_id、flavor_text、source 的字典供上层拼接叙事。
+        投影失败仅记警告，不做回滚 — 事件本身已确保线索不会丢失。
+        """
+        if not knowledge_id:
+            logger.warning("archivist: 线索无 knowledge_id，跳过")
+            return {"knowledge_id": "", "flavor_text": flavor_text, "source": source}
+
+        # 先发出 ClueDiscovered 事件（主流程，保证不丢）
+        es = await self.event_store
+        await es.append(
+            session_id=session_id,
+            event_type="ClueDiscovered",
+            data={
+                "session_id": session_id,
+                "knowledge_id": knowledge_id,
+                "source": source,
+                "character_name": character_name,
+                "flavor_text": flavor_text,
+            },
+            source_node="archivist",
+        )
+
+        # 再投影到 session_knowledge_state（尽力而为，失败不阻塞主流程）
+        try:
+            from src.state.projector import StateProjector
+            projector = StateProjector()
+            await projector.handle({
+                "type": "ClueDiscovered",
+                "data": {
+                    "session_id": session_id,
+                    "knowledge_id": knowledge_id,
+                    "source": source,
+                    "character_name": character_name,
+                },
+            })
+        except Exception as e:
+            logger.warning(f"archivist: 线索投影失败（不影响主流程）: {e}")
+
+        logger.info(
+            f"archivist: 线索已授予 knowledge={knowledge_id} "
+            f"source={source} session={session_id[:8]}"
+        )
+        return {
+            "knowledge_id": knowledge_id,
+            "flavor_text": flavor_text,
+            "source": source,
+        }
+
+    @staticmethod
+    def _get_threshold_for_difficulty(difficulty) -> int:
+        """根据 CoC 7e 难度等级返回近似阈值
+
+        简化版本默认 skill_value=50，后续需从角色卡精确读取。
+        Regular 对应 skill_value，Hard 对应一半，Extreme 对应五分之一。
+        """
+        mapping = {
+            "REGULAR": 50,
+            "HARD": 25,
+            "EXTREME": 10,
+        }
+        return mapping.get(difficulty.name, 50)

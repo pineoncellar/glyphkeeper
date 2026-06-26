@@ -136,9 +136,20 @@ async def _call_llm_for_narrative(
     game_phase: str,
     narrative_history: str,
     world_context: str = "",
+    known_knowledge: list[str] | None = None,
 ) -> str | None:
     """调用 LLM 生成叙事文本"""
     try:
+        # 构建防剧透约束
+        spoiler_constraint = ""
+        if known_knowledge:
+            spoiler_constraint = (
+                "\n[重要约束] 玩家当前已发现的线索如下：\n"
+                + "\n".join(f"- {k}" for k in known_knowledge)
+                + "\n未在上述列表中的信息，玩家角色目前不知道，不应在叙事中作为已知事实提及。"
+            )
+
+        system_prompt = NARRATOR_SYSTEM_PROMPT + spoiler_constraint
         context = (
             f"游戏阶段: {game_phase}\n"
             f"玩家意图: {intent.get('data', {}).get('action', '未知')}\n"
@@ -147,7 +158,7 @@ async def _call_llm_for_narrative(
             f"叙事历史: {narrative_history[-300:] if narrative_history else '无'}"
         )
         messages = [
-            {"role": "system", "content": NARRATOR_SYSTEM_PROMPT},
+            {"role": "system", "content": system_prompt},
             {"role": "user", "content": context},
         ]
         return await _call_llm("standard", messages)
@@ -165,17 +176,33 @@ async def narrate_node(state: GameState) -> dict:
 
     world_context 由 investigation_graph 中的 lookup_node 预先注入，
     包含从 LightRAG 检索到的世界知识和 EventStore 事件历史。
+
+    防剧透机制：
+      在调用 LLM 前查询 session_knowledge_state 获取玩家已发现的知识列表，
+      注入到 system prompt 中约束 LLM 不提及未发现的信息。
     """
     intent = state.get("intent") or {}
     resolution = state.get("resolution") or {}
     world_context = state.get("world_context", "")
     game_phase = state.get("game_phase", "exploration")
     narrative_history = state.get("narrative", "")
+    session_id = state.get("session_id", "")
+
+    # ── 获取玩家已发现的知识（防剧透） ──
+    known_knowledge: list[str] = []
+    if session_id:
+        try:
+            from src.state.session_state import SessionKnowledgeState
+            sks = SessionKnowledgeState()
+            known_knowledge = await sks.get_discovered_knowledge_ids(session_id)
+        except Exception as e:
+            logger.debug(f"narrator_node: 无法获取已发现知识: {e}")
 
     # ── 尝试 LLM ──
     llm_text = await _call_llm_for_narrative(
         intent, resolution, game_phase, narrative_history,
         world_context=world_context,
+        known_knowledge=known_knowledge,
     )
 
     if llm_text:

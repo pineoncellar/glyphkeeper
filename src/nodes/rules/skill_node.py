@@ -128,7 +128,37 @@ async def skill_node(state: GameState) -> dict:
         f"→ roll={result.roll_value} {resolution['success_label']}"
     )
 
-    return {"resolution": resolution}
+    state_patch = {"resolution": resolution}
+
+    # 检定成功后查询目标是否有关联线索
+    # archivist_result 会被传给 NarratorNode 做叙事拼接
+    if result.is_success:
+        target_key = intent_data.get("target", "")
+        if target_key:
+            try:
+                from src.tools.archivist import Archivist
+                session_id = state.get("session_id", "default")
+                character_data = state.get("character") or {}
+                character_name = character_data.get("name", "")
+
+                archivist = Archivist()
+                clue_result = await archivist.inspect_target(
+                    session_id=session_id,
+                    target_key=target_key,
+                    skill_name=skill_name,
+                    roll_value=result.roll_value,
+                    character_name=character_name,
+                )
+                if clue_result:
+                    state_patch["archivist_result"] = clue_result
+                    logger.info(
+                        f"skill_node: 线索发现! "
+                        f"knowledge={clue_result.get('knowledge_id')}"
+                    )
+            except Exception as e:
+                logger.warning(f"skill_node: Archivist 调用失败: {e}")
+
+    return state_patch
 
 
 async def batch_skill_check(state: GameState) -> dict:
