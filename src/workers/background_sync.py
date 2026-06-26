@@ -94,7 +94,9 @@ class BackgroundSync:
 
         self._task = asyncio.current_task()
         try:
-            # 任务计数器
+            # 先等待一个完整的 health_interval，避免启动后立即执行繁重任务
+            await asyncio.sleep(self.health_interval)
+
             tick = 0
             while self._running:
                 try:
@@ -103,12 +105,12 @@ class BackgroundSync:
                     # 健康检查（每次循环）
                     await self._health_check()
 
-                    # 自动备份（首次 + 达到间隔）
-                    if tick == 1 or self._should_backup():
+                    # 自动备份（达到间隔）
+                    if self._should_backup():
                         await self._auto_backup()
 
                     # 清理过期备份（每天一次）
-                    if tick == 1 or (tick * self.health_interval >= self.cleanup_interval):
+                    if tick * self.health_interval >= self.cleanup_interval:
                         self._cleanup_old_backups()
 
                 except Exception as e:

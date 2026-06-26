@@ -86,12 +86,13 @@ class WorldSummarizer:
         self._task = asyncio.current_task()
         try:
             while self._running:
+                # 先等待间隔，避免启动后立即执行一次
+                await asyncio.sleep(self.interval)
+
                 try:
                     await self._generate_summaries()
                 except Exception as e:
                     logger.error(f"WorldSummarizer 异常: {e}", exc_info=True)
-
-                await asyncio.sleep(self.interval)
         finally:
             self._running = False
             logger.info("WorldSummarizer 已停止")
@@ -125,12 +126,28 @@ class WorldSummarizer:
     async def _generate_summaries(self):
         """遍历活跃会话，生成世界摘要"""
         if self._event_store is None:
-            logger.debug("WorldSummarizer: 无 EventStore，跳过")
             return
 
-        logger.debug("WorldSummarizer: 开始生成世界摘要...")
-        self._last_summary_at = datetime.now(timezone.utc).isoformat()
-        self._summary_count += 0
+        try:
+            # 检查各会话是否有新事件
+            # 简单方案：通过 _last_version 追踪，未跟踪的会话跳过
+            has_new_data = False
+            for session_id, last_ver in list(self._last_version.items()):
+                current_ver = await self._event_store.get_latest_version(session_id)
+                if current_ver > last_ver:
+                    has_new_data = True
+                    break
+
+            if not has_new_data and self._last_version:
+                # 没有新数据，跳过本次摘要
+                return
+
+            logger.debug("WorldSummarizer: 开始生成世界摘要...")
+            self._last_summary_at = datetime.now(timezone.utc).isoformat()
+            self._summary_count += 0
+        except Exception:
+            # 查询失败不阻断循环
+            pass
 
     async def summarize_session(self, session_id: str, events: list[dict]) -> Optional[str]:
         """为单个会话生成世界状态摘要

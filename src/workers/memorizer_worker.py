@@ -87,12 +87,7 @@ class MemorizerWorker:
         self._task = asyncio.current_task()
         try:
             while self._running:
-                try:
-                    await self._process_pending()
-                except Exception as e:
-                    logger.error(f"MemorizerWorker 处理异常: {e}", exc_info=True)
-
-                # 等待 interval 或被 trigger 唤醒
+                # 等待 interval 或被 trigger 唤醒（先等待，避免启动后立即执行）
                 try:
                     await asyncio.wait_for(
                         self._trigger.wait(),
@@ -101,6 +96,11 @@ class MemorizerWorker:
                     self._trigger.clear()
                 except asyncio.TimeoutError:
                     pass  # 超时正常，继续下一轮
+
+                try:
+                    await self._process_pending()
+                except Exception as e:
+                    logger.error(f"MemorizerWorker 处理异常: {e}", exc_info=True)
         finally:
             self._running = False
             logger.info("MemorizerWorker 已停止")
