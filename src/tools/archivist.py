@@ -167,7 +167,7 @@ class Archivist:
         投影失败仅记警告，不做回滚 — 事件本身已确保线索不会丢失。
         """
         if not knowledge_id:
-            logger.warning("archivist: 线索无 knowledge_id，跳过")
+            logger.debug("archivist: 线索无 knowledge_id，仅返回 flavor_text（纯文本线索）")
             return {"knowledge_id": "", "flavor_text": flavor_text, "source": source}
 
         # 先发出 ClueDiscovered 事件（主流程，保证不丢）

@@ -91,12 +91,13 @@ class StaticReadStore:
         """)
 
         # 多对多线索映射 — 连接物品/NPC 到知识，定义检定条件和发现叙事
+        # knowledge_id 可为 null，对应 target_knowledge: null 的纯 flavor_text 线索
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS clue_discoveries (
                 id UUID PRIMARY KEY,
                 interactable_id UUID REFERENCES interactables(id),
                 entity_key TEXT,
-                knowledge_id UUID NOT NULL REFERENCES knowledge_registry(id),
+                knowledge_id UUID REFERENCES knowledge_registry(id),
                 required_check JSONB DEFAULT '{}'::jsonb,
                 flavor_text TEXT NOT NULL DEFAULT ''
             )
@@ -202,7 +203,7 @@ class StaticReadStore:
                        (id, interactable_id, entity_key, knowledge_id, required_check, flavor_text)
                        VALUES ($1,$2,$3,$4,$5::jsonb,$6)""",
                     cid, c.get("interactable_id"), c.get("entity_key"),
-                    c["knowledge_id"],
+                    c.get("knowledge_id"),  # 可为 None（纯 flavor_text 线索）
                     json.dumps(c.get("required_check", {}), ensure_ascii=False),
                     c.get("flavor_text", ""),
                 )
@@ -253,7 +254,7 @@ class StaticReadStore:
             """SELECT cd.*, kr.knowledge_id, kr.description, kr.tags_granted
                FROM clue_discoveries cd
                JOIN interactables i ON cd.interactable_id = i.id
-               JOIN knowledge_registry kr ON cd.knowledge_id = kr.id
+               LEFT JOIN knowledge_registry kr ON cd.knowledge_id = kr.id
                WHERE i.key = $1""",
             interactable_key,
         )
@@ -265,7 +266,7 @@ class StaticReadStore:
         rows = await conn.fetch(
             """SELECT cd.*, kr.knowledge_id, kr.description, kr.tags_granted
                FROM clue_discoveries cd
-               JOIN knowledge_registry kr ON cd.knowledge_id = kr.id
+               LEFT JOIN knowledge_registry kr ON cd.knowledge_id = kr.id
                WHERE cd.entity_key = $1""",
             entity_key,
         )

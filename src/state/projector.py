@@ -128,17 +128,18 @@ class StateProjector:
                 item_clues = item_data.get("clues", [])
                 for clue in item_clues:
                     target_knowledge = clue.get("target_knowledge")
-                    if not target_knowledge:
-                        continue  # 无知识关联的线索（如纯 flavor_text）跳过
-                    knowledge_id = self._find_knowledge_id(knowledge_list, target_knowledge)
-                    if knowledge_id:
-                        all_clues.append({
-                            "interactable_id": item_id,
-                            "entity_key": None,
-                            "knowledge_id": knowledge_id,
-                            "required_check": clue.get("required_check", {}),
-                            "flavor_text": clue.get("flavor_text", ""),
-                        })
+                    knowledge_id = None
+                    if target_knowledge:
+                        knowledge_id = self._find_knowledge_id(knowledge_list, target_knowledge)
+                    # 无论 target_knowledge 是否为 null，都录入库中
+                    # null 表示纯 flavor_text 线索（不关联知识），但文本仍保留
+                    all_clues.append({
+                        "interactable_id": item_id,
+                        "entity_key": None,
+                        "knowledge_id": knowledge_id,
+                        "required_check": clue.get("required_check", {}),
+                        "flavor_text": clue.get("flavor_text", ""),
+                    })
 
             # NPC 的 dialogue_clues 字段同理
             for entity_data in loc_data.get("entities", []):
@@ -146,17 +147,16 @@ class StateProjector:
                 dialogue_clues = entity_data.get("dialogue_clues", [])
                 for clue in dialogue_clues:
                     target_knowledge = clue.get("target_knowledge")
-                    if not target_knowledge:
-                        continue
-                    knowledge_id = self._find_knowledge_id(knowledge_list, target_knowledge)
-                    if knowledge_id:
-                        all_clues.append({
-                            "interactable_id": None,
-                            "entity_key": entity_key,
-                            "knowledge_id": knowledge_id,
-                            "required_check": clue.get("required_check", {}),
-                            "flavor_text": clue.get("flavor_text", ""),
-                        })
+                    knowledge_id = None
+                    if target_knowledge:
+                        knowledge_id = self._find_knowledge_id(knowledge_list, target_knowledge)
+                    all_clues.append({
+                        "interactable_id": None,
+                        "entity_key": entity_key,
+                        "knowledge_id": knowledge_id,
+                        "required_check": clue.get("required_check", {}),
+                        "flavor_text": clue.get("flavor_text", ""),
+                    })
 
         if all_interactables:
             await store.bulk_insert_interactables(all_interactables)

@@ -278,12 +278,26 @@ class ModuleIngestor:
         name = item_data.get("name", "unknown")
         key = item_data.get("key", name)
 
+        # 拼接所有 clue 的 flavor_text，确保即使 target_knowledge: null 也不丢失
+        clues = item_data.get("clues", [])
+        clue_text = ""
+        if clues:
+            lines = []
+            for c in clues:
+                ft = c.get("flavor_text", "")
+                trigger = c.get("trigger", "")
+                if ft:
+                    lines.append(f"  - [{trigger}]: {ft}")
+            if lines:
+                clue_text = "\nClues:\n" + "\n".join(lines)
+
         rag_text = (
             f"[Interactable: {name}]\n"
             f"Key: {key}\n"
             f"Location: {loc_key}\n"
             f"State: {item_data.get('state', 'default')}\n"
             f"Tags: {', '.join(item_data.get('tags', []))}"
+            f"{clue_text}"
         )
 
         try:
@@ -385,9 +399,9 @@ class ModuleIngestor:
         # 为 locations/items 生成 UUID（与 projector 共享）
         import uuid as _uuid
 
-        # 构建 locations 摘要（供 WorldManager 使用）
-        locations = {}
-        raw_locations = []
+        # 构建 locations 摘要 + raw_locations 原始数据
+        locations = []      # 供 Projector 插入数据库和 WorldManager 重建
+        raw_locations = []  # 供 Projector 拆解物品/NPC 中的线索
         for loc_data in json_data.get("locations", []):
             loc_key = loc_data.get("key", "unknown")
             loc_id = str(_uuid.uuid4())
@@ -410,8 +424,8 @@ class ModuleIngestor:
                 "interactables": raw_interactables,          # 原始数据（含 clues）
             })
 
-            # 摘要（仅 key 列表，供 WorldManager 使用）
-            locations[loc_key] = {
+            # 场景摘要（供 WorldManager 使用）
+            locations.append({
                 "id": loc_id,
                 "key": loc_key,
                 "name": loc_data.get("name", ""),
@@ -422,7 +436,7 @@ class ModuleIngestor:
                              for e in loc_data.get("entities", [])],
                 "interactables": [i.get("key", i.get("name", ""))
                                   for i in loc_data.get("interactables", [])],
-            }
+            })
 
         event_data = {
             "module_name": module_name,
