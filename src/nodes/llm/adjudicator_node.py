@@ -159,10 +159,10 @@ def _parse_llm_response(response_text: str) -> dict | None:
     return None
 
 
-from src.tools.llm_client import call_llm as _call_llm
+from src.tools.llm_client import call_llm as _call_llm, LLMResult
 
 
-async def _call_llm_for_adjudication(action_desc: str, context: str) -> str | None:
+async def _call_llm_for_adjudication(action_desc: str, context: str) -> LLMResult:
     """调用 LLM 获取裁决参数"""
     try:
         messages = [
@@ -173,7 +173,8 @@ async def _call_llm_for_adjudication(action_desc: str, context: str) -> str | No
 
     except Exception as e:
         logger.warning(f"adjudicator_node: LLM 调用失败: {e}")
-        return None
+        return LLMResult(text=None, tier="standard", model_name="",
+                         messages=[], success=False, error=str(e))
 
 
 async def adjudicate_node(state: GameState) -> dict:
@@ -182,6 +183,7 @@ async def adjudicate_node(state: GameState) -> dict:
 
     处理无硬编码规则对应的玩家即兴行为。
     将玩家的创意行动转化为规则参数（难度等级、技能、效果）。
+    同时返回 _llm_trace 供 LangSmith 追踪。
     """
     intent = state.get("intent") or {}
     intent_data = intent.get("data") or {}
@@ -201,27 +203,28 @@ async def adjudicate_node(state: GameState) -> dict:
                 "needs_check": False,
                 "check_type": "none",
             },
+            "_llm_trace": None,
         }
 
     # ── 尝试 LLM ──
-    llm_response = await _call_llm_for_adjudication(action_desc, context)
+    result = await _call_llm_for_adjudication(action_desc, context)
 
-    if llm_response:
-        parsed = _parse_llm_response(llm_response)
+    if result.is_ok:
+        parsed = _parse_llm_response(result.text)
         if parsed:
-            result = parsed
+            resolution = parsed
             logger.info(
-                f"adjudicator_node[LLM]: action={result.get('action', '')} "
-                f"skill={result.get('skill', '')} "
-                f"difficulty={result.get('difficulty', '')}"
+                f"adjudicator_node[LLM]: action={resolution.get('action', '')} "
+                f"skill={resolution.get('skill', '')} "
+                f"difficulty={resolution.get('difficulty', '')}"
             )
-            return {"resolution": result}
+            return {"resolution": resolution, "_llm_trace": result.to_trace()}
 
     # ── 规则兜底 ──
-    result = _rule_based_adjudication(intent_data)
+    resolution = _rule_based_adjudication(intent_data)
     logger.info(
-        f"adjudicator_node[RULE]: action={result['action']} "
-        f"check_type={result['check_type']}"
+        f"adjudicator_node[RULE]: action={resolution['action']} "
+        f"check_type={resolution['check_type']}"
     )
 
-    return {"resolution": result}
+    return {"resolution": resolution, "_llm_trace": result.to_trace() if not result.is_ok else None}

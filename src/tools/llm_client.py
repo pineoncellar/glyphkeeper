@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import json
 import asyncio
+from dataclasses import dataclass, field
 from typing import AsyncGenerator, Optional
 
 import aiohttp
@@ -40,6 +41,43 @@ logger = get_logger(__name__)
 DEFAULT_TIMEOUT = 60.0
 MAX_RETRIES = 2
 RETRY_DELAY_BASE = 1.0  # 退避基础秒数
+
+
+# ====================================================================
+# LLMResult — 统一 LLM 调用返回值（含追踪元数据）
+# ====================================================================
+
+
+@dataclass
+class LLMResult:
+    """LLM 调用的完整结果
+
+    包含响应文本和追踪元数据，供 Node 注入到 _llm_trace 中，
+    被 LangGraph → LangSmith 自动捕获。
+    """
+    text: str | None                 # 响应文本（失败为 None）
+    tier: str                        # 模型等级: fast / standard / smart
+    model_name: str                  # 实际模型名
+    messages: list[dict]             # 请求消息列表（完整 prompt）
+    success: bool = True             # 是否成功
+    error: str | None = None         # 错误信息
+
+    def to_trace(self) -> dict:
+        """构建 LangSmith 追踪用的完整字典"""
+        return {
+            "tier": self.tier,
+            "model": self.model_name,
+            "success": self.success,
+            "error": self.error,
+            "messages": self.messages,          # 完整 prompt
+            "response": self.text,               # 完整响应文本
+            "response_length": len(self.text) if self.text else 0,
+            "prompt_tokens": sum(len(str(m)) for m in self.messages) // 4,
+        }
+
+    @property
+    def is_ok(self) -> bool:
+        return self.success and self.text is not None
 
 
 # ====================================================================
@@ -90,8 +128,8 @@ async def call_llm(
     max_retries: int = MAX_RETRIES,
     temperature: float | None = None,
     max_tokens: int | None = None,
-) -> str | None:
-    """调用 LLM 并返回完整响应文本。
+) -> LLMResult:
+    """调用 LLM 并返回 LLMResult（响应文本 + 追踪元数据）。
 
     参数:
         tier:        模型等级，必须是 config.yaml 中 model_tiers 的 key
@@ -103,17 +141,19 @@ async def call_llm(
         max_tokens:  覆盖配置中的 max_tokens（None=使用配置值）
 
     返回:
-        响应文本字符串，失败返回 None（不抛异常，调用方自行降级）
+        LLMResult 对象（含 text + tier + model_name + messages + success + error）
     """
     try:
         model_config, provider_config = _get_tier_config(tier)
     except (KeyError, ValueError) as e:
         logger.error(f"call_llm: 配置错误 (tier={tier}): {e}")
-        return None
+        return LLMResult(text=None, tier=tier, model_name="", messages=messages,
+                         success=False, error=str(e))
 
     if not provider_config or not provider_config.api_key:
         logger.error(f"call_llm: 提供商 '{model_config.provider}' 未配置 API Key")
-        return None
+        return LLMResult(text=None, tier=tier, model_name=model_config.model_name,
+                         messages=messages, success=False, error="API Key 未配置")
 
     api_url = _build_api_url(provider_config.base_url)
     headers = {
@@ -149,13 +189,19 @@ async def call_llm(
                         if attempt < max_retries:
                             await asyncio.sleep(RETRY_DELAY_BASE * (attempt + 1))
                             continue
-                        return None
+                        return LLMResult(text=None, tier=tier,
+                                         model_name=model_config.model_name,
+                                         messages=messages, success=False,
+                                         error=f"HTTP {resp.status}")
 
                     data = await resp.json()
                     choices = data.get("choices", [])
                     if not choices:
                         logger.warning(f"LLM API 返回空 choices (tier={tier})")
-                        return None
+                        return LLMResult(text=None, tier=tier,
+                                         model_name=model_config.model_name,
+                                         messages=messages, success=False,
+                                         error="空 choices")
 
                     content = choices[0].get("message", {}).get("content", "")
 
@@ -163,7 +209,9 @@ async def call_llm(
                     if get_settings().project.model_cost_tracking:
                         _track_usage(tier, data, messages)
 
-                    return content
+                    return LLMResult(text=content, tier=tier,
+                                     model_name=model_config.model_name,
+                                     messages=messages, success=True)
 
         except asyncio.TimeoutError:
             last_error = f"超时 ({timeout}s)"
@@ -187,10 +235,12 @@ async def call_llm(
 
         except Exception as e:
             logger.error(f"LLM 未知错误 (tier={tier}): {e}")
-            return None
+            return LLMResult(text=None, tier=tier, model_name=model_config.model_name,
+                             messages=messages, success=False, error=str(e))
 
     logger.error(f"LLM 最终失败 (tier={tier}): {last_error}")
-    return None
+    return LLMResult(text=None, tier=tier, model_name=model_config.model_name,
+                     messages=messages, success=False, error=last_error)
 
 
 async def call_llm_stream(
@@ -308,11 +358,13 @@ async def ask_llm(
     system_prompt: str,
     user_message: str,
     **kwargs,
-) -> str | None:
-    """便捷版：传入 system prompt 和 user message，返回响应文本。
+) -> LLMResult:
+    """便捷版：传入 system prompt 和 user message，返回 LLMResult。
 
     示例:
-        reply = await ask_llm("fast", "你是一个助手", "你好")
+        result = await ask_llm("fast", "你是一个助手", "你好")
+        if result.is_ok:
+            print(result.text)
     """
     messages = [
         {"role": "system", "content": system_prompt},

@@ -127,7 +127,7 @@ def _template_combat_narrative(resolution: dict) -> str:
         return template.format(actor=actor, target=target)
 
 
-from src.tools.llm_client import call_llm as _call_llm
+from src.tools.llm_client import call_llm as _call_llm, LLMResult
 
 
 async def _call_llm_for_narrative(
@@ -137,7 +137,7 @@ async def _call_llm_for_narrative(
     narrative_history: str,
     world_context: str = "",
     known_knowledge: list[str] | None = None,
-) -> str | None:
+) -> LLMResult:
     """调用 LLM 生成叙事文本"""
     try:
         # 构建防剧透约束
@@ -165,7 +165,8 @@ async def _call_llm_for_narrative(
 
     except Exception as e:
         logger.warning(f"narrator_node: LLM 调用失败: {e}")
-        return None
+        return LLMResult(text=None, tier="standard", model_name="",
+                         messages=[], success=False, error=str(e))
 
 
 async def narrate_node(state: GameState) -> dict:
@@ -173,6 +174,7 @@ async def narrate_node(state: GameState) -> dict:
     叙事生成节点。
 
     读取 intent + resolution + world_context → 调用 LLM → 失败用模板兜底 → 返回 narrative。
+    同时返回 _llm_trace 供 LangSmith 追踪。
 
     world_context 由 investigation_graph 中的 lookup_node 预先注入，
     包含从 LightRAG 检索到的世界知识和 EventStore 事件历史。
@@ -199,21 +201,21 @@ async def narrate_node(state: GameState) -> dict:
             logger.debug(f"narrator_node: 无法获取已发现知识: {e}")
 
     # ── 尝试 LLM ──
-    llm_text = await _call_llm_for_narrative(
+    result = await _call_llm_for_narrative(
         intent, resolution, game_phase, narrative_history,
         world_context=world_context,
         known_knowledge=known_knowledge,
     )
 
-    if llm_text:
-        narrative = llm_text
+    if result.is_ok:
+        narrative = result.text
         logger.info(f"narrator_node[LLM]: {len(narrative)} chars")
     else:
         # ── 模板兜底 ──
         narrative = _template_narrative(state)
         logger.info(f"narrator_node[TEMPLATE]: {len(narrative)} chars")
 
-    return {"narrative": narrative}
+    return {"narrative": narrative, "_llm_trace": result.to_trace() if result.is_ok else None}
 
 
 # ====================================================================

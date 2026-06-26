@@ -12,7 +12,7 @@ import random
 from typing import Optional
 from src.state.game_state import GameState
 from src.tools import get_logger, get_settings
-from src.tools.llm_client import call_llm as _call_llm
+from src.tools.llm_client import call_llm as _call_llm, LLMResult
 from src.memory.retriever import Retriever
 
 logger = get_logger(__name__)
@@ -173,7 +173,7 @@ async def _generate_npc_response_llm(
     npc_profile: str,
     player_input: str,
     context: str,
-) -> str | None:
+) -> LLMResult:
     """调用 LLM 生成 NPC 对话回应"""
     try:
         profile_text = npc_profile[:800]  # 防止超长
@@ -188,7 +188,8 @@ async def _generate_npc_response_llm(
         return await _call_llm("standard", messages)
     except Exception as e:
         logger.warning(f"NPC 对话 LLM 调用失败: {e}")
-        return None
+        return LLMResult(text=None, tier="standard", model_name="",
+                         messages=[], success=False, error=str(e))
 
 
 # ====================================================================
@@ -300,10 +301,12 @@ async def npc_dialogue_node(state: GameState) -> dict:
         attitude = "neutral"
 
     # 尝试 LLM 生成
-    npc_reply = await _generate_npc_response_llm(
+    llm_result = await _generate_npc_response_llm(
         npc_name, npc_profile, player_input, context,
     )
-    if not npc_reply:
+    if llm_result.is_ok:
+        npc_reply = llm_result.text
+    else:
         npc_reply = _template_npc_response(npc_name, attitude)
 
     # 线索授予
@@ -378,6 +381,7 @@ async def npc_dialogue_node(state: GameState) -> dict:
             "talk_count": rel["talk_count"],
         },
         "npc_relations": updated_relations,
+        "_llm_trace": llm_result.to_trace() if llm_result.is_ok else None,
         "active_tags": updated_tags,
         "emitted_events": emitted_events,
     }

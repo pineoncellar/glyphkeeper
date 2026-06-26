@@ -892,9 +892,9 @@ class CliAdapter(AbstractAdapter):
                 asyncio.create_task(self._summarizer.start(), name="summarizer"),
                 asyncio.create_task(self._sync.start(), name="sync"),
             ]
-            logger.info("Phase13: 三个后台 Worker 已启动")
+            logger.info("三个后台 Worker 已启动")
         except Exception as e:
-            logger.warning(f"Phase13: Worker 初始化跳过 ({e})")
+            logger.warning(f"Worker 初始化跳过 ({e})")
 
     async def _stop_workers(self):
         """依次停止所有 Worker，等待各自任务结束。"""
@@ -907,7 +907,7 @@ class CliAdapter(AbstractAdapter):
                 try:
                     await w.stop()
                 except Exception as e:
-                    logger.debug(f"Phase13: {name} stop 异常 ({e})")
+                    logger.debug(f"{name} stop 异常 ({e})")
 
         for t in self._worker_tasks:
             if not t.done():
@@ -919,12 +919,12 @@ class CliAdapter(AbstractAdapter):
                     timeout=5.0,
                 )
             except asyncio.TimeoutError:
-                logger.warning("Phase13: Worker 停止超时，强制放弃")
+                logger.warning("Worker 停止超时，强制放弃")
                 for t in self._worker_tasks:
                     if not t.done():
                         t.cancel()
             self._worker_tasks.clear()
-            logger.info("Phase13: 所有 Worker 已停止")
+            logger.info("所有 Worker 已停止")
 
     async def _trigger_memorizer(self, session_id: str):
         """每轮交互后触发 MemorizerWorker 固化当前轮叙事。
@@ -944,7 +944,7 @@ class CliAdapter(AbstractAdapter):
                     await self._memorizer.consolidate_session(session_id, events)
                     await self._memorizer.trigger_now()
         except Exception as e:
-            logger.debug(f"Phase13: 记忆触发跳过 ({e})")
+            logger.debug(f"记忆触发跳过 ({e})")
 
 
 # ====================================================================

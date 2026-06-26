@@ -224,15 +224,15 @@ def _parse_llm_response(response_text: str) -> dict | None:
     return None
 
 
-from src.tools.llm_client import call_llm as _call_llm
+from src.tools.llm_client import call_llm as _call_llm, LLMResult
 
 
-async def _call_llm_for_intent(player_input: str, context: str) -> str | None:
+async def _call_llm_for_intent(player_input: str, context: str) -> LLMResult:
     """
     调用 LLM 获取意图分析结果。
 
     使用 src.tools.llm_client 统一客户端；
-    不可用时返回 None，调用方自动降级到规则兜底。
+    不可用时返回 LLMResult(success=False)，调用方自动降级到规则兜底。
     """
     try:
         messages = [
@@ -243,7 +243,8 @@ async def _call_llm_for_intent(player_input: str, context: str) -> str | None:
 
     except Exception as e:
         logger.warning(f"intent_node: LLM 调用失败: {e}")
-        return None
+        return LLMResult(text=None, tier="fast", model_name="",
+                         messages=[], success=False, error=str(e))
 
 
 async def intent_node(state: GameState) -> dict:
@@ -251,6 +252,7 @@ async def intent_node(state: GameState) -> dict:
     意图分析节点。
 
     接收玩家输入 → 尝试 LLM 分析 → 失败时规则兜底 → 返回结构化 Intent。
+    同时返回 _llm_trace 供 LangSmith 追踪。
 
     从 state 中读取:
         player_input: str       — 玩家的原始输入文本
@@ -270,14 +272,15 @@ async def intent_node(state: GameState) -> dict:
                 "confidence": 0.0,
                 "data": {"action": "empty", "target": "", "detail": "空输入"},
             },
+            "_llm_trace": None,
         }
 
     # ── 尝试 LLM ──
     context_text = f"阶段={game_phase}, 最近叙事: {narrative[-200:]}" if narrative else f"阶段={game_phase}"
-    llm_response = await _call_llm_for_intent(player_input, context_text)
+    result = await _call_llm_for_intent(player_input, context_text)
 
-    if llm_response:
-        parsed = _parse_llm_response(llm_response)
+    if result.is_ok:
+        parsed = _parse_llm_response(result.text)
         if parsed:
             intent = parsed
             logger.info(
@@ -285,7 +288,7 @@ async def intent_node(state: GameState) -> dict:
                 f"action={intent.get('data', {}).get('action', '')} "
                 f"conf={intent.get('confidence', 0)}"
             )
-            return {"intent": intent}
+            return {"intent": intent, "_llm_trace": result.to_trace()}
 
     # ── 规则兜底 ──
     intent = _rule_based_intent(player_input, game_phase)
@@ -294,7 +297,7 @@ async def intent_node(state: GameState) -> dict:
         f"action={intent['data']['action']}"
     )
 
-    return {"intent": intent}
+    return {"intent": intent, "_llm_trace": result.to_trace() if not result.is_ok else None}
 
 
 async def rule_only_intent_node(state: GameState) -> dict:

@@ -40,6 +40,7 @@ from src.tools.ingestion import (
 )
 
 from src.tools.llm_client import (
+    LLMResult,
     call_llm,
     call_llm_stream,
     ask_llm,
@@ -79,6 +80,7 @@ __all__ = [
     "list_available_modules",
     "find_module_files",
     # llm_client
+    "LLMResult",
     "call_llm",
     "call_llm_stream",
     "ask_llm",
