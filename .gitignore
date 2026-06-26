@@ -26,3 +26,6 @@ test.py
 # tmp files
 tmp/
 scripts/graph_preview.png
+
+backup_old_structure/
+docs/
