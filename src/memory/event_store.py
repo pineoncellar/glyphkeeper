@@ -217,6 +217,7 @@ class AsyncPgEventStore:
         """追加一条新事件到事件流"""
         conn = await self._get_conn()
         version = await self.get_latest_version(session_id) + 1
+        now = datetime.now(timezone.utc)
 
         event = {
             "id": str(uuid.uuid4()),
@@ -224,7 +225,7 @@ class AsyncPgEventStore:
             "type": event_type,
             "data": data,
             "version": version,
-            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "timestamp": now.isoformat(),
             "source_node": source_node,
             "parent_event_id": parent_event_id,
         }
@@ -234,7 +235,7 @@ class AsyncPgEventStore:
                VALUES ($1, $2, $3, $4::jsonb, $5, $6::timestamptz, $7, $8)""",
             event["id"], event["session_id"], event["type"],
             json.dumps(event["data"], ensure_ascii=False),
-            event["version"], event["timestamp"],
+            event["version"], now,
             event["source_node"], event["parent_event_id"],
         )
         return event
@@ -308,17 +309,15 @@ class AsyncPgEventStore:
 # ====================================================================
 
 
-async def create_event_store(force_local: bool = True) -> "EventStore | AsyncPgEventStore":
-    """创建事件存储实例 — PG 优先，SQLite 兜底
-
-    参数:
-        force_local: True=仅尝试本地 pgembed, False=允许远程 PG
+async def create_event_store() -> "EventStore | AsyncPgEventStore":
+    """创建事件存储实例 — PG 优先，EventStore 兜底
 
     返回:
-        AsyncPgEventStore（PG 可用时）或 EventStore（SQLite 兜底）
+        AsyncPgEventStore（PG 可用时）或 EventStore（降级）
     """
     from src.tools.pg_manager import PgManager
-    mgr = await PgManager.get_instance(force_local=force_local)
+    mgr = await PgManager.get_instance()
     if mgr.available:
+        await mgr.start()
         return AsyncPgEventStore(pg_uri=mgr.uri)
     return EventStore()
