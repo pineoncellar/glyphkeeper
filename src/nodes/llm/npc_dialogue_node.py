@@ -374,6 +374,7 @@ async def npc_dialogue_node(state: GameState) -> dict:
 
     return {
         "narrative": npc_reply,
+        "npc_dialogue": npc_reply,  # 供 narrate_node 读取，保留 NPC 发言原文
         "resolution": {
             "success": True,
             "npc_name": npc_name,

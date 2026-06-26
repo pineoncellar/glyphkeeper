@@ -45,6 +45,9 @@ class GameState(TypedDict):
     game_phase: str                     # 游戏阶段: exploration / combat / dialogue
     active_tags: list[str]              # 当前激活的全局标签（条件性内容解锁）
 
+    # ── NPC 对话原文（由 npc_dialogue_node 写入，供 narrate_node 消费） ──
+    npc_dialogue: str                   # NPC 发言原文，narrate_node 不得改写
+
     # ── 角色数据 ──
     character: Optional[dict]           # 调查员角色数据（由角色创建流程注入）
     current_location: str               # 玩家当前所在场景 key
@@ -88,6 +91,7 @@ def create_initial_state(
         "resolution": None,
         "world_context": "",
         "narrative": "",
+        "npc_dialogue": "",
         "game_phase": "exploration",
         "character": None,
         "current_location": "",

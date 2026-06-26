@@ -36,6 +36,24 @@ NARRATOR_SYSTEM_PROMPT = """你是克苏鲁的呼唤 TRPG 的守密人 (Keeper) 
 
 输出纯文本，不要包含角色名或引号外的格式标记。"""
 
+NPC_NARRATOR_SYSTEM_PROMPT = """你是克苏鲁的呼唤 TRPG 的守密人 (Keeper) — 沉浸式叙事者。
+
+当前玩家正在与一位 NPC 对话。NPC 的发言已在下文中以 NPC_DIALOGUE 标记给出。
+
+要求:
+1. 使用中文，第二人称叙述
+2. 营造克苏鲁特有的氛围：压抑、神秘、不可名状
+3. 严格基于裁决结果和世界知识，不要编造未给定的信息
+4. 保持简洁（2-4 句话）
+
+【第一原则】NPC 的发言原文必须完整保留，不得改写、删减或重述。
+
+关于输出格式，请自行判断：
+- 如果场景上下文（physical_reality / rag_context）中有足够的氛围信息，可以在 NPC 发言前加入简短的情景描述和动作神态描写，使对话自然融入场景
+- 如果场景上下文不足或对话本身已足够完整，也可以直接输出 NPC 的话，不做任何额外修饰
+
+总之：NPC 的每个字都不能改，其余部分由你灵活决定。"""
+
 
 # ====================================================================
 # 模板兜底 — 无 LLM 时使用
@@ -138,11 +156,13 @@ async def _call_llm_for_narrative(
     physical_reality: str = "",
     rag_context: str = "",
     known_knowledge: list[str] | None = None,
+    npc_dialogue: str = "",
 ) -> LLMResult:
     """调用 LLM 生成叙事文本
 
     physical_reality: 来自 DB Lookup Node 的 <physical_reality> XML
     rag_context:      来自 RAG Lookup Node 的 <semantic_knowledge> 或空
+    npc_dialogue:     来自 NPC Dialogue Node 的 NPC 发言原文（若有）
     """
     try:
         # 构建防剧透约束
@@ -154,13 +174,18 @@ async def _call_llm_for_narrative(
                 + "\n未在上述列表中的信息，玩家角色目前不知道，不应在叙事中作为已知事实提及。"
             )
 
-        system_prompt = NARRATOR_SYSTEM_PROMPT + spoiler_constraint
+        # 选择 prompt：NPC 对话场景 vs 普通叙事
+        is_npc_scene = bool(npc_dialogue)
+        base_prompt = NPC_NARRATOR_SYSTEM_PROMPT if is_npc_scene else NARRATOR_SYSTEM_PROMPT
+        system_prompt = base_prompt + spoiler_constraint
 
-        # 组装上下文：物理现实（必有）+ 语义知识（可选）
+        # 组装上下文
         context_parts = [f"游戏阶段: {game_phase}"]
         context_parts.append(f"玩家意图: {intent.get('data', {}).get('action', '未知')}")
         context_parts.append(f"裁决结果: {resolution}")
 
+        if is_npc_scene:
+            context_parts.append(f"\n<NPC_DIALOGUE>\n{npc_dialogue}\n</NPC_DIALOGUE>")
         if physical_reality:
             context_parts.append(f"\n<physical_reality>\n{physical_reality}\n</physical_reality>")
         if rag_context:
@@ -203,6 +228,10 @@ async def narrate_node(state: GameState) -> dict:
     narrative_history = state.get("narrative", "")
     session_id = state.get("session_id", "")
 
+    # ── 检测 NPC 对话场景 ──
+    npc_dialogue = state.get("npc_dialogue", "")
+    is_npc_scene = bool(npc_dialogue)
+
     # ── 获取玩家已发现的知识（防剧透） ──
     known_knowledge: list[str] = []
     if session_id:
@@ -219,6 +248,7 @@ async def narrate_node(state: GameState) -> dict:
         physical_reality=physical_reality,
         rag_context=rag_context,
         known_knowledge=known_knowledge,
+        npc_dialogue=npc_dialogue,
     )
 
     if result.is_ok:
@@ -226,7 +256,12 @@ async def narrate_node(state: GameState) -> dict:
         logger.info(f"narrator_node[LLM]: {len(narrative)} chars")
     else:
         # ── 模板兜底 ──
-        narrative = _template_narrative(state)
+        if is_npc_scene:
+            # NPC 对话兜底：直接使用 NPC 发言，前面加简单场景描述
+            npc_name = resolution.get("npc_name", "对方")
+            narrative = f"{npc_name}说道：\"{npc_dialogue}\""
+        else:
+            narrative = _template_narrative(state)
         logger.info(f"narrator_node[TEMPLATE]: {len(narrative)} chars")
 
     return {"narrative": narrative, "_llm_trace": result.to_trace() if result.is_ok else None}
