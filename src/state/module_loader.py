@@ -147,6 +147,13 @@ class ModuleLoader:
         # 设置全局标签
         state["active_tags"] = list(required_tags)
 
+        # ── 修复：设置初始地点 ──
+        if start_location_key:
+            state["current_location"] = start_location_key
+            logger.info(
+                f"ModuleLoader: 初始位置 '{start_location_key}' 已设置"
+            )
+
         # 构建 world_data 快照供 WorldManager 后续使用
         # 以事件方式写入新会话，确保 WorldManager.load_location() 可访问
         locations = world_data.get("locations", {})
