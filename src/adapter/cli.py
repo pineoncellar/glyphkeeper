@@ -303,6 +303,23 @@ class CliAdapter(AbstractAdapter):
         else:
             self._character = await self._character_creation_wizard()
 
+        # 将角色数据同步到 scheduler 的 GameState 中
+        if self._character and self._scheduler:
+            from dataclasses import asdict
+            char_dict = asdict(self._character)
+            try:
+                slot = self._scheduler.get_session(self.session_id)
+                if slot is None:
+                    # 预创建会话
+                    from src.state.game_state import create_initial_state
+                    init_state = create_initial_state(session_id=self.session_id)
+                    init_state["character"] = char_dict
+                    await self._scheduler.restore_session_state(self.session_id, init_state)
+                else:
+                    slot.state["character"] = char_dict
+            except Exception:
+                logger.warning("无法同步角色到 GameState", exc_info=True)
+
         print(_color("💡 直接输入文本开始探索，输入 /help 查看命令", _DIM))
         print()
 
@@ -728,8 +745,11 @@ class CliAdapter(AbstractAdapter):
 
             # 写入 scheduler 当前会话
             if self._scheduler:
-                # 用空输入重新提交以重建会话状态
-                await self._scheduler.submit(session_id, "", previous_state=restored)
+                # 若存档中无角色数据（旧存档），用当前角色兜底
+                if not restored.get("character") and self._character:
+                    from dataclasses import asdict
+                    restored["character"] = asdict(self._character)
+                await self._scheduler.restore_session_state(session_id, restored)
                 # 恢复角色引用
                 char_data = restored.get("character")
                 if char_data and self._player_loader:
@@ -762,7 +782,7 @@ class CliAdapter(AbstractAdapter):
             for s in snapshots:
                 lbl = s.get("label", "")
                 ver = s.get("version", 0)
-                ts = s.get("created_at", "")[:19]  # ISO 前19字符
+                ts = str(s.get("created_at", ""))[:19]  # ISO 前19字符
                 lines.append(f"  [{lbl}]  v{ver}  ({ts})")
             lines.append("使用 /load <存档名> 读取存档。")
             return OutboundMessage.system_msg("\n".join(lines), session_id=session_id)

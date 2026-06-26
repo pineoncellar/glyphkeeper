@@ -254,6 +254,18 @@ class InputScheduler:
         slot = self._sessions.get(session_id)
         return slot.state if slot else None
 
+    async def restore_session_state(self, session_id: str, state: GameState) -> None:
+        """恢复会话状态（用于读档）
+
+        直接替换指定会话的 GameState，不触发引擎执行。
+        如果会话不存在则自动创建。
+        """
+        slot = await self._get_or_create_session(session_id)
+        async with slot.lock:
+            slot.state = state
+            slot.last_active = time.time()
+            slot.ctx = ExecutionContext(session_id=session_id)
+
     async def remove_session(self, session_id: str) -> bool:
         """删除一个会话及其状态"""
         async with self._lock:
