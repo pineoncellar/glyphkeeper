@@ -446,8 +446,6 @@ class CliAdapter(AbstractAdapter):
 
         # ── 加载模组（委托给 base 类） ──
         result = await super()._handle_start_cmd(cmd, session_id)
-        if result.type == MessageType.ERROR:
-            return result
 
         # ── 确认模组已加载（scheduler 中有该会话） ──
         session_exists = (
