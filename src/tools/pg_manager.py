@@ -179,19 +179,18 @@ class PgManager:
 
             self._pg_server.ensure_postgres_running()
 
-            # ── 防御：启动后验证连通性 ──
-            uri = self._pg_server.get_uri(database=self._dbname)
-            if uri:
-                self._uri = uri
+            # ── 先连接默认 postgres 数据库做连通性验证 ──
+            uri_postgres = self._pg_server.get_uri(database="postgres")
+            if uri_postgres:
                 import re
-                m = re.search(r":(\d+)/", uri)
+                m = re.search(r":(\d+)/", uri_postgres)
                 if m:
                     self._port = m.group(1)
                 # 尝试连接验证，最多重试 3 次
                 import asyncpg
                 for attempt in range(3):
                     try:
-                        _test_conn = await asyncpg.connect(uri, timeout=5.0)
+                        _test_conn = await asyncpg.connect(uri_postgres, timeout=5.0)
                         await _test_conn.close()
                         break
                     except asyncpg.exceptions.CannotConnectNowError:
@@ -204,11 +203,14 @@ class PgManager:
                         raise
             logger.info("pgembed: PostgreSQL 已启动")
 
-            # 创建项目数据库（如果不存在）
+            # ── 创建项目数据库（如果不存在） ──
             dbs = self._pg_server.psql("SELECT datname FROM pg_database")
             if self._dbname not in dbs:
                 self._pg_server.psql(f"CREATE DATABASE {self._dbname}")
                 logger.info(f"pgembed: 数据库 '{self._dbname}' 已创建")
+
+            # ── 最后切换到项目数据库 URI ──
+            self._uri = self._pg_server.get_uri(database=self._dbname)
 
             # 安装 pgvector 扩展
             try:

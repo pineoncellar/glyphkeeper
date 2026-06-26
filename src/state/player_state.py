@@ -46,9 +46,7 @@ def _char_dir() -> Path:
 
 
 class CharacterStore:
-    """PG 角色存储 — 替代 JSON 文件持久化
-
-    适合大量角色的场景，利用 PG 的 JSONB 存储 Character 数据。
+    """角色存储 — 优先使用 PG，不可用时自动降级到 JSON 文件持久化
 
     使用方式:
         store = CharacterStore()
@@ -59,94 +57,181 @@ class CharacterStore:
     def __init__(self, pg_uri: Optional[str] = None):
         self._uri = pg_uri or ""
         self._conn = None
+        self._file_fallback = False
 
-    async def _get_conn(self):
-        if self._conn and not self._conn.is_closed():
-            return self._conn
+    async def _ensure_pg(self) -> bool:
+        """检测 PG 是否可用，返回 True 表示 PG 可用"""
+        if self._conn is not None and not self._conn.is_closed():
+            return True
 
         uri = self._uri
         if not uri:
-            from src.tools.pg_manager import PgManager
-            mgr = await PgManager.get_instance()
-            if mgr.available:
-                await mgr.start()
-                uri = mgr.uri
-            else:
-                raise RuntimeError("PG 不可用")
+            try:
+                from src.tools.pg_manager import PgManager
+                mgr = await PgManager.get_instance()
+                if mgr.available:
+                    await mgr.start()
+                    uri = mgr.uri
+            except Exception:
+                return False
 
-        import asyncpg
-        self._conn = await asyncpg.connect(uri)
-        await self._init_db()
+        if not uri:
+            return False
+
+        try:
+            import asyncpg
+            self._conn = await asyncpg.connect(uri)
+            await self._init_db()
+            return True
+        except Exception as e:
+            logger.warning(f"CharacterStore: PG 不可用，降级到 JSON 文件存储: {e}")
+            return False
+
+    async def _get_conn(self):
+        """获取 PG 连接，如果不可用则触发降级到文件存储"""
+        if self._file_fallback:
+            raise RuntimeError("PG 不可用")
+
+        ok = await self._ensure_pg()
+        if not ok:
+            self._file_fallback = True
+            raise RuntimeError("PG 不可用")
         return self._conn
 
     async def _init_db(self):
-        conn = await self._get_conn()
-        await conn.execute("""
+        if not self._conn or self._conn.is_closed():
+            return
+        await self._conn.execute("""
             CREATE TABLE IF NOT EXISTS characters (
                 session_id TEXT PRIMARY KEY,
                 character_data JSONB NOT NULL,
                 saved_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
             )
         """)
-        logger.info("CharacterStore: 表已就绪")
+        logger.info("CharacterStore: PG 表已就绪")
+
+    # ── 文件存储辅助 ──
+
+    def _file_path(self, session_id: str) -> Path:
+        return _char_dir() / f"{session_id}.json"
+
+    async def _save_file(self, session_id: str, char_dict: dict):
+        path = self._file_path(session_id)
+        path.write_text(
+            json.dumps(char_dict, ensure_ascii=False, default=str),
+            encoding="utf-8",
+        )
+        logger.debug(f"CharacterStore: 角色已保存至 {path}")
+
+    async def _load_file(self, session_id: str) -> Optional[dict]:
+        path = self._file_path(session_id)
+        if not path.exists():
+            return None
+        try:
+            return json.loads(path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError) as e:
+            logger.warning(f"CharacterStore: 读取文件失败 {path}: {e}")
+            return None
+
+    async def _exists_file(self, session_id: str) -> bool:
+        return self._file_path(session_id).exists()
+
+    async def _delete_file(self, session_id: str):
+        path = self._file_path(session_id)
+        if path.exists():
+            path.unlink()
+
+    async def _list_all_files(self) -> list[dict]:
+        files = sorted(_char_dir().glob("*.json"))
+        result = []
+        for f in files:
+            try:
+                data = json.loads(f.read_text(encoding="utf-8"))
+                saved_at = data.get("_saved_at", "")
+                result.append({
+                    "session_id": f.stem,
+                    "saved_at": saved_at,
+                    "character_name": data.get("name", ""),
+                })
+            except (json.JSONDecodeError, OSError):
+                continue
+        return result
 
     async def close(self):
         if self._conn and not self._conn.is_closed():
             await self._conn.close()
             self._conn = None
 
-    # ── 核心操作 ──
+    # ── 核心操作（带降级） ──
 
     async def save(self, session_id: str, character: Character):
-        """保存角色到 PG"""
-        conn = await self._get_conn()
+        """保存角色 — 优先 PG，降级到 JSON 文件"""
         char_dict = _character_to_dict(character)
-        await conn.execute(
-            """INSERT INTO characters (session_id, character_data, saved_at)
-               VALUES ($1, $2::jsonb, $3::timestamptz)
-               ON CONFLICT (session_id)
-               DO UPDATE SET character_data = $2::jsonb, saved_at = $3::timestamptz""",
-            session_id,
-            json.dumps(char_dict, ensure_ascii=False),
-            datetime.now(timezone.utc),
-        )
+        char_dict["_saved_at"] = datetime.now(timezone.utc).isoformat()
+
+        try:
+            conn = await self._get_conn()
+            await conn.execute(
+                """INSERT INTO characters (session_id, character_data, saved_at)
+                   VALUES ($1, $2::jsonb, $3::timestamptz)
+                   ON CONFLICT (session_id)
+                   DO UPDATE SET character_data = $2::jsonb, saved_at = $3::timestamptz""",
+                session_id,
+                json.dumps(char_dict, ensure_ascii=False),
+                datetime.now(timezone.utc),
+            )
+        except RuntimeError:
+            await self._save_file(session_id, char_dict)
 
     async def load(self, session_id: str) -> Optional[Character]:
-        """从 PG 加载角色"""
-        conn = await self._get_conn()
-        row = await conn.fetchrow(
-            "SELECT character_data FROM characters WHERE session_id = $1",
-            session_id,
-        )
-        if row is None:
-            return None
-        char_data = row["character_data"]
-        if isinstance(char_data, str):
-            char_data = json.loads(char_data)
-        return _dict_to_character(char_data)
+        """加载角色 — 优先 PG，降级到 JSON 文件"""
+        try:
+            conn = await self._get_conn()
+            row = await conn.fetchrow(
+                "SELECT character_data FROM characters WHERE session_id = $1",
+                session_id,
+            )
+            if row is None:
+                return None
+            char_data = row["character_data"]
+            if isinstance(char_data, str):
+                char_data = json.loads(char_data)
+            return _dict_to_character(char_data)
+        except RuntimeError:
+            data = await self._load_file(session_id)
+            return _dict_to_character(data) if data else None
 
     async def exists(self, session_id: str) -> bool:
-        """检查角色是否存在"""
-        conn = await self._get_conn()
-        val = await conn.fetchval(
-            "SELECT 1 FROM characters WHERE session_id = $1", session_id,
-        )
-        return val is not None
+        """检查角色是否存在 — 优先 PG，降级到 JSON 文件"""
+        try:
+            conn = await self._get_conn()
+            val = await conn.fetchval(
+                "SELECT 1 FROM characters WHERE session_id = $1", session_id,
+            )
+            return val is not None
+        except RuntimeError:
+            return await self._exists_file(session_id)
 
     async def delete(self, session_id: str):
-        """删除角色"""
-        conn = await self._get_conn()
-        await conn.execute(
-            "DELETE FROM characters WHERE session_id = $1", session_id,
-        )
+        """删除角色 — 优先 PG，降级到 JSON 文件"""
+        try:
+            conn = await self._get_conn()
+            await conn.execute(
+                "DELETE FROM characters WHERE session_id = $1", session_id,
+            )
+        except RuntimeError:
+            await self._delete_file(session_id)
 
     async def list_all(self) -> list[dict]:
-        """列出所有角色（仅元数据）"""
-        conn = await self._get_conn()
-        rows = await conn.fetch(
-            "SELECT session_id, saved_at FROM characters ORDER BY saved_at DESC"
-        )
-        return [dict(row) for row in rows]
+        """列出所有角色 — 优先 PG，降级到 JSON 文件"""
+        try:
+            conn = await self._get_conn()
+            rows = await conn.fetch(
+                "SELECT session_id, saved_at FROM characters ORDER BY saved_at DESC"
+            )
+            return [dict(row) for row in rows]
+        except RuntimeError:
+            return await self._list_all_files()
 
 
 # ====================================================================
