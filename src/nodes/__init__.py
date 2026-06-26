@@ -23,7 +23,8 @@ from src.nodes.rules.combat_node import combat_node, init_combat_node
 from src.nodes.rules.sanity_node import sanity_node
 from src.nodes.rules.skill_node import skill_node, batch_skill_check
 from src.nodes.tools.dice_node import dice_node, simple_dice_roll
-from src.nodes.tools.lookup_node import lookup_node, simple_lookup
+from src.nodes.tools.db_lookup_node import db_lookup_node
+from src.nodes.tools.rag_lookup_node import rag_lookup_node
 from src.nodes.tools.roll_node import roll_node, quick_skill_check
 
 __all__ = [
@@ -42,8 +43,8 @@ __all__ = [
     # Tool Nodes
     "dice_node",
     "simple_dice_roll",
-    "lookup_node",
-    "simple_lookup",
+    "db_lookup_node",
+    "rag_lookup_node",
     "roll_node",
     "quick_skill_check",
 ]

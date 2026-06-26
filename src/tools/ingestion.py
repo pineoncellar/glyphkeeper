@@ -1,28 +1,13 @@
 # -*- coding: utf-8 -*-
 """
 @File     :   ingestion.py
-@Desc     :   模组数据摄入模块 — 将 intermediate JSON 摄入到 VectorStore + EventStore
-@Note     :   使用方式:
-              uv run python -m src.tools.ingestion --name book
-              uv run python -m src.tools.ingestion --list        # 列出可用模组
-
-流程:
-    intermediate/*.json
-        │
-        ▼  ModuleIngestor.ingest()
-        │
-        ├──► VectorStore (LightRAG)   ← 语义检索
-        │     global_knowledge / locations / entities
-        │
-        ├──► EventStore (PG)          ← 事件溯源
-        │     WorldInitialized 事件 (含完整数据)
-        │
-        └──► StateProjector           ← 投影到 CQRS 读模型
-              on_world_initialized()
-              ├── locations           ← 插入静态表
-              ├── interactables       ← 插入静态表
-              ├── clue_discoveries    ← 插入静态表
-              └── knowledge_registry  ← 插入静态表
+@Desc     :   模组数据摄入 — 双脑分流管线
+@Note     :   左脑: locations/entities/interactables/clues → EventStore + CQRS 投影 → PG
+              右脑: global_knowledge + NPC 深度人设 → 合并降噪 → LightRAG (gleaning 关闭)
+@TODO     :   实现断点续传
+使用方式:
+    uv run python -m src.tools.ingestion --name book
+    uv run python -m src.tools.ingestion --list
 """
 
 from __future__ import annotations
@@ -36,8 +21,7 @@ from typing import Any, Optional
 
 from src.tools import get_logger, get_settings, PROJECT_ROOT
 
-# 注意: EventStore / VectorStore 使用延迟导入（lazy import）
-# 避免循环依赖: tools → ingestion → memory/event_store → tools → ...
+# EventStore / VectorStore 延迟导入避免循环依赖
 
 logger = get_logger(__name__)
 
@@ -46,7 +30,6 @@ logger = get_logger(__name__)
 # 常量
 # ====================================================================
 
-# 模组模板会话 ID（固定，用于存储场景开场配置）
 TEMPLATE_SESSION_ID = "00000000-0000-0000-0000-000000000000"
 
 
@@ -56,41 +39,27 @@ TEMPLATE_SESSION_ID = "00000000-0000-0000-0000-000000000000"
 
 
 class ModuleIngestor:
-    """模组数据摄入器
+    """模组数据摄入器 — 双脑分流
 
-    职责:
-      - 读取 intermediate JSON 模组文件
-      - 将 global_knowledge → LightRAG（语义检索用）
-      - 将 locations/entities/interactables → LightRAG + EventStore
-      - 将 opening 配置 → EventStore（模板会话事件）
-      - 记录 WorldInitialized 事件（供 WorldManager 重建世界）
+    左脑管线写入 EventStore + CQRS 读模型表（结构化数据不掉 LLM）。
+    右脑管线合并叙事文本后集中写入 LightRAG（关闭 gleaning 减少 API 调用）。
     """
 
-    def __init__(
-        self,
-        vector_store=None,
-        event_store=None,
-    ):
+    def __init__(self, vector_store=None, event_store=None):
         self._vector_store = vector_store
         self._event_store = event_store
 
-    # ── 属性（懒加载 + 延迟导入） ──
+    # ── 属性（延迟导入） ──
 
     @property
     async def vector_store(self):
-        """获取 VectorStore 实例（延迟导入避免循环依赖）"""
         if self._vector_store is None:
             from src.memory.vector_store import VectorStore
-            self._vector_store = await VectorStore.get_instance(
-                domain="world",
-                llm_tier="standard",
-
-            )
+            self._vector_store = await VectorStore.get_instance(domain="world")
         return self._vector_store
 
     @property
     async def event_store(self):
-        """获取 EventStore 实例（延迟导入避免循环依赖）"""
         if self._event_store is None:
             from src.memory.event_store import EventStore
             self._event_store = EventStore()
@@ -99,221 +68,53 @@ class ModuleIngestor:
     # ── 主入口 ──
 
     async def ingest(self, json_data: dict) -> bool:
-        """全流程摄入一个模组
+        """全流程摄入 — 先左脑（结构化）再右脑（叙事）
 
-        参数:
-            json_data: 符合 intermediate JSON 格式的完整模组数据
-
-        返回:
-            是否全部成功
+        左脑: 知识注册表 + 场景/物品/NPC/线索 → EventStore + 投影到 PG
+              写完就返回，不需要等右脑。
+        右脑: 将 global_knowledge 和大段风味文本合并为大文档 → LightRAG
+              关闭 gleaning 减少 LLM 调用。
         """
         meta = json_data.get("meta", {})
         module_name = meta.get("module_name", "Unknown Module")
         logger.info(f"═" * 50)
         logger.info(f"开始摄入模组: {module_name}")
         logger.info(f"  描述: {meta.get('description', '')}")
-        logger.info(f"  版本: {meta.get('version', '')}")
 
-        success = True
+        # ── 左脑管线：结构化数据 → EventStore + PG 读模型 ──
+        left_ok = True
+        knowledge_registry = self._build_knowledge_registry(json_data)
 
-        # 先摄入知识到 LightRAG（语义检索层）
-        if "global_knowledge" in json_data:
-            ok = await self._ingest_knowledge(json_data["global_knowledge"])
-            success = success and ok
-
-        # 再摄入场景/实体/物品：同样进 LightRAG
-        if "locations" in json_data:
-            for loc_data in json_data["locations"]:
-                ok = await self._ingest_location(loc_data, module_name)
-                success = success and ok
-
-        # 开场配置写入 EventStore 的模板会话
         if "opening" in json_data:
             ok = await self._ingest_opening(module_name, json_data["opening"])
-            success = success and ok
+            left_ok = left_ok and ok
 
-        # 构建知识注册表并写入 EventStore + 投影到读模型
-        knowledge_registry = self._build_knowledge_registry(json_data)
         ok = await self._record_world_initialized(
             module_name, json_data, knowledge_registry,
         )
-        success = success and ok
+        left_ok = left_ok and ok
 
-        if success:
+        if left_ok:
+            logger.info(f"  [OK] 左脑管线完成: {len(knowledge_registry)} 条知识, "
+                        f"{len(json_data.get('locations', []))} 个场景")
+
+        # ── 右脑管线：叙事文本 → 合并降噪 → LightRAG ──
+        right_ok = await self._ingest_right_brain(json_data, module_name)
+
+        if left_ok and right_ok:
             logger.info(f"[OK] 模组 '{module_name}' 摄入完成")
         else:
-            logger.warning(f"[WARN] 模组 '{module_name}' 摄入部分失败，请查看日志")
+            part = "左脑" if not left_ok else "右脑"
+            logger.warning(f"[WARN] 模组 '{module_name}' {part}管线失败")
 
         logger.info(f"═" * 50)
-        return success
+        return left_ok and right_ok
 
-    # ── 知识摄入 ──
-
-    async def _ingest_knowledge(self, knowledge_list: list[dict]) -> bool:
-        """将 global_knowledge 列表摄入到 LightRAG
-
-        每条知识以结构化文本形式插入，包含:
-          - 知识 key（用于 ClueDiscovery 关联）
-          - 具体内容
-          - 授予的标签
-        """
-        vs = await self.vector_store
-        all_ok = True
-
-        for k in knowledge_list:
-            rag_key = k.get("key", "unknown")
-            rag_content = k.get("rag_content", "")
-            tags = k.get("tags_granted", [])
-
-            doc_text = (
-                f"[Knowledge: {rag_key}]\n"
-                f"Content: {rag_content}\n"
-                f"Related Tags: {', '.join(tags)}"
-            )
-
-            try:
-                await vs.insert(doc_text, source_type="knowledge")
-                logger.info(f"  [OK] 知识已插入: {rag_key}")
-            except Exception as e:
-                logger.error(f"  [FAIL] 知识插入失败 ({rag_key}): {e}")
-                all_ok = False
-
-        return all_ok
-
-    # ── 场景摄入 ──
-
-    async def _ingest_location(
-        self, loc_data: dict, module_name: str
-    ) -> bool:
-        """摄入单个场景及其子实体/物品
-
-        1. 场景描述 → LightRAG（供语义检索）
-        2. 子实体 NPC → LightRAG + EventStore
-        3. 子物品 → LightRAG + EventStore
-        4. 线索关联 → EventStore
-        """
-        vs = await self.vector_store
-        es = await self.event_store
-        loc_key = loc_data.get("key", "unknown")
-        loc_name = loc_data.get("name", loc_key)
-        all_ok = True
-
-        # ── 场景 → LightRAG ──
-        interactables_summary = self._summarize_interactables(
-            loc_data.get("interactables", [])
-        )
-        rag_text = (
-            f"[Location: {loc_name}]\n"
-            f"Key: {loc_key}\n"
-            f"Description: {loc_data.get('base_desc', '')}\n"
-            f"Atmosphere Tags: {', '.join(loc_data.get('tags', []))}\n"
-            f"Exits: {json.dumps(loc_data.get('exits', {}), ensure_ascii=False)}\n"
-            f"Possible Interactions: {interactables_summary}"
-        )
-        try:
-            await vs.insert(rag_text, source_type="location")
-            logger.info(f"  [OK] 场景已插入 LightRAG: {loc_name}")
-        except Exception as e:
-            logger.error(f"  [FAIL] 场景 LightRAG 插入失败 ({loc_name}): {e}")
-            all_ok = False
-
-        # ── 场景 → EventStore（WorldInitialized 事件的 locations 部分） ──
-        # 单个场景的初始化事件暂存，在 _record_world_initialized 中统一写入
-        # 这里只处理 LightRAG 部分
-
-        # ── 处理子实体 (NPC) ──
-        for entity_data in loc_data.get("entities", []):
-            ok = await self._ingest_entity(entity_data, loc_key, module_name)
-            all_ok = all_ok and ok
-
-        # ── 处理子物品 ──
-        for item_data in loc_data.get("interactables", []):
-            ok = await self._ingest_interactable(item_data, loc_key, module_name)
-            all_ok = all_ok and ok
-
-        return all_ok
-
-    # ── 实体 NPC 摄入 ──
-
-    async def _ingest_entity(
-        self, entity_data: dict, loc_key: str, module_name: str
-    ) -> bool:
-        """摄入 NPC 实体到 LightRAG"""
-        vs = await self.vector_store
-        name = entity_data.get("name", "unknown")
-        key = entity_data.get("key", name)
-
-        # 构造人设描述
-        dialogues = entity_data.get("dialogue_clues", [])
-        dialogue_text = ""
-        if dialogues:
-            lines = []
-            for d in dialogues:
-                lines.append(f"  - [{d.get('trigger', 'talk')}]: {d.get('flavor_text', '')}")
-            dialogue_text = "\nDialogue Examples:\n" + "\n".join(lines)
-
-        rag_text = (
-            f"[NPC: {name}]\n"
-            f"Key: {key}\n"
-            f"Location: {loc_key}\n"
-            f"Tags: {', '.join(entity_data.get('tags', []))}\n"
-            f"Stats: {json.dumps(entity_data.get('stats', {}), ensure_ascii=False)}{dialogue_text}"
-        )
-
-        try:
-            await vs.insert(rag_text, source_type="entity")
-            logger.info(f"  [OK] NPC 已插入 LightRAG: {name}")
-            return True
-        except Exception as e:
-            logger.error(f"  [FAIL] NPC LightRAG 插入失败 ({name}): {e}")
-            return False
-
-    # ── 物品摄入 ──
-
-    async def _ingest_interactable(
-        self, item_data: dict, loc_key: str, module_name: str
-    ) -> bool:
-        """摄入交互物品到 LightRAG"""
-        vs = await self.vector_store
-        name = item_data.get("name", "unknown")
-        key = item_data.get("key", name)
-
-        # 拼接所有 clue 的 flavor_text，确保即使 target_knowledge: null 也不丢失
-        clues = item_data.get("clues", [])
-        clue_text = ""
-        if clues:
-            lines = []
-            for c in clues:
-                ft = c.get("flavor_text", "")
-                trigger = c.get("trigger", "")
-                if ft:
-                    lines.append(f"  - [{trigger}]: {ft}")
-            if lines:
-                clue_text = "\nClues:\n" + "\n".join(lines)
-
-        rag_text = (
-            f"[Interactable: {name}]\n"
-            f"Key: {key}\n"
-            f"Location: {loc_key}\n"
-            f"State: {item_data.get('state', 'default')}\n"
-            f"Tags: {', '.join(item_data.get('tags', []))}"
-            f"{clue_text}"
-        )
-
-        try:
-            await vs.insert(rag_text, source_type="interactable")
-            logger.info(f"  [OK] 物品已插入 LightRAG: {name}")
-            return True
-        except Exception as e:
-            logger.error(f"  [FAIL] 物品 LightRAG 插入失败 ({name}): {e}")
-            return False
-
-    # ── 开场配置摄入 ──
+    # ── 左脑管线：开场 ──
 
     async def _ingest_opening(self, module_name: str, opening_data: dict) -> bool:
-        """将开场配置写入 EventStore（模板会话）"""
+        """开场配置写入 EventStore"""
         es = await self.event_store
-
         try:
             await es.append(
                 session_id=TEMPLATE_SESSION_ID,
@@ -331,20 +132,15 @@ class ModuleIngestor:
             logger.error(f"  [FAIL] 开场配置写入失败: {e}")
             return False
 
-    # ── 世界初始化事件 ──
+    # ── 左脑管线：世界初始化事件 + 投影 ──
 
     @staticmethod
     def _build_knowledge_registry(json_data: dict) -> list[dict]:
-        """从模组数据构建知识注册表
-
-        收集 global_knowledge + 所有线索中引用的知识，
-        为每条知识生成 UUID。
-        """
+        """从模组数据构建知识注册表"""
         import uuid
 
         registry_map: dict[str, dict] = {}
 
-        # 先从 global_knowledge 构建基础注册表
         for k in json_data.get("global_knowledge", []):
             kid = k.get("key", "")
             if kid:
@@ -356,7 +152,6 @@ class ModuleIngestor:
                     "tags_granted": k.get("tags_granted", []),
                 }
 
-        # 再扫描所有线索中引用的知识，确保不遗漏
         for loc_data in json_data.get("locations", []):
             for item in loc_data.get("interactables", []):
                 for clue in item.get("clues", []):
@@ -384,29 +179,17 @@ class ModuleIngestor:
         return list(registry_map.values())
 
     async def _record_world_initialized(
-        self, module_name: str, json_data: dict,
-        knowledge_registry: list[dict],
+        self, module_name: str, json_data: dict, knowledge_registry: list[dict],
     ) -> bool:
-        """记录 WorldInitialized 事件 + 投影到读模型
-
-        事件包含读模型投影所需的全部数据：
-          - knowledge_registry: 知识注册表（供投影用）
-          - locations: 场景摘要（供 WorldManager 重建用）
-          - raw_locations: 原始场景数据（含线索/物品/NPC，供投影用）
-        """
+        """写入 WorldInitialized 事件 → 投影到 PG 读模型表"""
         es = await self.event_store
-
-        # 为 locations/items 生成 UUID（与 projector 共享）
         import uuid as _uuid
 
-        # 构建 locations 摘要 + raw_locations 原始数据
-        locations = []      # 供 Projector 插入数据库和 WorldManager 重建
-        raw_locations = []  # 供 Projector 拆解物品/NPC 中的线索
+        locations, raw_locations = [], []
         for loc_data in json_data.get("locations", []):
             loc_key = loc_data.get("key", "unknown")
             loc_id = str(_uuid.uuid4())
 
-            # 为每个物品生成 UUID
             raw_interactables = []
             for item in loc_data.get("interactables", []):
                 item_copy = dict(item)
@@ -414,20 +197,17 @@ class ModuleIngestor:
                 raw_interactables.append(item_copy)
 
             raw_locations.append({
-                "id": loc_id,
-                "key": loc_key,
+                "id": loc_id, "key": loc_key,
                 "name": loc_data.get("name", ""),
                 "base_desc": loc_data.get("base_desc", ""),
                 "tags": loc_data.get("tags", []),
                 "exits": loc_data.get("exits", {}),
-                "entities": loc_data.get("entities", []),  # 原始数据（含 dialogue_clues）
-                "interactables": raw_interactables,          # 原始数据（含 clues）
+                "entities": loc_data.get("entities", []),
+                "interactables": raw_interactables,
             })
 
-            # 场景摘要（供 WorldManager 使用）
             locations.append({
-                "id": loc_id,
-                "key": loc_key,
+                "id": loc_id, "key": loc_key,
                 "name": loc_data.get("name", ""),
                 "base_desc": loc_data.get("base_desc", ""),
                 "tags": loc_data.get("tags", []),
@@ -450,33 +230,101 @@ class ModuleIngestor:
             event = await es.append(
                 session_id=TEMPLATE_SESSION_ID,
                 event_type="WorldInitialized",
-                data=event_data,
-                source_node="ingestion",
+                data=event_data, source_node="ingestion",
             )
-            logger.info(f"  [OK] WorldInitialized 事件已记录 ({len(locations)} 个场景)")
+            logger.info(f"  [OK] WorldInitialized 已记录 ({len(locations)} 场景)")
 
-            # ── 投影到读模型（同一事务，保证强一致） ──
             from src.state.projector import StateProjector
             projector = StateProjector()
             await projector.handle(event)
             logger.info(f"  [OK] 读模型投影完成")
-
             return True
         except Exception as e:
-            logger.error(f"  [FAIL] WorldInitialized 事件记录/投影失败: {e}")
+            logger.error(f"  [FAIL] WorldInitialized 记录/投影失败: {e}")
             return False
 
-    # ── 辅助方法 ──
+    # ── 右脑管线：叙事文本合并 → LightRAG ──
 
-    @staticmethod
-    def _summarize_interactables(interactables: list[dict]) -> str:
-        """生成交互物摘要（用于 RAG 文本）"""
-        if not interactables:
-            return "None"
-        return ", ".join(
-            f"{item.get('name', '?')} ({item.get('state', 'default')})"
-            for item in interactables
-        )
+    async def _ingest_right_brain(self, json_data: dict, module_name: str) -> bool:
+        """将散碎的叙事文本合并为大文档，集中写入 LightRAG
+
+        设计原则:
+          结构化元数据（exits/tags/keys/stats）不写入 RAG，
+          只写入需要语义理解的叙事内容: global_knowledge 原文、
+          NPC 深度对话文本、场景氛围描述。
+        """
+        vs = await self.vector_store
+        docs: list[str] = []
+
+        # 合并 global_knowledge — 每条知识的内容接在一起形成 lore 文档
+        gk = json_data.get("global_knowledge", [])
+        if gk:
+            lore_parts = [
+                f"[知识: {k.get('key', '?')}]\n{k.get('rag_content', '')}"
+                for k in gk
+            ]
+            docs.append(
+                f"# {module_name} — 世界观知识\n\n"
+                + "\n\n---\n\n".join(lore_parts)
+            )
+
+        # 合并 NPC 深度人设 — 只取 dialogue_clues 中的风味文本
+        npc_parts = []
+        for loc_data in json_data.get("locations", []):
+            for entity_data in loc_data.get("entities", []):
+                dialogues = entity_data.get("dialogue_clues", [])
+                if not dialogues:
+                    continue
+                lines = []
+                for d in dialogues:
+                    ft = d.get("flavor_text", "")
+                    trigger = d.get("trigger", "talk")
+                    if ft:
+                        lines.append(f"  [{trigger}]: {ft}")
+                if lines:
+                    npc_parts.append(
+                        f"[NPC: {entity_data.get('name', '?')}]\n"
+                        + f"位置: {loc_data.get('key', '?')}\n"
+                        + f"标签: {', '.join(entity_data.get('tags', []))}\n"
+                        + "对话示例:\n" + "\n".join(lines)
+                    )
+        if npc_parts:
+            docs.append(
+                f"# {module_name} — NPC 深度人设\n\n"
+                + "\n\n---\n\n".join(npc_parts)
+            )
+
+        # 合并场景氛围描述 — 只取 base_desc 不要 exits/tags 等结构化字段
+        scene_parts = []
+        for loc_data in json_data.get("locations", []):
+            desc = loc_data.get("base_desc", "")
+            if desc:
+                scene_parts.append(
+                    f"[场景: {loc_data.get('name', '?')}]\n{desc}"
+                )
+        if scene_parts:
+            docs.append(
+                f"# {module_name} — 场景氛围\n\n"
+                + "\n\n---\n\n".join(scene_parts)
+            )
+
+        if not docs:
+            logger.info(f"  [SKIP] 无非叙事内容需写入 LightRAG")
+            return True
+
+        total_chars = sum(len(d) for d in docs)
+        logger.info(f"  右脑: {len(docs)} 篇合并文档, 共 {total_chars} 字符")
+
+        all_ok = True
+        for i, doc in enumerate(docs):
+            try:
+                await vs.insert(doc, source_type="narrative")
+                logger.info(f"  [OK] 右脑文档 {i+1}/{len(docs)} 已写入 ({len(doc)} 字符)")
+            except Exception as e:
+                logger.error(f"  [FAIL] 右脑文档 {i+1} 写入失败: {e}")
+                all_ok = False
+
+        return all_ok
 
 
 # ====================================================================

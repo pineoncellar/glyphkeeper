@@ -35,12 +35,18 @@ INTENT_SYSTEM_PROMPT = """你是 CoC (克苏鲁的呼唤) 守密人助手 — �
 - MOVE: 移动（去某处、跟随、探索等）
 - META: 元操作（查看状态、保存、提问规则等）
 
+额外字段 `needs_rag`:
+- true:  需要从 LightRAG 检索世界知识（阅读/回忆/深度调查/查看 lore 时）
+- false: 不需要 RAG（常规移动/物理交互/简单对话等）
+- 判断依据: 玩家是否在询问背景 lore、回忆过去、或研究深层次信息
+
 输出 JSON 格式:
 ```json
 {
     "type": "意图类型",
     "character_name": "涉及的PC名（可选）",
     "confidence": 0.0-1.0,
+    "needs_rag": true/false,
     "data": {
         "action": "标准化的动作描述",
         "target": "作用对象（可选）",
@@ -55,15 +61,18 @@ INTENT_SYSTEM_PROMPT = """你是 CoC (克苏鲁的呼唤) 守密人助手 — �
 
 示例:
 输入: "我仔细检查书桌的抽屉"
-输出: {"type": "PHYSICAL_INTERACT", "character_name": "", "confidence": 0.95, "data": {"action": "检查抽屉", "target": "书桌", "skill_name": "侦查", "check_type": "skill", "difficulty": "REGULAR", "detail": "仔细搜查书桌的所有抽屉"}}
+输出: {"type": "PHYSICAL_INTERACT", "character_name": "", "confidence": 0.95, "needs_rag": false, "data": {"action": "检查抽屉", "target": "书桌", "skill_name": "侦查", "check_type": "skill", "difficulty": "REGULAR", "detail": "仔细搜查书桌的所有抽屉"}}
 
 输入: "我要用斗殴揍那个邪教徒"
-输出: {"type": "COMBAT_ACTION", "character_name": "", "confidence": 0.98, "data": {"action": "攻击", "target": "邪教徒", "skill_name": "斗殴", "check_type": "skill", "difficulty": "REGULAR", "detail": "用拳头攻击邪教徒"}}
+输出: {"type": "COMBAT_ACTION", "character_name": "", "confidence": 0.98, "needs_rag": false, "data": {"action": "攻击", "target": "邪教徒", "skill_name": "斗殴", "check_type": "skill", "difficulty": "REGULAR", "detail": "用拳头攻击邪教徒"}}
+
+输入: "这墙上的符文我好像在哪见过……"
+输出: {"type": "PHYSICAL_INTERACT", "character_name": "", "confidence": 0.85, "needs_rag": true, "data": {"action": "研究符文", "target": "墙上符文", "skill_name": "神秘学", "query": "墙上的符文含义和背景", "check_type": "skill", "difficulty": "HARD", "detail": "玩家试图回忆符文的来历"}}
 
 输入: "你好，你是谁"
-输出: {"type": "SOCIAL_INTERACT", "character_name": "", "confidence": 0.9, "data": {"action": "打招呼", "target": "", "skill_name": "", "check_type": "none", "difficulty": "REGULAR", "detail": "玩家打招呼"}}
+输出: {"type": "SOCIAL_INTERACT", "character_name": "", "confidence": 0.9, "needs_rag": false, "data": {"action": "打招呼", "target": "", "skill_name": "", "check_type": "none", "difficulty": "REGULAR", "detail": "玩家打招呼"}}
 
-如果无法识别意图，输出: {"type": "META", "character_name": "", "confidence": 0.1, "data": {"action": "unknown", "target": "", "skill_name": "", "check_type": "none", "difficulty": "REGULAR", "detail": "无法识别的输入"}}"""
+如果无法识别意图，输出: {"type": "META", "character_name": "", "confidence": 0.1, "needs_rag": false, "data": {"action": "unknown", "target": "", "skill_name": "", "check_type": "none", "difficulty": "REGULAR", "detail": "无法识别的输入"}}"""
 
 
 # ====================================================================
@@ -177,15 +186,26 @@ def _rule_based_intent(player_input: str, game_phase: str) -> dict:
             check_type = "skill"
             break
 
+    # needs_rag 判定: 需要翻找知识/回忆/研究时标记为 true
+    # TODO: 优化为 NLP 语义分析，而非简单关键词匹配
+    needs_rag = any(kw in text for kw in [
+        "回忆", "回想", "记得", "记不", "想起",
+        "研究", "调查", "查", "查阅", "翻找",
+        "lore", "背景", "传说", "历史", "意义",
+        "什么意思", "是什么", "符文", "符号",
+        "这墙", "这地", "这房间", "这个地方",
+    ])
+
     return {
         "type": intent_type,
         "character_name": "",
         "confidence": 0.6,
+        "needs_rag": needs_rag,
         "data": {
             "action": action,
             "target": target,
             "skill_name": skill_name,
-            "query": text if intent_type == "META" else target,
+            "query": text if intent_type in ("META", "RECALL") else target,
             "check_type": check_type,
             "difficulty": difficulty,
             "detail": text,

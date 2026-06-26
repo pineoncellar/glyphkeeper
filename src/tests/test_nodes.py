@@ -102,16 +102,16 @@ class TestDiceNode:
         assert 1 <= result["roll_value"] <= 100
 
 
-class TestLookupNode:
-    """知识检索节点测试（降级模式）"""
+class TestRagLookupNode:
+    """RAG 检索节点测试（降级模式）"""
 
     @pytest.mark.asyncio
-    async def test_lookup_node_empty_query(self):
-        """空查询返回空 world_context"""
-        from src.nodes.tools.lookup_node import lookup_node
+    async def test_rag_lookup_node_empty_query(self):
+        """空查询返回空 rag_context"""
+        from src.nodes.tools.rag_lookup_node import rag_lookup_node
         state = _make_state(player_input="")
-        result = await lookup_node(state)
-        assert result.get("world_context") == ""
+        result = await rag_lookup_node(state)
+        assert result.get("rag_context") == ""
 
 
 class TestRollNode:

@@ -135,10 +135,15 @@ async def _call_llm_for_narrative(
     resolution: dict,
     game_phase: str,
     narrative_history: str,
-    world_context: str = "",
+    physical_reality: str = "",
+    rag_context: str = "",
     known_knowledge: list[str] | None = None,
 ) -> LLMResult:
-    """调用 LLM 生成叙事文本"""
+    """调用 LLM 生成叙事文本
+
+    physical_reality: 来自 DB Lookup Node 的 <physical_reality> XML
+    rag_context:      来自 RAG Lookup Node 的 <semantic_knowledge> 或空
+    """
     try:
         # 构建防剧透约束
         spoiler_constraint = ""
@@ -150,13 +155,20 @@ async def _call_llm_for_narrative(
             )
 
         system_prompt = NARRATOR_SYSTEM_PROMPT + spoiler_constraint
-        context = (
-            f"游戏阶段: {game_phase}\n"
-            f"玩家意图: {intent.get('data', {}).get('action', '未知')}\n"
-            f"裁决结果: {resolution}\n"
-            f"世界知识上下文: {world_context[:500] if world_context else '无'}\n"
-            f"叙事历史: {narrative_history[-300:] if narrative_history else '无'}"
-        )
+
+        # 组装上下文：物理现实（必有）+ 语义知识（可选）
+        context_parts = [f"游戏阶段: {game_phase}"]
+        context_parts.append(f"玩家意图: {intent.get('data', {}).get('action', '未知')}")
+        context_parts.append(f"裁决结果: {resolution}")
+
+        if physical_reality:
+            context_parts.append(f"\n<physical_reality>\n{physical_reality}\n</physical_reality>")
+        if rag_context:
+            context_parts.append(f"\n{rag_context}")
+
+        context_parts.append(f"叙事历史: {narrative_history[-300:] if narrative_history else '无'}")
+        context = "\n".join(context_parts)
+
         messages = [
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": context},
@@ -176,8 +188,8 @@ async def narrate_node(state: GameState) -> dict:
     读取 intent + resolution + world_context → 调用 LLM → 失败用模板兜底 → 返回 narrative。
     同时返回 _llm_trace 供 LangSmith 追踪。
 
-    world_context 由 investigation_graph 中的 lookup_node 预先注入，
-    包含从 LightRAG 检索到的世界知识和 EventStore 事件历史。
+    physical_reality 由 db_lookup_node 从 PG 读模型表注入（物理事实），
+    rag_context 由 rag_lookup_node 从 LightRAG 按需注入（语义背景）。
 
     防剧透机制：
       在调用 LLM 前查询 session_knowledge_state 获取玩家已发现的知识列表，
@@ -185,7 +197,8 @@ async def narrate_node(state: GameState) -> dict:
     """
     intent = state.get("intent") or {}
     resolution = state.get("resolution") or {}
-    world_context = state.get("world_context", "")
+    physical_reality = state.get("physical_reality", "")
+    rag_context = state.get("rag_context", "")
     game_phase = state.get("game_phase", "exploration")
     narrative_history = state.get("narrative", "")
     session_id = state.get("session_id", "")
@@ -203,7 +216,8 @@ async def narrate_node(state: GameState) -> dict:
     # ── 尝试 LLM ──
     result = await _call_llm_for_narrative(
         intent, resolution, game_phase, narrative_history,
-        world_context=world_context,
+        physical_reality=physical_reality,
+        rag_context=rag_context,
         known_knowledge=known_knowledge,
     )
 

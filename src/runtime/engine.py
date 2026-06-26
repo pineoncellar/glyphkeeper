@@ -158,7 +158,7 @@ class GraphEngine:
                 loc_view = await self.world_manager.get_location_view(
                     session_id, current_loc
                 )
-                # 只在不为空时覆盖，保留 lookup_node 的结果
+                # 只在不为空时覆盖，保留 db_lookup_node 的结果
                 if loc_view and not state.get("world_context"):
                     state["world_context"] = loc_view
             except Exception as e:

@@ -1,26 +1,21 @@
 """
 @File     :   keeper_graph.py
-@Desc     :   守密人主 Graph — 系统的核心执行拓扑
-@Note     :   编译后通过 runtime/engine.py 的 GraphEngine 驱动
+@Desc     :   守密人主 Graph — 双脑路由拓扑
+@Note     :   db_lookup 始终执行（毫秒级 PG 查物理现实）
+              rag_lookup 条件执行（按 intent.needs_rag 决定是否查 LightRAG）
 
 主流程:
-    START → intent → router → [combat_subgraph]       ──→ narrate → END
-                               [investigate_subgraph]  ──┘
-                               [npc_dialogue]          ──┘
-                               [narrate (直接)]        ──┘
+    START → intent → db_lookup → router
+        ├── combat  → combat_subgraph   → rag_lookup → narrate → END
+        ├── investigate → investigate_subgraph → rag_lookup → narrate → END
+        ├── npc_dialogue → npc_dialogue_node   → rag_lookup → narrate → END
+        └── narrate (直接)                    → rag_lookup → narrate → END
 
 节点说明:
-  - intent:        IntentNode（LLM 意图分析 + 规则兜底）
-  - combat:        CombatSubgraph（战斗流程：掷骰→裁决→循环）
-  - investigate:   InvestigationSubgraph（调查流程：技能检定）
-  - npc_dialogue:  NPCDialogueNode（NPC 对话回应生成）
-  - narrate:       NarratorNode（LLM 叙事生成 + 模板兜底）
-
-路由规则:
-  - COMBAT_ACTION     → combat subgraph
-  - MOVE / PHYSICAL   → investigate subgraph
-  - SOCIAL_INTERACT   → npc_dialogue
-  - META / 其他       → 直接 narrate
+  - intent:        IntentNode（LLM 意图分析 + needs_rag 标记）
+  - db_lookup:     DB Lookup Node（查 PG 读模型表 → <physical_reality> XML）
+  - rag_lookup:    RAG Lookup Node（按需查 LightRAG → <semantic_knowledge>）
+  - 其余节点保持不变
 """
 
 from __future__ import annotations
@@ -30,6 +25,8 @@ from src.state.game_state import GameState
 from src.nodes.llm.intent_node import intent_node
 from src.nodes.llm.narrator_node import narrate_node
 from src.nodes.llm.npc_dialogue_node import npc_dialogue_node
+from src.nodes.tools.db_lookup_node import db_lookup_node
+from src.nodes.tools.rag_lookup_node import rag_lookup_node
 from src.graph.router_graph import route_by_intent
 from src.graph.combat_graph import combat_subgraph
 from src.graph.investigation_graph import investigation_subgraph
@@ -39,48 +36,53 @@ logger = get_logger(__name__)
 
 
 def build_keeper_graph() -> StateGraph:
-    """构建并返回守密人主 StateGraph
+    """构建并返回守密人主 StateGraph（双脑路由拓扑）
 
-    组装所有节点和子图，定义边与条件路由。
+    Assembles all nodes, subgraphs, and conditional edges.
 
     Returns:
-        编译好的 CompiledStateGraph
+        CompiledStateGraph ready for GraphEngine
     """
     builder = StateGraph(GameState)
 
     # ── 注册节点 ──
     builder.add_node("intent", intent_node)
+    builder.add_node("db_lookup", db_lookup_node)
+    builder.add_node("rag_lookup", rag_lookup_node)
     builder.add_node("narrate", narrate_node)
-    builder.add_node("combat", combat_subgraph)             # 战斗子图
-    builder.add_node("investigate", investigation_subgraph) # 调查子图
-    builder.add_node("npc_dialogue", npc_dialogue_node)     # NPC 对话节点
+    builder.add_node("combat", combat_subgraph)
+    builder.add_node("investigate", investigation_subgraph)
+    builder.add_node("npc_dialogue", npc_dialogue_node)
 
     # ── 定义边 ──
-    # START → 意图分析
-    builder.add_edge(START, "intent")
 
-    # intent → 条件路由
+    # START → 意图分析 → 查 PG 物理现实（始终执行）
+    builder.add_edge(START, "intent")
+    builder.add_edge("intent", "db_lookup")
+
+    # db_lookup → 条件路由到子图或直接叙事
     builder.add_conditional_edges(
-        "intent",
+        "db_lookup",
         route_by_intent,
         {
             "combat": "combat",
             "investigate": "investigate",
             "npc_dialogue": "npc_dialogue",
-            "narrate": "narrate",
+            "narrate": "rag_lookup",  # 直接叙事也走 rag_lookup（内部判断是否需查 RAG）
         },
     )
 
-    # 子图/NPC 对话执行完后 → 叙事
-    builder.add_edge("combat", "narrate")
-    builder.add_edge("investigate", "narrate")
-    builder.add_edge("npc_dialogue", "narrate")
+    # 子图/NPC 对话执行完后 → rag_lookup（条件查 LightRAG）
+    builder.add_edge("combat", "rag_lookup")
+    builder.add_edge("investigate", "rag_lookup")
+    builder.add_edge("npc_dialogue", "rag_lookup")
 
-    # 叙事 → 结束
+    # rag_lookup → 叙事 → 结束（rag_lookup 内部跳过不必要查询）
+    builder.add_edge("rag_lookup", "narrate")
     builder.add_edge("narrate", END)
 
     compiled = builder.compile()
-    logger.info("keeper_graph: 守密人主图编译完成")
+    logger.info("keeper_graph: 双脑路由主图编译完成")
     return compiled
 
 
