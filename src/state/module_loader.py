@@ -51,8 +51,8 @@ class ModuleLoader:
     @property
     async def event_store(self) -> EventStore:
         if self._event_store is None:
-            from src.memory.event_store import EventStore
-            self._event_store = EventStore()
+            from src.memory.event_store import create_event_store
+            self._event_store = await create_event_store()
         return self._event_store
 
     # ── 公开接口 ──

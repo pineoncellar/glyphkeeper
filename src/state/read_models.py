@@ -37,8 +37,8 @@ class StaticReadStore:
         mgr = await PgManager.get_instance()
         if mgr.available:
             await mgr.start()
-            from src.memory.event_store import EventStore
-            es = EventStore()
+            from src.memory.event_store import create_event_store
+            es = await create_event_store()
             self._conn = await es._get_conn()
         else:
             raise RuntimeError("pgembed 不可用")

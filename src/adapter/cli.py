@@ -922,10 +922,10 @@ class CliAdapter(AbstractAdapter):
             return
 
         try:
-            from src.memory.event_store import EventStore
+            from src.memory.event_store import create_event_store
             from src.memory.vector_store import VectorStore
 
-            event_store = EventStore()
+            event_store = await create_event_store()
             vector_store = await VectorStore.get_instance(
                 domain="world", llm_tier="standard",
             )

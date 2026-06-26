@@ -47,15 +47,7 @@ class EventStore:
 
     async def _init_db(self):
         conn = await self._get_conn()
-        # 先检查是否有旧版 UUID 表需要迁移
-        col_type = await conn.fetchval("""
-            SELECT data_type FROM information_schema.columns
-            WHERE table_name='events' AND column_name='session_id'
-        """)
-        if col_type and col_type == 'uuid':
-            await conn.execute("DROP TABLE IF EXISTS events CASCADE")
-            logger.info("event_store: 已重建 events 表（迁移 UUID→TEXT）")
-
+        # 仅建表，绝不 DROP 已有数据
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS events (
                 id UUID PRIMARY KEY, session_id TEXT NOT NULL, type TEXT NOT NULL,

@@ -456,8 +456,8 @@ async def npc_dialogue_node(state: GameState) -> dict:
     if new_tags:
         for tag in new_tags:
             try:
-                from src.memory.event_store import EventStore
-                es = EventStore()
+                from src.memory.event_store import create_event_store
+                es = await create_event_store()
                 await es.append(
                     session_id=session_id,
                     event_type="ClueDiscovered",

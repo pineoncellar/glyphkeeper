@@ -67,7 +67,8 @@ class Retriever:
     async def event_store(self) -> EventStore:
         """获取 EventStore 实例（懒加载）"""
         if self._event_store is None:
-            self._event_store = EventStore()
+            from src.memory.event_store import create_event_store
+            self._event_store = await create_event_store()
         return self._event_store
 
     # ── 核心检索方法 ──

@@ -20,7 +20,7 @@ from src.state.game_state import GameState, create_initial_state
 from src.state.event_log import EventLog
 from src.state.snapshot import SnapshotManager
 from src.state.world_state import WorldManager
-from src.memory.event_store import EventStore
+from src.memory.event_store import EventStore, create_event_store
 from src.runtime.context import ExecutionContext
 from src.runtime.dispatcher import (
     ExecutionResult,
@@ -543,8 +543,7 @@ class GraphEngine:
         snapshot_mgr = None
 
         if enable_event_log:
-            event_store = EventStore()
-            await event_store._init_db()
+            event_store = await create_event_store()
             event_log = EventLog(event_store)
 
         if enable_snapshot:

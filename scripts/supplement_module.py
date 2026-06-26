@@ -55,8 +55,8 @@ TEMPLATE_SESSION_ID = "00000000-0000-0000-0000-000000000000"
 # ====================================================================
 
 async def _get_store():
-    from src.memory.event_store import EventStore
-    return EventStore()
+    from src.memory.event_store import create_event_store
+    return await create_event_store()
 
 
 async def _get_events(module_name: str) -> list[dict]:
