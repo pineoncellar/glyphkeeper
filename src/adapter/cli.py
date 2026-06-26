@@ -72,6 +72,7 @@ class CliAdapter(AbstractAdapter):
     ):
         super().__init__(engine, scheduler, session_id)
         self._turn_count = 0
+        self._game_started: bool = False
         self._available_module: Optional[str] = None
         self._player_loader: Optional[CharacterStore] = None
         self._snapshot_mgr = SnapshotManager()
@@ -280,50 +281,13 @@ class CliAdapter(AbstractAdapter):
     async def run_impl(self):
         """CLI 交互主循环"""
         print(_BANNER)
-
-        # 检测已有角色
         self._player_loader = CharacterStore()
-        exists = await self._player_loader.exists(self.session_id)
-        if exists:
-            loaded = await self._player_loader.load(self.session_id)
-            if loaded:
-                self._character = loaded
-                print(_color(f"\n📋 检测到已有角色: {_color(loaded.name, _GREEN)} ({loaded.occupation})", _DIM))
-                raw = await asyncio.get_event_loop().run_in_executor(
-                    None, lambda: input(f"{_color('直接进入游戏(v) / 重建(r)', _GREEN)} > ")
-                )
-                if raw.strip().lower() in ("r", "重建"):
-                    self._character = await self._character_creation_wizard()
-                else:
-                    print()
-                    self._show_character_sheet(loaded)
-                    print()
-            else:
-                self._character = await self._character_creation_wizard()
-        else:
-            self._character = await self._character_creation_wizard()
 
-        # 将角色数据同步到 scheduler 的 GameState 中
-        if self._character and self._scheduler:
-            from dataclasses import asdict
-            char_dict = asdict(self._character)
-            try:
-                slot = self._scheduler.get_session(self.session_id)
-                if slot is None:
-                    # 预创建会话
-                    from src.state.game_state import create_initial_state
-                    init_state = create_initial_state(session_id=self.session_id)
-                    init_state["character"] = char_dict
-                    await self._scheduler.restore_session_state(self.session_id, init_state)
-                else:
-                    slot.state["character"] = char_dict
-            except Exception:
-                logger.warning("无法同步角色到 GameState", exc_info=True)
-
-        print(_color("💡 直接输入文本开始探索，输入 /help 查看命令", _DIM))
+        print(_color("  输入 /start <模组名> 开始游戏，或 /load <存档名> 读档", _DIM))
+        print(_color("  输入 /help 查看所有命令", _DIM))
         print()
 
-        # 后台 Workers 启动
+        # 后台 Workers 启动（仅日志模式，等真正开始游戏后才工作）
         await self._ensure_workers()
 
         self._running = True
@@ -340,6 +304,23 @@ class CliAdapter(AbstractAdapter):
             msg = await self.parse(raw)
             if not msg.type:
                 continue
+
+            # ── 未开始游戏时，只放行特定命令 ──
+            if not self._game_started:
+                lower = msg.text.strip().lower()
+                allowed = (
+                    "/quit", "/q", "/help", "/h",
+                    "/start", "/load", "/list", "/saves", "/save",
+                    "/modules", "/ingest", "/debug", "/d",
+                )
+                if msg.type == MessageType.PLAYER_INPUT or not any(
+                    lower.startswith(a) for a in allowed
+                ):
+                    await self.send(OutboundMessage.system_msg(
+                        "请先使用 /start <模组名> 开始游戏，或 /load <存档名> 读档。",
+                        level="warn", session_id=self.session_id,
+                    ))
+                    continue
 
             # 特殊处理 /quit
             if msg.type == MessageType.SYSTEM_CMD and msg.text.strip().lower() in ("/quit", "/q"):
@@ -433,6 +414,58 @@ class CliAdapter(AbstractAdapter):
         print(_color("\n感谢使用 GlyphKeeper！", _CYAN))
 
     # ── 工具方法 ──
+
+    # ================================================================
+    # 游戏生命周期
+    # ================================================================
+
+    async def _handle_start_cmd(self, cmd: str, session_id: str) -> OutboundMessage:
+        """处理 /start [模组名] — 创建角色 + 加载模组开始游戏。
+
+        覆盖 base._handle_start_cmd，在加载模组之前先创建/选择角色。
+        """
+        # ── 角色创建/选择 ──
+        exists = await self._player_loader.exists(session_id) if self._player_loader else False
+        if exists:
+            loaded = await self._player_loader.load(session_id)
+            if loaded:
+                print(_color(f"\n  检测到已有角色: {loaded.name} ({loaded.occupation})", _DIM))
+                raw = await asyncio.get_event_loop().run_in_executor(
+                    None, lambda: input(f"  {_color('使用此角色(v) / 新建(r)', _GREEN)} > ")
+                )
+                if raw.strip().lower() in ("r", "重建", "新建"):
+                    self._character = await self._character_creation_wizard()
+                    if self._player_loader:
+                        await self._player_loader.save(session_id, self._character)
+                else:
+                    self._character = loaded
+        else:
+            self._character = await self._character_creation_wizard()
+            if self._player_loader:
+                await self._player_loader.save(session_id, self._character)
+
+        # ── 加载模组（委托给 base 类） ──
+        result = await super()._handle_start_cmd(cmd, session_id)
+        if result.type == MessageType.ERROR:
+            return result
+
+        # ── 确认模组已加载（scheduler 中有该会话） ──
+        session_exists = (
+            self._scheduler is not None
+            and self._scheduler.get_session(session_id) is not None
+        )
+        if not session_exists:
+            return result
+
+        # ── 将角色注入 GameState ──
+        if self._character and self._scheduler:
+            from dataclasses import asdict
+            slot = self._scheduler.get_session(session_id)
+            if slot:
+                slot.state["character"] = asdict(self._character)
+
+        self._game_started = True
+        return result
 
     # ================================================================
     # 增强型掷骰系统
@@ -757,6 +790,8 @@ class CliAdapter(AbstractAdapter):
                     loaded_char = _dict_to_character(char_data)
                     if loaded_char:
                         self._character = loaded_char
+
+            self._game_started = True
 
             return OutboundMessage.system_msg(
                 f"读档完成: [{label or snapshots[0].get('label', 'latest')}] "
