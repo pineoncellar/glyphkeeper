@@ -27,14 +27,54 @@
 import asyncio
 import logging
 import os
+from datetime import datetime
 from pathlib import Path
 from typing import Optional, Literal
 
 from lightrag import LightRAG, QueryParam
 
 from src.tools import get_settings, get_logger, PROJECT_ROOT
+from src.tools.config import _DEBUG_MODE
 
 logger = get_logger(__name__)
+
+# ── 修复 LightRAG 日志格式 ──
+# LightRAG 默认日志格式为 "%(levelname)s: %(message)s"（无时间戳），
+# 且 logger.propagate=False，消息无法透传到项目日志系统。
+# 此处替换其 handler 的 formatter 使格式与项目一致。
+_lightrag_logger = logging.getLogger("lightrag")
+_LIGHTRAG_FORMAT = "[%(asctime)s] [%(levelname)s] [%(name)s] - %(message)s"
+_LIGHTRAG_DATE_FMT = "%Y-%m-%d %H:%M:%S"
+for _h in _lightrag_logger.handlers:
+    _h.setFormatter(logging.Formatter(_LIGHTRAG_FORMAT, datefmt=_LIGHTRAG_DATE_FMT))
+    _h.setLevel(logging.DEBUG if _DEBUG_MODE else logging.WARNING)
+_lightrag_logger.setLevel(logging.DEBUG if _DEBUG_MODE else logging.WARNING)
+# 同时保持文件日志与项目一致，给根日志器添加 handler（若尚无）
+_root = logging.getLogger()
+if not _root.handlers:
+    from src.tools.config import LOG_DIR
+    from logging.handlers import RotatingFileHandler
+    _rfh = RotatingFileHandler(
+        LOG_DIR / f"{datetime.now().strftime('%Y-%m-%d')}.log",
+        maxBytes=10 * 1024 * 1024,
+        encoding="utf-8",
+    )
+    _rfh.setFormatter(logging.Formatter(_LIGHTRAG_FORMAT, datefmt=_LIGHTRAG_DATE_FMT))
+    _root.addHandler(_rfh)
+
+# LightRAG 内部 shared_storage.direct_log() 直接用 print() 输出到 stderr，
+# 格式为 "DEBUG: xxx"，无时间戳无模块名。patch 为走 lightrag logger。
+try:
+    from lightrag.kg.shared_storage import direct_log as _original_direct_log
+
+    def _patched_direct_log(message, enable_output=True, level="DEBUG"):
+        """替换 direct_log 使其走 lightrag logger 而非 print()"""
+        getattr(_lightrag_logger, level.lower(), _lightrag_logger.debug)(message)
+
+    import lightrag.kg.shared_storage as _ss
+    _ss.direct_log = _patched_direct_log
+except Exception:
+    pass
 
 
 class VectorStore:
