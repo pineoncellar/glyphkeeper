@@ -64,3 +64,18 @@ lightrag:
   default_query_mode: "hybrid"
   # 查询返回的相关文档数量
   default_top_k: 60
+
+# ============================================
+# LangSmith 调试与可观测性
+# ============================================
+# 参考: https://smith.langchain.com
+# 开启后自动追踪 LangGraph 执行、LLM 调用、Node 输入/输出
+langsmith:
+  # 是否启用 LangSmith 追踪（设为 true 需要先配置 api_key）
+  tracing_enabled: false
+  # LangSmith API Key（也可通过 LANGCHAIN_API_KEY 环境变量设置）
+  api_key: ""
+  # 项目名（LangSmith UI 中识别用）
+  project: "glyphkeeper"
+  # API 端点（自部署或国内镜像时修改）
+  endpoint: "https://api.smith.langchain.com"

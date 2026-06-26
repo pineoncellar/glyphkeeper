@@ -74,6 +74,30 @@ class VectorStoreConfig(BaseModel):
 
 
 # ====================================================================
+# LangSmith 配置
+# ====================================================================
+
+
+class LangSmithConfig(BaseModel):
+    """LangSmith 调试与可观测性配置"""
+    tracing_enabled: bool = Field(False, description="是否启用 LangSmith 追踪")
+    api_key: str = Field("", description="LangSmith API Key")
+    project: str = Field("glyphkeeper", description="LangSmith 项目名")
+    endpoint: str = Field("https://api.smith.langchain.com", description="LangSmith API 端点")
+
+    def apply_env(self):
+        """将配置写入环境变量（langsmith SDK 自动读取）"""
+        if not self.tracing_enabled:
+            return
+        import os
+        os.environ.setdefault("LANGCHAIN_TRACING_V2", "true")
+        os.environ.setdefault("LANGCHAIN_PROJECT", self.project)
+        os.environ.setdefault("LANGCHAIN_ENDPOINT", self.endpoint)
+        if self.api_key:
+            os.environ.setdefault("LANGCHAIN_API_KEY", self.api_key)
+
+
+# ====================================================================
 # 主配置类
 # ====================================================================
 
@@ -84,6 +108,7 @@ class Settings(BaseModel):
     providers: Dict[str, ProviderConfig] = Field(default_factory=dict)
     model_tiers: Dict[str, ModelConfig] = Field(default_factory=dict)
     vector_store: VectorStoreConfig = Field(default_factory=VectorStoreConfig)
+    langsmith: LangSmithConfig = Field(default_factory=LangSmithConfig)
 
     @property
     def PROJECT_NAME(self) -> str:
@@ -115,6 +140,7 @@ class Settings(BaseModel):
 
         instance = cls(**yaml_config)
         instance._ensure_directories()
+        instance.langsmith.apply_env()
         return instance
 
     @classmethod

@@ -19,6 +19,7 @@ from src.tools.config import (
     ProviderConfig,
     ModelConfig,
     VectorStoreConfig,
+    LangSmithConfig,
     # 配置函数
     get_settings,
     reload_config,
@@ -63,6 +64,7 @@ __all__ = [
     "ProviderConfig",
     "ModelConfig",
     "VectorStoreConfig",
+    "LangSmithConfig",
     "get_settings",
     "reload_config",
     "get_logger",
