@@ -173,16 +173,21 @@ async def _generate_npc_response_llm(
     npc_profile: str,
     player_input: str,
     context: str,
+    physical_reality: str = "",
 ) -> LLMResult:
-    """调用 LLM 生成 NPC 对话回应"""
+    """调用 LLM 生成 NPC 对话回应
+
+    注入 physical_reality 让 NPC 感知当前场景，防止编造不存在的场所。
+    """
     try:
-        profile_text = npc_profile[:800]  # 防止超长
+        profile_text = npc_profile[:800]
         context_text = context[:500]
+        scene_hint = f"\n当前场景: {physical_reality[:300]}" if physical_reality else ""
         messages = [
             {"role": "system", "content": NPC_SYSTEM_PROMPT.format(
                 npc_profile=profile_text,
                 context=context_text,
-            )},
+            ) + scene_hint},
             {"role": "user", "content": f"玩家对你说: {player_input}"},
         ]
         return await _call_llm("standard", messages)
@@ -415,6 +420,9 @@ async def npc_dialogue_node(state: GameState) -> dict:
     if ctx_vs:
         context = ctx_vs
 
+    # 注入当前场景上下文
+    physical_reality = state.get("physical_reality", "") or state.get("world_context", "")
+
     # 更新 NPC 关系计数
     rel = dict(npc_relations.get(npc_name, {}))
     rel["talk_count"] = rel.get("talk_count", 0) + 1
@@ -428,11 +436,18 @@ async def npc_dialogue_node(state: GameState) -> dict:
     # 尝试 LLM 生成
     llm_result = await _generate_npc_response_llm(
         npc_name, npc_profile, player_input, context,
+        physical_reality=physical_reality,
     )
     if llm_result.is_ok:
         npc_reply = llm_result.text
     else:
         npc_reply = _template_npc_response(npc_name, attitude)
+
+    # ── 剥离括号动作描述（保证 narrate_node 拿到纯对话） ──
+    import re
+    npc_reply = re.sub(r'（[^)]*）', '', npc_reply)  # （全角括号）
+    npc_reply = re.sub(r'\([^)]*\)', '', npc_reply)       # (半角括号)
+    npc_reply = npc_reply.strip()
 
     # 线索授予
     new_tags = _check_clue_grant(npc_name, player_input, active_tags, npc_relations)
