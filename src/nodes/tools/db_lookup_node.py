@@ -16,6 +16,8 @@ from typing import Optional
 from src.state.game_state import GameState
 from src.tools import get_logger
 
+import json
+
 logger = get_logger(__name__)
 
 
@@ -63,8 +65,15 @@ async def db_lookup_node(state: GameState) -> dict:
         loc_name = loc_row["name"]
         loc_desc = loc_row["base_desc"]
         loc_tags = loc_row["tags"] or []
-        exits_json = loc_row["exits_json"] or {}
         loc_id = loc_row["id"]
+
+        # asyncpg 在测试环境下（Windows/Python3.12）JSONB 列返回 Python str 而非 dict。
+        # 无论数据从何而来，一律 json.loads 保底。
+        raw_exits = loc_row["exits_json"]
+        if isinstance(raw_exits, str):
+            exits_json = json.loads(raw_exits) if raw_exits else {}
+        else:
+            exits_json = raw_exits or {}
 
         # 查物品
         item_rows = await conn.fetch(
