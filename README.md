@@ -152,6 +152,43 @@ graph TB
 
 ---
 
+## 🗺️ 开发计划
+
+<table>
+<tr>
+    <th rowspan="13" style="writing-mode:vertical-lr; text-align:center; vertical-align:middle; width:40px; font-weight:bold;">系统框架</th>
+    <th>状态</th>
+    <th colspan="2" style="text-align:center;">模块与说明</th>
+</tr>
+<tr><td>✅</td><td colspan="2">CLI适配器，用于简易测试</td></tr>
+<tr><td>⬜</td><td colspan="2">Onebot 适配器</td></tr>
+<tr><td>✅</td><td colspan="2">统一执行协议</td></tr>
+<tr><td>✅</td><td colspan="2">LangGraph引擎，管理图调用与会话生命周期</td></tr>
+<tr><td>✅</td><td colspan="2">StateGraph 图编排，条件路由分流意图，子图处理战斗与调查</td></tr>
+<tr><td>✅</td><td colspan="2">GameState&WorldManager世界状态管理</td></tr>
+<tr><td>🔄</td><td colspan="2">大语言模型云提供方适配</td></tr>
+<tr><td>✅</td><td colspan="2">CQRS 读模型表与写入管线</td></tr>
+<tr><td>✅</td><td colspan="2">LightRAG 接入</td></tr>
+<tr><td>✅</td><td colspan="2">双脑记忆系统</td></tr>
+<tr><td>🔄</td><td colspan="2">Worker 后台任务</td></tr>
+<tr><td>✅</td><td colspan="2">模组导入系统</td></tr>
+<tr>
+    <th rowspan="9" style="writing-mode:vertical-lr; text-align:center; vertical-align:middle; width:40px; font-weight:bold; border-top:2px solid #444;">游戏系统</th>
+</tr>
+<tr><td>🔄</td><td colspan="2">角色卡系统，职业选择、属性骰点、技能与背景</td>
+<tr><td>🔄</td><td colspan="2">调查与线索系统</td></tr>
+<tr><td>🔄</td><td colspan="2">NPC 对话系统</td></tr>
+<tr><td>✅</td><td colspan="2">CoC 7版技能检定</td></tr>
+<tr><td>⬜</td><td colspan="2">战斗轮与体力系统</td></tr>
+<tr><td>⬜</td><td colspan="2">理智与疯狂</td></tr>
+<tr><td>⬜</td><td colspan="2">场景切换与 location 更新</td></tr>
+<tr><td>⬜</td><td colspan="2">物品背包系统</td></tr>
+</table>
+
+> To be continue......
+
+---
+
 ## 💾 双脑记忆系统
 
 ### 架构总览
