@@ -137,7 +137,16 @@ def _template_narrative(state: GameState) -> str:
             return f"你{action}。{scene_hint}。"
         return f"你{action}。空气中弥漫着陈旧的灰尘味。"
 
-    return f"你{action}。{detail}"
+    narrative = f"你{action}。{detail}"
+
+    # 如果 archivist 有线索 flavor_text，追加到模板叙事末尾
+    archivist_result = state.get("archivist_result")
+    if archivist_result:
+        flavor_text = archivist_result.get("flavor_text", "")
+        if flavor_text:
+            narrative += f"\n{flavor_text}"
+
+    return narrative
 
 
 def _template_combat_narrative(resolution: dict) -> str:
@@ -216,12 +225,14 @@ async def _call_llm_for_narrative(
     rag_context: str = "",
     known_knowledge: list[str] | None = None,
     npc_dialogue: str = "",
+    clue_discovery: str = "",
 ) -> LLMResult:
     """调用 LLM 生成叙事文本
 
     physical_reality: 来自 DB Lookup Node 的 <physical_reality> XML
     rag_context:      来自 RAG Lookup Node 的 <semantic_knowledge> 或空
     npc_dialogue:     来自 NPC Dialogue Node 的 NPC 发言原文（若有）
+    clue_discovery:   来自 Archivist 的技能检定线索原文（若有）
     """
     try:
         # 构建防剧透约束
@@ -249,6 +260,8 @@ async def _call_llm_for_narrative(
             context_parts.append(f"\n<physical_reality>\n{physical_reality}\n</physical_reality>")
         if rag_context:
             context_parts.append(f"\n{rag_context}")
+        if clue_discovery:
+            context_parts.append(f"\n<clue_discovery>\n{clue_discovery}\n</clue_discovery>")
 
         context_parts.append(f"叙事历史: {narrative_history[-300:] if narrative_history else '无'}")
         context = "\n".join(context_parts)
@@ -291,6 +304,14 @@ async def narrate_node(state: GameState) -> dict:
     npc_dialogue = state.get("npc_dialogue", "")
     is_npc_scene = bool(npc_dialogue)
 
+    # ── 读取技能检定发现的线索（由 skill_node 经 archivist 写入） ──
+    archivist_result = state.get("archivist_result")
+    clue_discovery = ""
+    if archivist_result:
+        flavor_text = archivist_result.get("flavor_text", "")
+        if flavor_text:
+            clue_discovery = flavor_text
+
     # ── 获取玩家已发现的知识（防剧透） ──
     known_knowledge: list[str] = []
     if session_id:
@@ -308,6 +329,7 @@ async def narrate_node(state: GameState) -> dict:
         rag_context=rag_context,
         known_knowledge=known_knowledge,
         npc_dialogue=npc_dialogue,
+        clue_discovery=clue_discovery,
     )
 
     if result.is_ok:
