@@ -156,7 +156,7 @@ graph TB
 
 <table>
 <tr>
-    <th rowspan="13" style="writing-mode:vertical-lr; text-align:center; vertical-align:middle; width:40px; font-weight:bold;">系统框架</th>
+    <th rowspan="15" style="writing-mode:vertical-lr; text-align:center; vertical-align:middle; width:40px; font-weight:bold;">系统框架</th>
     <th>状态</th>
     <th colspan="2" style="text-align:center;">模块与说明</th>
 </tr>
@@ -172,6 +172,7 @@ graph TB
 <tr><td>✅</td><td colspan="2">双脑记忆系统</td></tr>
 <tr><td>🔄</td><td colspan="2">Worker 后台任务</td></tr>
 <tr><td>✅</td><td colspan="2">模组导入系统</td></tr>
+<tr><td>⬜</td><td colspan="2">多世界并行与管理</td></tr>
 <tr>
     <th rowspan="9" style="writing-mode:vertical-lr; text-align:center; vertical-align:middle; width:40px; font-weight:bold; border-top:2px solid #444;">游戏系统</th>
 </tr>
