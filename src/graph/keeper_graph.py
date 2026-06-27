@@ -6,15 +6,17 @@
 
 主流程:
     START → intent → db_lookup → router
-        ├── combat  → combat_subgraph   → rag_lookup → narrate → END
+        ├── combat  → combat_subgraph     → rag_lookup → narrate → END
         ├── investigate → investigate_subgraph → rag_lookup → narrate → END
-        ├── npc_dialogue → npc_dialogue_node   → rag_lookup → narrate → END
-        └── narrate (直接)                    → rag_lookup → narrate → END
+        ├── navigation → navigation_node  → rag_lookup → narrate → END
+        ├── npc_dialogue → npc_dialogue_node → rag_lookup → narrate → END
+        └── narrate (直接)                      → rag_lookup → narrate → END
 
 节点说明:
   - intent:        IntentNode（LLM 意图分析 + needs_rag 标记）
   - db_lookup:     DB Lookup Node（查 PG 读模型表 → <physical_reality> XML）
   - rag_lookup:    RAG Lookup Node（按需查 LightRAG → <semantic_knowledge>）
+  - navigation:    NavigationNode（纯逻辑验证出口并更新位置）
   - 其余节点保持不变
 """
 
@@ -27,6 +29,7 @@ from src.nodes.llm.narrator_node import narrate_node
 from src.nodes.llm.npc_dialogue_node import npc_dialogue_node
 from src.nodes.tools.db_lookup_node import db_lookup_node
 from src.nodes.tools.rag_lookup_node import rag_lookup_node
+from src.nodes.rules.navigation_node import navigation_node
 from src.graph.router_graph import route_by_intent
 from src.graph.combat_graph import combat_subgraph
 from src.graph.investigation_graph import investigation_subgraph
@@ -53,6 +56,7 @@ def build_keeper_graph() -> StateGraph:
     builder.add_node("combat", combat_subgraph)
     builder.add_node("investigate", investigation_subgraph)
     builder.add_node("npc_dialogue", npc_dialogue_node)
+    builder.add_node("navigation", navigation_node)
 
     # ── 定义边 ──
 
@@ -67,14 +71,16 @@ def build_keeper_graph() -> StateGraph:
         {
             "combat": "combat",
             "investigate": "investigate",
+            "navigation": "navigation",
             "npc_dialogue": "npc_dialogue",
             "narrate": "rag_lookup",  # 直接叙事也走 rag_lookup（内部判断是否需查 RAG）
         },
     )
 
-    # 子图/NPC 对话执行完后 → rag_lookup（条件查 LightRAG）
+    # 子图/NPC 对话/导航执行完后 → rag_lookup（条件查 LightRAG）
     builder.add_edge("combat", "rag_lookup")
     builder.add_edge("investigate", "rag_lookup")
+    builder.add_edge("navigation", "rag_lookup")
     builder.add_edge("npc_dialogue", "rag_lookup")
 
     # rag_lookup → 叙事 → 结束（rag_lookup 内部跳过不必要查询）

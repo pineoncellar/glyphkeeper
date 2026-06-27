@@ -177,26 +177,31 @@ class GraphEngine:
             else:
                 narrative, new_state = await self._run_full(state, ctx)
 
-            # ── 执行后：处理 MOVE 意图 → 更新角色位置 ──
+            # ── 执行后：由 navigation_node 处理 MOVE 位置更新，此处只做 WorldManager 同步 ──
             intent = new_state.get("intent") or {}
-            if intent.get("type") == "MOVE" and self.world_manager:
+            resolved_loc = new_state.get("current_location", "")
+            old_loc = state.get("current_location", "")
+            if (
+                intent.get("type") == "MOVE"
+                and resolved_loc
+                and resolved_loc != old_loc
+                and self.world_manager
+            ):
                 character = new_state.get("character") or {}
-                target = intent.get("data", {}).get("target", "")
                 char_name = character.get("name", "")
-                if target and char_name:
+                if char_name:
                     try:
                         await self.world_manager.move_entity(
                             session_id=session_id,
                             entity_key=char_name,
-                            target_location_key=target,
-                            source_node="engine",
+                            target_location_key=resolved_loc,
+                            source_node="navigation_node",
                         )
-                        new_state["current_location"] = target
                         logger.info(
-                            f"Engine.run: 角色 '{char_name}' 移动到 '{target}'"
+                            f"Engine.run: 角色 '{char_name}' {old_loc} → {resolved_loc}"
                         )
                     except Exception as e:
-                        logger.debug(f"Engine.run: 移动失败: {e}")
+                        logger.debug(f"Engine.run: WorldManager 同步失败: {e}")
 
             # 自动快照（对 new_state 做）
             if auto_snapshot and self._snapshot_mgr:

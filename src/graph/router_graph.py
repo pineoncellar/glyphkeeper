@@ -5,7 +5,7 @@
 
 路由规则:
   - COMBAT_ACTION       → combat
-  - MOVE                → investigate
+  - MOVE                → navigation
   - PHYSICAL_INTERACT   → investigate
   - SOCIAL_INTERACT     → npc_dialogue
   - META                → narrate
@@ -29,7 +29,7 @@ logger = get_logger(__name__)
 # ── 路由表 ──
 _ROUTING_TABLE: dict[str, str] = {
     "COMBAT_ACTION": "combat",
-    "MOVE": "investigate",
+    "MOVE": "navigation",
     "PHYSICAL_INTERACT": "investigate",
     "SOCIAL_INTERACT": "npc_dialogue",
     "META": "narrate",

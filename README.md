@@ -182,7 +182,7 @@ graph TB
 <tr><td>✅</td><td colspan="2">CoC 7版技能检定</td></tr>
 <tr><td>⬜</td><td colspan="2">战斗轮与体力系统</td></tr>
 <tr><td>⬜</td><td colspan="2">理智与疯狂</td></tr>
-<tr><td>⬜</td><td colspan="2">场景切换与 location 更新</td></tr>
+<tr><td>🔄</td><td colspan="2">场景切换与 location 更新</td></tr>
 <tr><td>⬜</td><td colspan="2">物品背包系统</td></tr>
 </table>
 
