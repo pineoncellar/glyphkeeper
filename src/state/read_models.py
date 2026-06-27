@@ -260,6 +260,19 @@ class StaticReadStore:
         )
         return [dict(r) for r in rows]
 
+    async def get_clues_for_interactable_name(self, name: str) -> list[dict]:
+        """按物品名查线索——降级用，玩家输入 target 通常是中文名而非系统 key"""
+        conn = await self._get_conn()
+        rows = await conn.fetch(
+            """SELECT cd.*, kr.knowledge_id, kr.description, kr.tags_granted
+               FROM clue_discoveries cd
+               JOIN interactables i ON cd.interactable_id = i.id
+               LEFT JOIN knowledge_registry kr ON cd.knowledge_id = kr.id
+               WHERE i.name = $1""",
+            name,
+        )
+        return [dict(r) for r in rows]
+
     async def get_clues_for_entity(self, entity_key: str) -> list[dict]:
         """查询某个 NPC 关联的所有线索"""
         conn = await self._get_conn()

@@ -1,8 +1,8 @@
 # -*- coding: utf-8 -*-
 """
 @File     :   archivist.py
-@Desc     :   线索管理员 — 技能检定成功后检查是否有线索可发现
-@Note     :   不作为独立 Graph Node，而是由 skill_node 调用的工具函数
+@Desc     :   线索管理员 — 由 archivist_node 调用的数据访问层
+@Note     :   负责查询 PG 读模型、校验线索条件、写入 EventStore + 读模型投影
 """
 
 from __future__ import annotations
@@ -19,6 +19,9 @@ class Archivist:
 
     连接到静态读模型（StaticReadStore）和事件存储（EventStore），
     为检定成功的目标查找并触发线索发现。
+
+    注：不再负责 target key 解析（已上提至 archivist_node），
+    收到什么 key 就查什么 key。
     """
 
     def __init__(self, static_store=None, event_store=None, session_state=None):
@@ -65,13 +68,13 @@ class Archivist:
         无匹配再查 NPC 线索（clue_discoveries WHERE entity_key = target）。
         均无匹配时返回 None。
 
-        发现线索时返回含 knowledge_id、flavor_text、source 的字典，
-        其中 source 为 "examine"（物品）或 "dialogue"（NPC）。
+        注意：target_key 已由 archivist_node 解析完成，此处不再做降级匹配。
         """
         store = await self.static_store
 
-        # 先查物品线索
+        # 先查物品线索（按 key）
         item_clues = await store.get_clues_for_interactable(target_key)
+
         if item_clues:
             return await self._process_clues(
                 clues=item_clues,
@@ -132,6 +135,7 @@ class Archivist:
 
             # 再比对掷骰结果 — 注意此处简化处理，实际应使用角色卡 skill_value
             # 参与 determine_success_level 精确判定；当前用固定阈值做近似
+            # TODO: 实现
             if roll_value > 0:
                 from src.domain.coc_rules import Difficulty
 

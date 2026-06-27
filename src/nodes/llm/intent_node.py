@@ -19,6 +19,17 @@ from src.tools import get_logger, get_settings
 logger = get_logger(__name__)
 
 
+# ── 开关常量 ──
+
+INTENT_NODE_TARGET_KEY_RESOLVE = True
+"""LLM target→key 映射开关。
+
+True 时 intent_node 查询当前场景可交互物列表注入 prompt，
+让 LLM 输出 target_key 供 Archivist 精确匹配。
+False 时保持原有行为，靠 Archivist name 降级兜底。
+"""
+
+
 # ====================================================================
 # Prompt 模板
 # ====================================================================
@@ -50,6 +61,7 @@ INTENT_SYSTEM_PROMPT = """你是 CoC (克苏鲁的呼唤) 守密人助手 — �
     "data": {
         "action": "标准化的动作描述",
         "target": "作用对象（可选）",
+        "target_key": "匹配到的系统 key（可选，仅当下方场景列表有时使用）",
         "skill_name": "可能需要的技能（可选）",
         "query": "需要检索的信息（可选）",
         "check_type": "skill / stat / opposed / none（可选）",
@@ -247,17 +259,24 @@ def _parse_llm_response(response_text: str) -> dict | None:
 from src.tools.llm_client import call_llm as _call_llm, LLMResult
 
 
-async def _call_llm_for_intent(player_input: str, context: str) -> LLMResult:
-    """
-    调用 LLM 获取意图分析结果。
+async def _call_llm_for_intent(
+    player_input: str,
+    context: str,
+    scene_targets: str = "",
+) -> LLMResult:
+    """调用 LLM 获取意图分析结果
 
-    使用 src.tools.llm_client 统一客户端；
-    不可用时返回 LLMResult(success=False)，调用方自动降级到规则兜底。
+    player_input:  玩家原始输入
+    context:       游戏阶段 + 叙事历史
+    scene_targets: 当前场景物品/NPC 列表（key→name），供 LLM 做 target→key 映射
     """
     try:
+        user_content = f"当前游戏阶段: {context}\n玩家输入: {player_input}"
+        if scene_targets:
+            user_content += f"\n\n当前场景中的可交互物品:\n{scene_targets}"
         messages = [
             {"role": "system", "content": INTENT_SYSTEM_PROMPT},
-            {"role": "user", "content": f"当前游戏阶段: {context}\n玩家输入: {player_input}"},
+            {"role": "user", "content": user_content},
         ]
         return await _call_llm("fast", messages)
 
@@ -296,9 +315,24 @@ async def intent_node(state: GameState) -> dict:
             "_llm_trace": None,
         }
 
+    # ── 构建场景目标列表（供 LLM 做 target→key 映射） ──
+    scene_targets = ""
+    if INTENT_NODE_TARGET_KEY_RESOLVE:
+        current_location = state.get("current_location", "")
+        if current_location:
+            try:
+                from src.state.read_models import StaticReadStore
+                store = StaticReadStore()
+                items = await store.get_interactables_by_location(current_location)
+                if items:
+                    lines = [f"  - {i['key']} → {i['name']}" for i in items]
+                    scene_targets = "\n".join(lines)
+            except Exception as e:
+                logger.debug(f"intent_node: 场景查询失败（非阻塞）: {e}")
+
     # ── 尝试 LLM ──
     context_text = f"阶段={game_phase}, 最近叙事: {narrative[-200:]}" if narrative else f"阶段={game_phase}"
-    result = await _call_llm_for_intent(player_input, context_text)
+    result = await _call_llm_for_intent(player_input, context_text, scene_targets=scene_targets)
 
     if result.is_ok:
         parsed = _parse_llm_response(result.text)
