@@ -44,8 +44,28 @@ ENGINE_MODE_LANGGRAPH = "langgraph"
 
 
 # ====================================================================
-# GraphEngine
+# 每轮需重置的运行时字段
 # ====================================================================
+
+_RUNTIME_FIELDS: dict[str, object] = {
+    "intent": None,               # intent_node 写
+    "resolution": None,           # skill_node / rule_node 写
+    "npc_dialogue": "",           # npc_dialogue_node 写
+    "world_context": "",          # db_lookup_node + engine 写
+    "physical_reality": "",       # db_lookup_node 写
+    "rag_context": "",            # rag_lookup_node 写
+    "archivist_result": None,     # skill_node 写（有线索时）
+    "_llm_trace": None,           # narrator_node 写
+}
+"""
+_prepare_state 用此清单清除上一轮遗留在 GameState 中的运行时数据。
+不在此清单中的持久字段（character / current_location / narrative 等）跨轮保留。
+"""
+
+
+# ====================================================================
+# GraphEngine
+# # ===================================================================
 
 
 class GraphEngine:
@@ -324,7 +344,7 @@ class GraphEngine:
         session_id: str,
         previous_state: Optional[GameState] = None,
     ) -> GameState:
-        """构建或复用 GameState"""
+        """构建或复用 GameState，同时清除上一轮的运行时字段"""
         if previous_state:
             state: GameState = dict(previous_state)
             state["player_input"] = player_input
@@ -336,6 +356,9 @@ class GraphEngine:
             )
             state["player_input"] = player_input
             state["beat_counter"] = 1
+        # 重置运行时字段，防止跨轮幽灵数据残留
+        for field, default in _RUNTIME_FIELDS.items():
+            state[field] = default
         return state
 
     def _get_node_fn(self, node_name: str):
