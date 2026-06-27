@@ -292,6 +292,7 @@ async def intent_node(state: GameState) -> dict:
                 "confidence": 0.0,
                 "data": {"action": "empty", "target": "", "detail": "空输入"},
             },
+            "npc_dialogue": "",
             "_llm_trace": None,
         }
 
@@ -308,7 +309,7 @@ async def intent_node(state: GameState) -> dict:
                 f"action={intent.get('data', {}).get('action', '')} "
                 f"conf={intent.get('confidence', 0)}"
             )
-            return {"intent": intent, "_llm_trace": result.to_trace()}
+            return {"intent": intent, "npc_dialogue": "", "_llm_trace": result.to_trace()}
 
     # ── 规则兜底 ──
     intent = _rule_based_intent(player_input, game_phase)
@@ -317,7 +318,7 @@ async def intent_node(state: GameState) -> dict:
         f"action={intent['data']['action']}"
     )
 
-    return {"intent": intent, "_llm_trace": result.to_trace() if not result.is_ok else None}
+    return {"intent": intent, "npc_dialogue": "", "_llm_trace": result.to_trace() if not result.is_ok else None}
 
 
 async def rule_only_intent_node(state: GameState) -> dict:
