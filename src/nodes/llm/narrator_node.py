@@ -104,6 +104,10 @@ def _template_narrative(state: GameState) -> str:
     if game_phase == "combat" or intent.get("type") == "COMBAT_ACTION":
         return _template_combat_narrative(resolution)
 
+    # 导航叙事（MOVE 意图的 resolution 由 navigation_node 产生）
+    if resolution.get("action") == "move":
+        return _template_navigation_narrative(state, resolution, world_context, player_input)
+
     # 基于检定结果
     success_label = resolution.get("success_label", "")
     action = intent.get("data", {}).get("action", player_input[:20])
@@ -152,6 +156,52 @@ def _template_combat_narrative(resolution: dict) -> str:
     else:
         template = random.choice(_COMBAT_MISS_TEMPLATES)
         return template.format(actor=actor, target=target)
+
+
+def _template_navigation_narrative(state: GameState, resolution: dict, world_context: str, player_input: str) -> str:
+    """导航叙事模板 — 渲染移动成功/失败的描述"""
+    if resolution.get("success"):
+        target_label = resolution.get("target_label", "")
+        path = resolution.get("path")
+
+        if path and len(path) > 1:
+            dirs = [p["direction"] for p in path]
+            dir_desc = "、".join(dirs)
+            return f"你沿着路线前行——{dir_desc}。穿过几段路途后，你抵达了目的地。"
+        elif path and len(path) == 1:
+            return f"你向着{target_label}走去。周围的环境逐渐变化——你来到了新的地方。"
+        return f"你向着{target_label}走去。周围的环境逐渐变化——你来到了新的地方。"
+    else:
+        return resolution.get("error", "你无法前往那里。")
+
+
+def _validate_npc_dialogue(narrative: str, original_dialogue: str) -> str:
+    """校验 LLM 叙事中 NPC 对话是否被篡改，若是则替换回原文
+
+    提取 narrative 中所有双引号内容，逐一与 original_dialogue 比对。
+    不匹配的引号段替换为 original_dialogue。
+    无引号内容或校验异常时保持原样。
+    """
+    if not original_dialogue:
+        return narrative
+
+    import re
+    # 提取所有双引号内的内容
+    quoted = re.findall(r'"(.*?)"', narrative)
+    if not quoted:
+        return narrative  # 无引号内容，可能是纯场景描写，保持原样
+
+    # 检查是否有任何引号内容与原文匹配
+    for seg in quoted:
+        if seg == original_dialogue:
+            return narrative  # 至少有一段正确 → 通过
+
+    # 全都不匹配 → 替换最后一段引号内容为原始对话
+    # 用原始对话替换最后一个引号段，保留叙事框架
+    last_quote = quoted[-1]
+    narrative = narrative.replace(f'"{last_quote}"', f'"{original_dialogue}"', 1)
+    logger.debug(f"_validate_npc_dialogue: 替换了偏移的 NPC 对话")
+    return narrative
 
 
 from src.tools.llm_client import call_llm as _call_llm, LLMResult
@@ -262,6 +312,9 @@ async def narrate_node(state: GameState) -> dict:
 
     if result.is_ok:
         narrative = result.text
+        # ── NPC 对话校验：提取引号内容比对原始 NPC_DIALOGUE ──
+        if is_npc_scene and npc_dialogue:
+            narrative = _validate_npc_dialogue(narrative, npc_dialogue)
         logger.info(f"narrator_node[LLM]: {len(narrative)} chars")
     else:
         # ── 模板兜底 ──
