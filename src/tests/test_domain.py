@@ -491,3 +491,138 @@ class TestApplySkillGrowth:
         char = Character(id="test", name="Test", occupation="Test", stats=Stats())
         result = apply_skill_growth(char, "不存在的技能", 70)
         assert not result
+
+
+# ====================================================================
+# navigation.py — BFS 寻路与阻挡标签
+# ====================================================================
+
+_NAV_LOCATIONS = [
+    {"key": "loc_start",    "name": "起点",  "exits": {"north": "loc_hall"},                         "tags": []},
+    {"key": "loc_hall",     "name": "走廊",  "exits": {"east": "loc_garden", "south": "loc_start", "west": "loc_library"}, "tags": []},
+    {"key": "loc_garden",   "name": "花园",  "exits": {"north": "loc_shed", "west": "loc_hall"},     "tags": ["outdoor"]},
+    {"key": "loc_shed",     "name": "棚屋",  "exits": {"south": "loc_garden"},                       "tags": []},
+    {"key": "loc_library",  "name": "图书馆","exits": {"east": "loc_hall"},                          "tags": ["locked"]},
+    {"key": "loc_secret",   "name": "密室",  "exits": {"down": "loc_tunnel"},                        "tags": []},
+    {"key": "loc_tunnel",   "name": "隧道",  "exits": {"east": "loc_start"},                         "tags": []},
+    {"key": "loc_isolated", "name": "孤岛",  "exits": {},                                            "tags": []},
+]
+
+
+class TestBuildGraph:
+    def test_build_graph_keys(self):
+        """构建后的图包含所有场景"""
+        from src.domain.navigation import build_graph
+        graph = build_graph(_NAV_LOCATIONS)
+        assert set(graph.keys()) == {
+            "loc_start", "loc_hall", "loc_garden", "loc_shed",
+            "loc_library", "loc_secret", "loc_tunnel", "loc_isolated",
+        }
+
+    def test_build_graph_exits_preserved(self):
+        """出口映射被正确保留"""
+        from src.domain.navigation import build_graph
+        graph = build_graph(_NAV_LOCATIONS)
+        assert graph["loc_start"]["exits"] == {"north": "loc_hall"}
+        assert graph["loc_hall"]["exits"]["east"] == "loc_garden"
+
+    def test_build_graph_tags_preserved(self):
+        """标签被正确保留"""
+        from src.domain.navigation import build_graph
+        graph = build_graph(_NAV_LOCATIONS)
+        assert "locked" in graph["loc_library"]["tags"]
+
+
+class TestFindPath:
+    def test_direct_neighbor(self):
+        """相邻场景直达"""
+        from src.domain.navigation import build_graph, find_path
+        graph = build_graph(_NAV_LOCATIONS)
+        path = find_path(graph, "loc_start", "loc_hall")
+        assert path is not None
+        assert len(path) == 1
+        assert path[0]["direction"] == "north"
+        assert path[0]["key"] == "loc_hall"
+
+    def test_multi_step_path(self):
+        """多步路径"""
+        from src.domain.navigation import build_graph, find_path
+        graph = build_graph(_NAV_LOCATIONS)
+        path = find_path(graph, "loc_start", "loc_shed")
+        assert path is not None
+        assert path[-1]["key"] == "loc_shed"
+
+    def test_no_path_isolated(self):
+        """孤岛场景不可达"""
+        from src.domain.navigation import build_graph, find_path
+        graph = build_graph(_NAV_LOCATIONS)
+        path = find_path(graph, "loc_start", "loc_isolated")
+        assert path is None
+
+    def test_blocked_by_locked(self):
+        """被 locked 标签阻挡的场景不可达"""
+        from src.domain.navigation import build_graph, find_path
+        graph = build_graph(_NAV_LOCATIONS)
+        path = find_path(graph, "loc_start", "loc_library")
+        assert path is None
+
+    def test_blocked_override(self):
+        """覆盖 blocked_tags 后 locked 场景可达"""
+        from src.domain.navigation import build_graph, find_path
+        graph = build_graph(_NAV_LOCATIONS)
+        path = find_path(graph, "loc_start", "loc_library", blocked_tags=set())
+        assert path is not None
+        assert path[-1]["key"] == "loc_library"
+
+    def test_start_equals_end(self):
+        """起终点相同返回 None"""
+        from src.domain.navigation import build_graph, find_path
+        graph = build_graph(_NAV_LOCATIONS)
+        assert find_path(graph, "loc_start", "loc_start") is None
+
+    def test_nonexistent_start(self):
+        """不存在的起点返回 None"""
+        from src.domain.navigation import build_graph, find_path
+        graph = build_graph(_NAV_LOCATIONS)
+        assert find_path(graph, "nowhere", "loc_start") is None
+
+    def test_path_reverse(self):
+        """反向路径也应可达"""
+        from src.domain.navigation import build_graph, find_path
+        graph = build_graph(_NAV_LOCATIONS)
+        path = find_path(graph, "loc_shed", "loc_start")
+        assert path is not None
+        assert path[-1]["key"] == "loc_start"
+
+
+class TestIsBlocked:
+    def test_blocked_tag(self):
+        """blocked 标签返回 True"""
+        from src.domain.navigation import is_blocked
+        assert is_blocked({"tags": ["blocked"]})
+
+    def test_locked_tag(self):
+        """locked 标签返回 True"""
+        from src.domain.navigation import is_blocked
+        assert is_blocked({"tags": ["locked", "indoor"]})
+
+    def test_no_blocking_tags(self):
+        """无阻挡标签返回 False"""
+        from src.domain.navigation import is_blocked
+        assert not is_blocked({"tags": ["indoor", "dark"]})
+
+    def test_empty_tags(self):
+        """空标签返回 False"""
+        from src.domain.navigation import is_blocked
+        assert not is_blocked({"tags": []})
+
+    def test_none_node(self):
+        """None 节点返回 True"""
+        from src.domain.navigation import is_blocked
+        assert is_blocked(None)
+
+    def test_custom_blocked_set(self):
+        """自定义阻挡标签集"""
+        from src.domain.navigation import is_blocked
+        assert is_blocked({"tags": ["custom_block"]}, blocked_tags={"custom_block"})
+        assert not is_blocked({"tags": ["custom_block"]}, blocked_tags=set())

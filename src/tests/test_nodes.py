@@ -416,6 +416,133 @@ class TestCombatNode:
 
 
 # ====================================================================
+# Navigation Node (纯逻辑，无外部依赖)
+# ====================================================================
+# Navigation Node — 纯函数测试
+# ====================================================================
+
+class TestMatchExitDirection:
+    """_match_exit_direction — 方向性移动匹配"""
+
+    def test_match_direction(self):
+        """出口方向匹配"""
+        from src.nodes.rules.navigation_node import _match_exit_direction
+        exits = {"north": "loc_garden", "south": "loc_street", "Outside": "loc_street"}
+        result = _match_exit_direction("north", exits)
+        assert result == "loc_garden"
+
+    def test_match_direction_case_insensitive(self):
+        """不区分大小写"""
+        from src.nodes.rules.navigation_node import _match_exit_direction
+        exits = {"North": "loc_garden"}
+        result = _match_exit_direction("north", exits)
+        assert result == "loc_garden"
+
+    def test_match_direction_chinese(self):
+        """中文方向匹配"""
+        from src.nodes.rules.navigation_node import _match_exit_direction
+        exits = {"北边": "loc_garden", "南边": "loc_street"}
+        result = _match_exit_direction("北边", exits)
+        assert result == "loc_garden"
+
+    def test_no_match(self):
+        """不存在的方向返回 None"""
+        from src.nodes.rules.navigation_node import _match_exit_direction
+        result = _match_exit_direction("火星", {"north": "loc_garden"})
+        assert result is None
+
+
+class TestMatchAnyLocation:
+    """_match_any_location — 命名目的地匹配（不检查出口）"""
+
+    def test_match_location_key(self):
+        """直接匹配 location key"""
+        from src.nodes.rules.navigation_node import _match_any_location
+        keys = ["loc_garden", "loc_street", "loc_house"]
+        result = _match_any_location("loc_garden", keys, [])
+        assert result == "loc_garden"
+
+    def test_match_location_name(self):
+        """精确匹配场景名称"""
+        from src.nodes.rules.navigation_node import _match_any_location
+        keys = ["loc_garden", "loc_street"]
+        names = ["花园", "街道"]
+        result = _match_any_location("花园", keys, names)
+        assert result == "loc_garden"
+
+    def test_no_match(self):
+        """不存在的场景返回 None"""
+        from src.nodes.rules.navigation_node import _match_any_location
+        result = _match_any_location("火星", ["loc_garden"], ["花园"])
+        assert result is None
+
+    def test_fuzzy_name_contained_in_target(self):
+        """子串模糊：'金博尔宅的书房' → '金博尔宅-书房'"""
+        from src.nodes.rules.navigation_node import _match_any_location
+        keys = ["loc_kimball_house_study", "loc_neighborhood"]
+        names = ["金博尔宅-书房", "艾尔斯伯里大街"]
+        result = _match_any_location("金博尔宅的书房", keys, names)
+        assert result == "loc_kimball_house_study"
+
+    def test_fuzzy_name_target_in_name(self):
+        """子串模糊：'书房' → '金博尔宅-书房'"""
+        from src.nodes.rules.navigation_node import _match_any_location
+        keys = ["loc_kimball_house_study", "loc_neighborhood"]
+        names = ["金博尔宅-书房", "艾尔斯伯里大街"]
+        result = _match_any_location("书房", keys, names)
+        assert result == "loc_kimball_house_study"
+
+    def test_fuzzy_single_char_no_match(self):
+        """单字排除：'宅' 不触发模糊匹配"""
+        from src.nodes.rules.navigation_node import _match_any_location
+        keys = ["loc_kimball_house_study", "loc_neighborhood"]
+        names = ["金博尔宅-书房", "艾尔斯伯里大街"]
+        result = _match_any_location("宅", keys, names)
+        assert result is None
+
+    def test_fuzzy_prefers_shorter_name(self):
+        """多候选时选名称最短的"""
+        from src.nodes.rules.navigation_node import _match_any_location
+        keys = ["loc_a", "loc_b"]
+        names = ["长长长长的书房", "书房"]
+        result = _match_any_location("书房", keys, names)
+        assert result == "loc_b"
+
+    def test_empty_target(self):
+        """空 target 返回 None"""
+        from src.nodes.rules.navigation_node import _match_any_location
+        assert _match_any_location("", ["loc_a"], ["书房"]) is None
+
+
+class TestNavigationNode:
+    """导航节点测试（无 DB 降级场景）"""
+
+    @pytest.mark.asyncio
+    async def test_no_target(self):
+        """无目标时返回错误"""
+        from src.nodes.rules.navigation_node import navigation_node
+        state = _make_state(
+            intent={"type": "MOVE", "data": {"target": ""}},
+            current_location="loc_start",
+        )
+        result = await navigation_node(state)
+        assert result["resolution"]["success"] is False
+        assert "去哪里" in result["resolution"]["error"]
+
+    @pytest.mark.asyncio
+    async def test_no_current_location(self):
+        """无当前位置时返回错误"""
+        from src.nodes.rules.navigation_node import navigation_node
+        state = _make_state(
+            intent={"type": "MOVE", "data": {"target": "花园"}},
+            current_location="",
+        )
+        result = await navigation_node(state)
+        assert result["resolution"]["success"] is False
+        assert "在哪里" in result["resolution"]["error"]
+
+
+# ====================================================================
 # LLM Nodes (规则兜底模式)
 # ====================================================================
 

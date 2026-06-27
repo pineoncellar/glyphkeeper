@@ -58,7 +58,7 @@ class TestRouter:
 
     @pytest.mark.parametrize("intent_type,expected", [
         ("COMBAT_ACTION", "combat"),
-        ("MOVE", "investigate"),
+        ("MOVE", "navigation"),
         ("PHYSICAL_INTERACT", "investigate"),
         ("SOCIAL_INTERACT", "npc_dialogue"),
         ("META", "narrate"),
