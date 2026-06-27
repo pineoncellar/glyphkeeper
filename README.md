@@ -178,11 +178,14 @@ graph TB
 </tr>
 <tr><td>🔄</td><td colspan="2">角色卡系统，职业选择、属性骰点、技能与背景</td>
 <tr><td>🔄</td><td colspan="2">调查与线索系统</td></tr>
+<tr><td>⬜</td><td style="padding-left:2em;">├ 重复检定请求</td></tr>
+<tr><td>⬜</td><td style="padding-left:2em;">├ 无线索时的幻觉问题</td></tr>
 <tr><td>🔄</td><td colspan="2">NPC 对话系统</td></tr>
 <tr><td>✅</td><td colspan="2">CoC 7版技能检定</td></tr>
 <tr><td>⬜</td><td colspan="2">战斗轮与体力系统</td></tr>
 <tr><td>⬜</td><td colspan="2">理智与疯狂</td></tr>
 <tr><td>🔄</td><td colspan="2">场景切换与 location 更新</td></tr>
+<tr><td>⬜</td><td style="padding-left:2em;">├ 场景切换后的新场景描述</td></tr>
 <tr><td>⬜</td><td colspan="2">物品背包系统</td></tr>
 </table>
 
