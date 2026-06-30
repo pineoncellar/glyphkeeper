@@ -21,7 +21,7 @@ from src.state.game_state import GameState
 
 # ── 合并策略常量 ──
 
-APPEND_FIELDS = {"active_tags", "errors", "node_trace", "combatants"}
+APPEND_FIELDS = {"active_tags", "errors", "node_trace", "combatants", "pending_tier1_events", "pending_tier2_facts"}
 """需要追加而非替换的 list 字段"""
 
 DEEP_MERGE_FIELDS = {"intent", "resolution", "pending_dice"}

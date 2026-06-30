@@ -25,6 +25,23 @@ from src.memory.event_store import EventStore
 EventCallback = Callable[[dict], Coroutine[Any, Any, None]]
 
 
+# ── 内建事件类型常量 ──
+
+EVENT_PLAYER_INPUT = "PlayerInput"
+EVENT_COMBAT_ROUND = "CombatRound"
+EVENT_SKILL_CHECK = "SkillCheck"
+EVENT_NARRATIVE_OUTPUT = "NarrativeOutput"
+EVENT_CLUE_DISCOVERED = "ClueDiscovered"
+EVENT_WORLD_INITIALIZED = "WorldInitialized"
+
+# ── Tier 1 追赶事件类型 ──
+
+EVENT_TIER1_ITEM_STATE = "Tier1ItemStateChange"
+EVENT_TIER1_NPC_STATE = "Tier1NpcStateChange"
+EVENT_TIER1_LOCATION_TAG = "Tier1LocationTagChange"
+EVENT_TIER1_SCENE_TRANSITION = "Tier1SceneTransitionImplied"
+
+
 class EventLog:
     """
     事件溯源日志 — 高层事件管理接口。

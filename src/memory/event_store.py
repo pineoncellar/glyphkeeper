@@ -57,7 +57,7 @@ class EventStore:
         return self._conn
 
     async def _init_db(self):
-        """建 events 表，自动迁移旧版 UUID 列到 TEXT"""
+        """建 events 表，自动迁移旧版 UUID 列到 TEXT，追加 world_id 列"""
         conn = await self._get_conn()
 
         # 迁移旧版 UUID 列到 TEXT — DROP 会丢数据，ALTER 保平安
@@ -88,12 +88,28 @@ class EventStore:
                 version INTEGER NOT NULL,
                 timestamp TIMESTAMPTZ NOT NULL,
                 source_node TEXT DEFAULT '',
-                parent_event_id TEXT
+                parent_event_id TEXT,
+                world_id TEXT NOT NULL DEFAULT ''
             )
         """)
+
+        # 为已有表追加 world_id 列（幂等）
+        wcol = await conn.fetchval("""
+            SELECT data_type FROM information_schema.columns
+            WHERE table_name='events' AND column_name='world_id'
+        """)
+        if not wcol:
+            logger.info("EventStore: 追加 world_id 列...")
+            await conn.execute("ALTER TABLE events ADD COLUMN world_id TEXT NOT NULL DEFAULT ''")
+
+        # 复合索引：按世界+会话查事件
         await conn.execute("""
             CREATE INDEX IF NOT EXISTS idx_events_session
             ON events(session_id, version)
+        """)
+        await conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_events_world
+            ON events(world_id, session_id, version)
         """)
 
     async def close(self):
@@ -111,8 +127,12 @@ class EventStore:
         data: dict,
         source_node: str = "",
         parent_event_id: Optional[str] = None,
+        world_id: str = "",
     ) -> dict:
-        """追加一条新事件到事件流，自动递增 version"""
+        """追加一条新事件到事件流，自动递增 version
+
+        world_id 用于多世界隔离，为空时兼容旧数据。
+        """
         conn = await self._get_conn()
         version = await self.get_latest_version(session_id) + 1
         now = datetime.now(timezone.utc)
@@ -126,54 +146,83 @@ class EventStore:
             "timestamp": now.isoformat(),
             "source_node": source_node,
             "parent_event_id": parent_event_id,
+            "world_id": world_id,
         }
 
         await conn.execute(
-            """INSERT INTO events (id, session_id, type, data, version, timestamp, source_node, parent_event_id)
-               VALUES ($1, $2, $3, $4::jsonb, $5, $6::timestamptz, $7, $8)""",
+            """INSERT INTO events (id, session_id, type, data, version, timestamp, source_node, parent_event_id, world_id)
+               VALUES ($1, $2, $3, $4::jsonb, $5, $6::timestamptz, $7, $8, $9)""",
             event["id"], event["session_id"], event["type"],
             json.dumps(event["data"], ensure_ascii=False),
             event["version"], now,
             event["source_node"], event["parent_event_id"],
+            event["world_id"],
         )
         return event
 
     async def get_events(
-        self, session_id: str, since_version: int = 0
+        self, session_id: str, since_version: int = 0, world_id: str = "",
     ) -> list[dict]:
-        """获取指定会话的事件流（按 version 升序）"""
+        """获取指定会话的事件流（按 version 升序）
+
+        world_id 非空时过滤。
+        """
         conn = await self._get_conn()
-        rows = await conn.fetch(
-            "SELECT * FROM events WHERE session_id = $1 AND version > $2 ORDER BY version ASC",
-            session_id, since_version,
-        )
+        if world_id:
+            rows = await conn.fetch(
+                "SELECT * FROM events WHERE session_id = $1 AND version > $2 AND world_id = $3 ORDER BY version ASC",
+                session_id, since_version, world_id,
+            )
+        else:
+            rows = await conn.fetch(
+                "SELECT * FROM events WHERE session_id = $1 AND version > $2 ORDER BY version ASC",
+                session_id, since_version,
+            )
         return [self._row_to_event(row) for row in rows]
 
-    async def replay(self, session_id: str) -> AsyncGenerator[dict, None]:
+    async def replay(self, session_id: str, world_id: str = "") -> AsyncGenerator[dict, None]:
         """按 version 顺序回放事件（异步生成器）"""
         conn = await self._get_conn()
-        rows = await conn.fetch(
-            "SELECT * FROM events WHERE session_id = $1 ORDER BY version ASC",
-            session_id,
-        )
+        if world_id:
+            rows = await conn.fetch(
+                "SELECT * FROM events WHERE session_id = $1 AND world_id = $2 ORDER BY version ASC",
+                session_id, world_id,
+            )
+        else:
+            rows = await conn.fetch(
+                "SELECT * FROM events WHERE session_id = $1 ORDER BY version ASC",
+                session_id,
+            )
         for row in rows:
             yield self._row_to_event(row)
 
-    async def get_latest_version(self, session_id: str) -> int:
+    async def get_latest_version(self, session_id: str, world_id: str = "") -> int:
         """获取指定会话的最新 version 号"""
         conn = await self._get_conn()
-        val = await conn.fetchval(
-            "SELECT COALESCE(MAX(version), 0) FROM events WHERE session_id = $1",
-            session_id,
-        )
+        if world_id:
+            val = await conn.fetchval(
+                "SELECT COALESCE(MAX(version), 0) FROM events WHERE session_id = $1 AND world_id = $2",
+                session_id, world_id,
+            )
+        else:
+            val = await conn.fetchval(
+                "SELECT COALESCE(MAX(version), 0) FROM events WHERE session_id = $1",
+                session_id,
+            )
         return val or 0
 
-    async def get_event_count(self, session_id: str) -> int:
+    async def get_event_count(self, session_id: str, world_id: str = "") -> int:
         """获取指定会话的事件总数"""
         conn = await self._get_conn()
-        val = await conn.fetchval(
-            "SELECT COUNT(*) FROM events WHERE session_id = $1", session_id,
-        )
+        if world_id:
+            val = await conn.fetchval(
+                "SELECT COUNT(*) FROM events WHERE session_id = $1 AND world_id = $2",
+                session_id, world_id,
+            )
+        else:
+            val = await conn.fetchval(
+                "SELECT COUNT(*) FROM events WHERE session_id = $1", session_id,
+            )
         return val or 0
 
     # ------- 辅助方法 -------
@@ -189,17 +238,27 @@ class EventStore:
             "timestamp": row["timestamp"].isoformat() if hasattr(row["timestamp"], 'isoformat') else row["timestamp"],
             "source_node": row["source_node"],
             "parent_event_id": str(row["parent_event_id"]) if row["parent_event_id"] else None,
+            "world_id": str(row.get("world_id", "")),
         }
 
-    async def clear_session(self, session_id: str):
+    async def clear_session(self, session_id: str, world_id: str = ""):
         """清空指定会话的事件（仅用于测试）"""
         conn = await self._get_conn()
-        await conn.execute("DELETE FROM events WHERE session_id = $1", session_id)
+        if world_id:
+            await conn.execute(
+                "DELETE FROM events WHERE session_id = $1 AND world_id = $2",
+                session_id, world_id,
+            )
+        else:
+            await conn.execute("DELETE FROM events WHERE session_id = $1", session_id)
 
-    async def clear_all(self):
+    async def clear_all(self, world_id: str = ""):
         """清空所有事件（仅用于测试）"""
         conn = await self._get_conn()
-        await conn.execute("DELETE FROM events")
+        if world_id:
+            await conn.execute("DELETE FROM events WHERE world_id = $1", world_id)
+        else:
+            await conn.execute("DELETE FROM events")
 
 
 # ====================================================================

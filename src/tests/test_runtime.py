@@ -25,6 +25,7 @@ from src.runtime.dispatcher import (
     dispatch_with_retry,
     NodeDispatcher,
 )
+from src.adapter.protocol import InboundMessage
 from src.runtime.engine import (
     GraphEngine,
     ENGINE_MODE_FULL,
@@ -572,6 +573,16 @@ class TestInputScheduler:
         assert scheduler.active_session_count == 0
         assert scheduler.session_ids == []
 
+    # ── 辅助：从 session_id + text 构建 InboundMessage ──
+
+    def _msg(self, session_id: str, text: str) -> InboundMessage:
+        return InboundMessage(
+            type="player_input",
+            text=text,
+            session_id=session_id,
+            platform="test",
+        )
+
     @pytest.mark.asyncio
     async def test_submit_new_session(self):
         """初次提交创建新会话"""
@@ -579,7 +590,7 @@ class TestInputScheduler:
         engine = GraphEngine(keeper_graph)
         scheduler = InputScheduler(engine)
 
-        narrative = await scheduler.submit("test-session", "你好")
+        narrative = await scheduler.submit(self._msg("test-session", "你好"))
         assert isinstance(narrative, str)
         assert len(narrative) > 0
         assert scheduler.active_session_count == 1
@@ -592,10 +603,10 @@ class TestInputScheduler:
         engine = GraphEngine(keeper_graph)
         scheduler = InputScheduler(engine)
 
-        n1 = await scheduler.submit("session-1", "你好")
+        n1 = await scheduler.submit(self._msg("session-1", "你好"))
         assert len(n1) > 0
 
-        n2 = await scheduler.submit("session-1", "我搜索房间")
+        n2 = await scheduler.submit(self._msg("session-1", "我搜索房间"))
         assert len(n2) > 0
 
         slot = scheduler.get_session("session-1")
@@ -610,7 +621,7 @@ class TestInputScheduler:
         scheduler = InputScheduler(engine)
 
         # 第一轮：状态从无到有
-        await scheduler.submit("persist-test", "第一轮")
+        await scheduler.submit(self._msg("persist-test", "第一轮"))
         state1 = scheduler.get_session_state("persist-test")
         assert state1 is not None
         assert state1["beat_counter"] >= 1
@@ -618,7 +629,7 @@ class TestInputScheduler:
         first_narrative = state1.get("narrative", "")
 
         # 第二轮：beat_counter 应递增，narrative 可能保留
-        await scheduler.submit("persist-test", "第二轮")
+        await scheduler.submit(self._msg("persist-test", "第二轮"))
         state2 = scheduler.get_session_state("persist-test")
         assert state2 is not None
         assert state2["beat_counter"] >= state1["beat_counter"] + 1
@@ -626,7 +637,7 @@ class TestInputScheduler:
         assert state2["session_id"] == "persist-test"
 
         # 第三轮：进一步累积
-        await scheduler.submit("persist-test", "第三轮")
+        await scheduler.submit(self._msg("persist-test", "第三轮"))
         state3 = scheduler.get_session_state("persist-test")
         assert state3 is not None
         assert state3["beat_counter"] >= state2["beat_counter"] + 1
@@ -638,8 +649,8 @@ class TestInputScheduler:
         engine = GraphEngine(keeper_graph)
         scheduler = InputScheduler(engine)
 
-        n1 = await scheduler.submit("session-a", "你好")
-        n2 = await scheduler.submit("session-b", "你好")
+        n1 = await scheduler.submit(self._msg("session-a", "你好"))
+        n2 = await scheduler.submit(self._msg("session-b", "你好"))
 
         assert scheduler.active_session_count == 2
         assert scheduler.get_session("session-a") is not None
@@ -652,7 +663,7 @@ class TestInputScheduler:
         engine = GraphEngine(keeper_graph)
         scheduler = InputScheduler(engine)
 
-        await scheduler.submit("test", "你好")
+        await scheduler.submit(self._msg("test", "你好"))
         state = scheduler.get_session_state("test")
         assert state is not None
         assert state["session_id"] == "test"
@@ -665,7 +676,7 @@ class TestInputScheduler:
         engine = GraphEngine(keeper_graph)
         scheduler = InputScheduler(engine)
 
-        await scheduler.submit("test", "你好")
+        await scheduler.submit(self._msg("test", "你好"))
         assert scheduler.active_session_count == 1
 
         removed = await scheduler.remove_session("test")
@@ -683,9 +694,9 @@ class TestInputScheduler:
         engine = GraphEngine(keeper_graph)
         scheduler = InputScheduler(engine)
 
-        await scheduler.submit("a", "你好")
-        await scheduler.submit("b", "你好")
-        await scheduler.submit("c", "你好")
+        await scheduler.submit(self._msg("a", "你好"))
+        await scheduler.submit(self._msg("b", "你好"))
+        await scheduler.submit(self._msg("c", "你好"))
 
         assert scheduler.active_session_count == 3
         await scheduler.clear_all_sessions()
@@ -698,8 +709,8 @@ class TestInputScheduler:
         engine = GraphEngine(keeper_graph)
         scheduler = InputScheduler(engine)
 
-        await scheduler.submit("a", "你好")
-        await scheduler.submit("b", "你好")
+        await scheduler.submit(self._msg("a", "你好"))
+        await scheduler.submit(self._msg("b", "你好"))
 
         stats = scheduler.get_stats()
         assert stats["total_sessions"] == 2
@@ -713,7 +724,7 @@ class TestInputScheduler:
         engine = GraphEngine(keeper_graph)
         scheduler = InputScheduler(engine)
 
-        result = await scheduler.submit_with_queue("test", "你好")
+        result = await scheduler.submit_with_queue(self._msg("test", "你好"))
         assert isinstance(result, str)
         assert scheduler.active_session_count == 1
 
@@ -725,7 +736,7 @@ class TestInputScheduler:
         scheduler = InputScheduler(engine)
 
         async def submit_and_check(sid, text):
-            n = await scheduler.submit(sid, text)
+            n = await scheduler.submit(self._msg(sid, text))
             assert isinstance(n, str)
             assert len(n) > 0
             return n
@@ -745,7 +756,7 @@ class TestInputScheduler:
         scheduler = InputScheduler(engine)
 
         # 未手动创建，直接提交
-        narrative = await scheduler.submit("auto-create", "测试")
+        narrative = await scheduler.submit(self._msg("auto-create", "测试"))
         assert scheduler.get_session("auto-create") is not None
 
     @pytest.mark.asyncio
@@ -757,7 +768,7 @@ class TestInputScheduler:
         # 使用极短的 timeout 以便测试清理
         scheduler = InputScheduler(engine, session_timeout=0.0)
 
-        await scheduler.submit("expired-session", "你好")
+        await scheduler.submit(self._msg("expired-session", "你好"))
         assert scheduler.active_session_count == 1
 
         # 手动触发清理
@@ -784,6 +795,6 @@ class TestInputScheduler:
         engine = GraphEngine(keeper_graph)
         scheduler = InputScheduler(engine)
 
-        await scheduler.submit("test", "你好")
+        await scheduler.submit(self._msg("test", "你好"))
         await scheduler.close()
         assert scheduler.active_session_count == 0

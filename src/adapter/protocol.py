@@ -62,34 +62,43 @@ class InboundMessage:
         session_id: 会话 ID（可选，由 adapter 自动填充）
         data:       附加结构化数据
         raw:        原始消息（协议无关的原始数据）
+        platform:   消息来源平台
+        channel_id: 群号 / 频道 ID
+        user_id:    用户标识
+        world_id:   世界标识（决定 LightRAG workspace + PG schema）
     """
     type: str
     text: str = ""
     session_id: str = ""
     data: dict[str, Any] = field(default_factory=dict)
     raw: Any = None
+    platform: str = "cli"
+    channel_id: str = ""
+    user_id: str = ""
+    world_id: str = ""
 
     # ── 便捷工厂 ──
 
     @classmethod
-    def player_input(cls, text: str, session_id: str = "") -> "InboundMessage":
+    def player_input(cls, text: str, session_id: str = "", **routing) -> "InboundMessage":
         """创建玩家输入消息"""
-        return cls(type=MessageType.PLAYER_INPUT, text=text, session_id=session_id)
+        return cls(type=MessageType.PLAYER_INPUT, text=text, session_id=session_id, **routing)
 
     @classmethod
-    def dice_result(cls, value: int, session_id: str = "") -> "InboundMessage":
+    def dice_result(cls, value: int, session_id: str = "", **routing) -> "InboundMessage":
         """创建掷骰结果消息"""
         return cls(
             type=MessageType.DICE_RESULT,
             text=str(value),
             session_id=session_id,
             data={"value": value},
+            **routing,
         )
 
     @classmethod
-    def system_cmd(cls, command: str, session_id: str = "") -> "InboundMessage":
+    def system_cmd(cls, command: str, session_id: str = "", **routing) -> "InboundMessage":
         """创建系统命令消息"""
-        return cls(type=MessageType.SYSTEM_CMD, text=command, session_id=session_id)
+        return cls(type=MessageType.SYSTEM_CMD, text=command, session_id=session_id, **routing)
 
     @classmethod
     def from_dict(cls, d: dict) -> "InboundMessage":
@@ -100,6 +109,10 @@ class InboundMessage:
             session_id=d.get("session_id", ""),
             data=d.get("data", {}),
             raw=d,
+            platform=d.get("platform", "cli"),
+            channel_id=d.get("channel_id", ""),
+            user_id=d.get("user_id", ""),
+            world_id=d.get("world_id", ""),
         )
 
     def to_dict(self) -> dict:
@@ -123,6 +136,10 @@ class OutboundMessage:
         game_phase: 当前游戏阶段
         data:       附加结构化数据
         timestamp:  消息时间戳
+        platform:   目标平台
+        channel_id: 目标群号 / 频道 ID
+        user_id:    目标用户
+        world_id:   世界标识
     """
     type: str
     text: str = ""
@@ -130,17 +147,22 @@ class OutboundMessage:
     game_phase: str = ""
     data: dict[str, Any] = field(default_factory=dict)
     timestamp: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+    platform: str = "cli"
+    channel_id: str = ""
+    user_id: str = ""
+    world_id: str = ""
 
     # ── 便捷工厂 ──
 
     @classmethod
-    def narrative(cls, text: str, session_id: str = "", game_phase: str = "") -> "OutboundMessage":
+    def narrative(cls, text: str, session_id: str = "", game_phase: str = "", **routing) -> "OutboundMessage":
         """创建叙事消息"""
         return cls(
             type=MessageType.NARRATIVE,
             text=text,
             session_id=session_id,
             game_phase=game_phase,
+            **routing,
         )
 
     @classmethod
@@ -150,6 +172,7 @@ class OutboundMessage:
         skill_name: str = "",
         difficulty: str = "",
         session_id: str = "",
+        **routing,
     ) -> "OutboundMessage":
         """创建掷骰请求消息"""
         return cls(
@@ -160,6 +183,7 @@ class OutboundMessage:
                 "skill_name": skill_name,
                 "difficulty": difficulty,
             },
+            **routing,
         )
 
     @classmethod
@@ -168,6 +192,7 @@ class OutboundMessage:
         text: str,
         level: str = "info",
         session_id: str = "",
+        **routing,
     ) -> "OutboundMessage":
         """创建系统消息"""
         return cls(
@@ -175,26 +200,29 @@ class OutboundMessage:
             text=text,
             session_id=session_id,
             data={"level": level},
+            **routing,
         )
 
     @classmethod
-    def session_info(cls, state: dict, session_id: str = "") -> "OutboundMessage":
+    def session_info(cls, state: dict, session_id: str = "", **routing) -> "OutboundMessage":
         """创建会话状态消息"""
         return cls(
             type=MessageType.SESSION_INFO,
             text="",
             session_id=session_id,
             data=state,
+            **routing,
         )
 
     @classmethod
-    def error(cls, message: str, session_id: str = "") -> "OutboundMessage":
+    def error(cls, message: str, session_id: str = "", **routing) -> "OutboundMessage":
         """创建错误消息"""
         return cls(
             type=MessageType.SYSTEM_MSG,
             text=message,
             session_id=session_id,
             data={"level": "error"},
+            **routing,
         )
 
     def to_dict(self) -> dict:

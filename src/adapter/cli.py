@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import sys
 from typing import Any, Optional
+import os
 
 from src.tools import get_logger
 from src.runtime.engine import GraphEngine
@@ -29,6 +30,7 @@ from src.state.snapshot import SnapshotManager
 from src.workers.memorizer_worker import MemorizerWorker
 from src.workers.world_summarizer import WorldSummarizer
 from src.workers.background_sync import BackgroundSync
+from src.tools.config import get_settings
 
 logger = get_logger(__name__)
 
@@ -89,14 +91,20 @@ class CliAdapter(AbstractAdapter):
     async def parse(self, raw_input: Any) -> InboundMessage:
         """将终端原始输入解析为 InboundMessage"""
         text = str(raw_input).strip() if raw_input else ""
+        routing = dict(
+            platform="cli",
+            channel_id="",
+            user_id=os.getlogin(),
+            world_id=get_settings().project.active_world,
+        )
 
         if not text:
-            return InboundMessage(type="", text="", session_id=self.session_id)
+            return InboundMessage(type="", text="", session_id=self.session_id, **routing)
 
         if text.startswith("/"):
-            return InboundMessage.system_cmd(text, self.session_id)
+            return InboundMessage.system_cmd(text, self.session_id, **routing)
 
-        return InboundMessage.player_input(text, self.session_id)
+        return InboundMessage.player_input(text, self.session_id, **routing)
 
     async def send(self, message: OutboundMessage):
         """将 OutboundMessage 输出到终端"""
@@ -696,7 +704,14 @@ class CliAdapter(AbstractAdapter):
         # 重新提交到引擎（带 roll_value）
         try:
             self._turn_count += 1
-            narrative = await self._scheduler.submit(session_id, state.get("player_input", ""))
+            replay_msg = InboundMessage(
+                type=MessageType.PLAYER_INPUT,
+                text=state.get("player_input", ""),
+                session_id=session_id,
+                platform="cli",
+                world_id=state.get("world_id", "test"),
+            )
+            narrative = await self._scheduler.submit(replay_msg)
             if narrative:
                 print()
                 print(_color("━" * 50, _DIM))

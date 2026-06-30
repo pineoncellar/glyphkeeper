@@ -20,6 +20,7 @@ from src.state.game_state import GameState, create_initial_state
 from src.state.event_log import EventLog
 from src.state.snapshot import SnapshotManager
 from src.state.world_state import WorldManager
+from src.state.state_validator import StateValidator
 from src.memory.event_store import EventStore, create_event_store
 from src.runtime.context import ExecutionContext
 from src.runtime.dispatcher import (
@@ -57,6 +58,9 @@ _RUNTIME_FIELDS: dict[str, object] = {
     "archivist_result": None,     # skill_node 写（有线索时）
     "entity_name_map": {},        # db_lookup_node 写（NPC key→显示名映射，供消歧）
     "_llm_trace": None,           # narrator_node 写
+    "narrative_output": "",       # narrator_node 写（给 state_extractor 消费）
+    "pending_tier1_events": [],   # state_extractor 写
+    "pending_tier2_facts": [],    # state_extractor 写
 }
 """
 _prepare_state 用此清单清除上一轮遗留在 GameState 中的运行时数据。
@@ -149,6 +153,7 @@ class GraphEngine:
         previous_state: Optional[GameState] = None,
         context: Optional[ExecutionContext] = None,
         auto_snapshot: bool = False,
+        world_id: str = "",
     ) -> tuple[str, GameState]:
         """执行一次完整的 Graph 遍历
 
@@ -158,6 +163,7 @@ class GraphEngine:
             previous_state: 可选的上一轮状态（用于连续对话）
             context:        执行上下文（None 则自动创建）
             auto_snapshot:  是否在执行后自动创建快照
+            world_id:       世界标识（覆盖 state 中的 world_id）
 
         返回:
             (narrative, new_state): 叙事文本与更新后的游戏状态
@@ -170,6 +176,7 @@ class GraphEngine:
             player_input=player_input,
             session_id=session_id,
             previous_state=previous_state,
+            world_id=world_id,
         )
 
         # ── 执行前：注入场景上下文（如果 WorldManager 可用且有当前位置） ──
@@ -263,6 +270,18 @@ class GraphEngine:
         if self._event_log:
             await self._record_graph_event(result, ctx)
 
+        # 状态追赶：异步执行 Tier 1 写入 + Tier 2 索引，不阻塞返回
+        tier1_events = result.get("pending_tier1_events", [])
+        tier2_facts = result.get("pending_tier2_facts", [])
+        if tier1_events or tier2_facts:
+            asyncio.create_task(self._async_state_catchup(
+                tier1_events=tier1_events,
+                tier2_facts=tier2_facts,
+                session_id=state.get("session_id", ""),
+                world_id=state.get("world_id", ""),
+                current_state=result,
+            ))
+
         return narrative, result
 
     # ── full 模式 ──
@@ -344,6 +363,7 @@ class GraphEngine:
         player_input: str,
         session_id: str,
         previous_state: Optional[GameState] = None,
+        world_id: str = "",
     ) -> GameState:
         """构建或复用 GameState，同时清除上一轮的运行时字段"""
         if previous_state:
@@ -357,6 +377,11 @@ class GraphEngine:
             )
             state["player_input"] = player_input
             state["beat_counter"] = 1
+
+        # 如果调用方传入了 world_id，覆盖 state 中的值（用于多世界路由）
+        if world_id:
+            state["world_id"] = world_id
+
         # 重置运行时字段，防止跨轮幽灵数据残留
         for field, default in _RUNTIME_FIELDS.items():
             state[field] = default
@@ -495,6 +520,74 @@ class GraphEngine:
 
         except Exception as e:
             logger.warning(f"Engine: Graph 事件记录失败: {e}")
+
+    # ── 异步状态追赶 ──
+
+    async def _async_state_catchup(
+        self,
+        tier1_events: list[dict],
+        tier2_facts: list[str],
+        session_id: str,
+        world_id: str,
+        current_state: GameState,
+    ):
+        """后台异步执行状态追赶
+
+        先验证 Tier 1 事件 → 通过后写入 EventStore + Reducer。
+        再异步写入 Tier 2 事实到 LightRAG（最终一致性，失败不重试）。
+
+        注意：Tier 1 事件应用到的是 current_state 的快照，
+        current_state 是 Graph 执行完毕时的最终状态。
+        Validator 校验失败的事件静默丢弃，不阻塞后续事件处理。
+        """
+        validator = StateValidator()
+
+        # Tier 1：验证后通过 EventLog 写入 EventStore + Reducer
+        for event in tier1_events:
+            try:
+                result = await validator.validate(event, current_state)
+                if result.passed and result.corrected_event and self._event_log:
+                    event_type = event.get("event_type", "")
+                    await self._event_log.record_and_apply(
+                        current=current_state,
+                        patch=result.corrected_event,
+                        event_type=f"Tier1{event_type}",
+                        source_node="state_extractor_node",
+                        extra_data={
+                            "original_event": event,
+                        },
+                    )
+                    logger.debug(
+                        f"StateCatchup: Tier1 {event_type} 已写入 "
+                        f"session={session_id[:8]}"
+                    )
+                elif not result.passed:
+                    logger.debug(
+                        f"StateCatchup: Tier1 事件被拦截: {result.reason} "
+                        f"event={event}"
+                    )
+            except Exception as e:
+                logger.warning(
+                    f"StateCatchup: Tier1 处理异常（跳过）: {e}"
+                )
+
+        # Tier 2：异步写入 LightRAG（最终一致性，不阻塞玩家下一轮输入）
+        if tier2_facts and world_id:
+            try:
+                from src.memory.vector_store import VectorStore
+                vs = await VectorStore.get_instance(
+                    domain="world",
+                    world_id=world_id,
+                )
+                await vs.insert(tier2_facts, source_type="state_extracted")
+                logger.info(
+                    f"StateCatchup: {len(tier2_facts)} 条 Tier 2 事实 "
+                    f"已写入 LightRAG world={world_id}"
+                )
+            except Exception as e:
+                logger.warning(
+                    f"StateCatchup: Tier 2 LightRAG 写入失败（可忽略）: {e}"
+                )
 
     @staticmethod
     def _add_error(state: GameState, error_msg: str):

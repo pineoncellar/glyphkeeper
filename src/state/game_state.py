@@ -23,6 +23,12 @@ class GameState(TypedDict):
     # ── 会话标识 ──
     session_id: str                     # 当前游戏会话 UUID
 
+    # ── 多通道路由 ──
+    platform: str                       # 消息来源平台: cli / onebot / web
+    channel_id: str                     # 群号 / 频道 ID
+    user_id: str                        # 用户标识
+    world_id: str                       # 世界标识（决定 LightRAG workspace + PG schema）
+
     # ── 会话元数据 ──
     scenario_name: str                  # 当前模组/剧本名称
     status: str                         # 会话状态: active / paused / completed
@@ -69,6 +75,11 @@ class GameState(TypedDict):
     scene_npcs: list[str]               # 当前场景中的 NPC key 列表
     attention_focus: Optional[dict]     # {recent_actors, recent_objects} LIFO 焦点栈
 
+    # ── 状态审计缓冲区 ──
+    narrative_output: str               # narrator_node 最终纯文本（给 state_extractor 消费）
+    pending_tier1_events: list[dict]    # state_extractor 提取的 Tier 1 待处理事件
+    pending_tier2_facts: list[str]      # state_extractor 提取的 Tier 2 待写入事实
+
     # ── 运行时元数据 ──
     errors: list[str]                   # 执行过程中的错误记录
     node_trace: list[dict]              # 节点执行追踪日志
@@ -80,12 +91,20 @@ def create_initial_state(
     session_id: str,
     scenario_name: str = "",
     time_slot: str = "MORNING",
+    platform: str = "cli",
+    channel_id: str = "",
+    user_id: str = "",
+    world_id: str = "",
 ) -> GameState:
     """构建初始游戏状态"""
     from datetime import datetime, timezone
 
     return {
         "session_id": session_id,
+        "platform": platform,
+        "channel_id": channel_id,
+        "user_id": user_id,
+        "world_id": world_id,
         "scenario_name": scenario_name,
         "status": "active",
         "created_at": datetime.now(timezone.utc).isoformat(),
@@ -96,6 +115,7 @@ def create_initial_state(
         "resolution": None,
         "world_context": "",
         "narrative": "",
+        "narrative_output": "",
         "npc_dialogue": "",
         "game_phase": "exploration",
         "character": None,
@@ -110,6 +130,8 @@ def create_initial_state(
         "resolved_targets": None,
         "scene_npcs": [],
         "attention_focus": None,
+        "pending_tier1_events": [],
+        "pending_tier2_facts": [],
         "errors": [],
         "node_trace": [],
     }

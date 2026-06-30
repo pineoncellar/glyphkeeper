@@ -15,12 +15,15 @@ import time
 from collections import OrderedDict
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Any, Optional
+from typing import Any, Optional, TYPE_CHECKING
 
-from src.state.game_state import GameState
+from src.state.game_state import GameState, create_initial_state
 from src.runtime.engine import GraphEngine
 from src.runtime.context import ExecutionContext
 from src.tools import get_logger
+
+if TYPE_CHECKING:
+    from src.adapter.protocol import InboundMessage
 
 logger = get_logger(__name__)
 
@@ -28,6 +31,16 @@ logger = get_logger(__name__)
 # ====================================================================
 # 内部数据类
 # ====================================================================
+
+
+# ── 会话键类型 ──
+# (platform, channel_id, world_id, session_id) → SessionSlot
+SessionKey = tuple[str, str, str, str]
+
+
+def _make_key(msg: InboundMessage) -> SessionKey:
+    """从入站消息构造会话键"""
+    return (msg.platform, msg.channel_id, msg.world_id, msg.session_id)
 
 
 @dataclass
@@ -41,11 +54,16 @@ class SessionSlot:
     created:  会话创建时间
     last_active: 最后活动时间
     turn_count:  已执行的轮次
+    platform/channel_id/user_id/world_id: 多通道路由元数据
     """
 
     session_id: str
     state: GameState
     ctx: ExecutionContext
+    platform: str = "cli"
+    channel_id: str = ""
+    user_id: str = ""
+    world_id: str = ""
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     queue: asyncio.Queue = field(default_factory=asyncio.Queue)
     created: float = field(default_factory=time.time)
@@ -89,7 +107,7 @@ class InputScheduler:
         self.engine = engine
         self.session_timeout = session_timeout
         self.cleanup_interval = cleanup_interval
-        self._sessions: dict[str, SessionSlot] = OrderedDict()
+        self._sessions: dict[SessionKey, SessionSlot] = OrderedDict()
         self._lock = asyncio.Lock()  # 保护 _sessions 的并发访问
         self._cleanup_task: Optional[asyncio.Task] = None
 
@@ -97,8 +115,7 @@ class InputScheduler:
 
     async def submit(
         self,
-        session_id: str,
-        player_input: str,
+        msg: InboundMessage,
         auto_snapshot: bool = False,
     ) -> str:
         """提交玩家输入到指定会话
@@ -107,34 +124,35 @@ class InputScheduler:
         同一会话的输入串行处理（等待前一个输入完成）。
 
         Args:
-            session_id:    会话 ID
-            player_input:  玩家输入文本
+            msg:          入站消息（含 routing 元数据）
             auto_snapshot: 是否在处理后自动创建快照
 
         Returns:
             narrative: 叙事文本
         """
-        slot = await self._get_or_create_session(session_id)
+        slot = await self._get_or_create_session(msg)
+        player_input = msg.text
 
         async with slot.lock:
             slot.last_active = time.time()
             slot.turn_count += 1
 
-            # 创建执行上下文
-            ctx = ExecutionContext(session_id=session_id)
+            ctx = ExecutionContext(session_id=slot.session_id)
 
             logger.info(
-                f"Scheduler.submit: session={session_id[:8]} "
+                f"Scheduler.submit: session={slot.session_id[:8]} "
+                f"world={slot.world_id} "
                 f"turn={slot.turn_count} "
                 f"input={player_input[:40]}..."
             )
 
             narrative, new_state = await self.engine.run(
                 player_input=player_input,
-                session_id=session_id,
+                session_id=slot.session_id,
                 previous_state=slot.state,
                 context=ctx,
                 auto_snapshot=auto_snapshot,
+                world_id=slot.world_id,
             )
 
             # 保存返回的新状态，保证多轮对话的 state 持续累积
@@ -146,8 +164,7 @@ class InputScheduler:
 
     async def submit_with_queue(
         self,
-        session_id: str,
-        player_input: str,
+        msg: InboundMessage,
     ) -> str:
         """带队列的提交 — 当会话忙时将输入排入队列
 
@@ -157,19 +174,19 @@ class InputScheduler:
         适用于 HTTP 接口（不需要实时等待回复的场景）。
 
         Args:
-            session_id:    会话 ID
-            player_input:  玩家输入文本
+            msg:  入站消息（含 routing 元数据）
 
         Returns:
             队列接受确认信息
         """
-        slot = await self._get_or_create_session(session_id)
+        slot = await self._get_or_create_session(msg)
+        player_input = msg.text
 
         if slot.lock.locked():
             # 会话忙，排入队列
             await slot.queue.put(player_input)
             logger.debug(
-                f"Scheduler.submit_with_queue: session={session_id[:8]} "
+                f"Scheduler.submit_with_queue: session={slot.session_id[:8]} "
                 f"已入队 (queue_size≈{slot.queue.qsize()})"
             )
             return f"（输入已排入队列，位置 #{slot.queue.qsize()}）"
@@ -178,12 +195,13 @@ class InputScheduler:
             slot.last_active = time.time()
             slot.turn_count += 1
 
-            ctx = ExecutionContext(session_id=session_id)
+            ctx = ExecutionContext(session_id=slot.session_id)
             narrative, new_state = await self.engine.run(
                 player_input=player_input,
-                session_id=session_id,
+                session_id=slot.session_id,
                 previous_state=slot.state,
                 context=ctx,
+                world_id=slot.world_id,
             )
             slot.state = new_state
             slot.state["player_input"] = player_input
@@ -214,6 +232,7 @@ class InputScheduler:
                     session_id=slot.session_id,
                     previous_state=slot.state,
                     context=ctx,
+                    world_id=slot.world_id,
                 )
                 slot.state = new_state
                 slot.state["player_input"] = player_input
@@ -223,44 +242,78 @@ class InputScheduler:
 
     # ── 会话管理 ──
 
-    async def _get_or_create_session(self, session_id: str) -> SessionSlot:
+    async def _get_or_create_session(self, msg: InboundMessage) -> SessionSlot:
         """获取现有会话，或创建新会话"""
+        key = _make_key(msg)
         async with self._lock:
-            if session_id in self._sessions:
-                return self._sessions[session_id]
+            if key in self._sessions:
+                return self._sessions[key]
 
             # 创建新会话
-            from src.state.game_state import create_initial_state
-
-            state = create_initial_state(session_id=session_id)
-            slot = SessionSlot(
-                session_id=session_id,
-                state=state,
-                ctx=ExecutionContext(session_id=session_id),
+            state = create_initial_state(
+                session_id=msg.session_id,
+                platform=msg.platform,
+                channel_id=msg.channel_id,
+                user_id=msg.user_id,
+                world_id=msg.world_id,
             )
-            self._sessions[session_id] = slot
+            slot = SessionSlot(
+                session_id=msg.session_id,
+                state=state,
+                ctx=ExecutionContext(session_id=msg.session_id),
+                platform=msg.platform,
+                channel_id=msg.channel_id,
+                user_id=msg.user_id,
+                world_id=msg.world_id,
+            )
+            self._sessions[key] = slot
             logger.info(
-                f"Scheduler: 创建新会话 session={session_id[:8]} "
+                f"Scheduler: 创建新会话 session={msg.session_id[:8]} "
+                f"world={msg.world_id} "
+                f"channel={msg.channel_id} "
                 f"total_sessions={len(self._sessions)}"
             )
             return slot
 
+    def _key_for_session(self, session_id: str) -> Optional[SessionKey]:
+        """通过 session_id 查找对应的会话键（遍历，用于向后兼容的 API）"""
+        for key in self._sessions:
+            if key[3] == session_id:
+                return key
+        return None
+
     def get_session(self, session_id: str) -> Optional[SessionSlot]:
         """查询会话信息"""
-        return self._sessions.get(session_id)
+        key = self._key_for_session(session_id)
+        return self._sessions.get(key) if key else None
 
     def get_session_state(self, session_id: str) -> Optional[GameState]:
         """获取会话的 GameState"""
-        slot = self._sessions.get(session_id)
+        slot = self.get_session(session_id)
         return slot.state if slot else None
 
-    async def restore_session_state(self, session_id: str, state: GameState) -> None:
+    async def restore_session_state(
+        self,
+        session_id: str,
+        state: GameState,
+        platform: str = "cli",
+        channel_id: str = "",
+        world_id: str = "",
+    ) -> None:
         """恢复会话状态（用于读档）
 
         直接替换指定会话的 GameState，不触发引擎执行。
         如果会话不存在则自动创建。
         """
-        slot = await self._get_or_create_session(session_id)
+        msg = InboundMessage(
+            type="",
+            text="",
+            session_id=session_id,
+            platform=platform,
+            channel_id=channel_id,
+            world_id=world_id,
+        )
+        slot = await self._get_or_create_session(msg)
         async with slot.lock:
             slot.state = state
             slot.last_active = time.time()
@@ -268,9 +321,10 @@ class InputScheduler:
 
     async def remove_session(self, session_id: str) -> bool:
         """删除一个会话及其状态"""
+        key = self._key_for_session(session_id)
         async with self._lock:
-            if session_id in self._sessions:
-                del self._sessions[session_id]
+            if key and key in self._sessions:
+                del self._sessions[key]
                 logger.info(
                     f"Scheduler: 删除会话 session={session_id[:8]} "
                     f"remaining={len(self._sessions)}"
@@ -295,7 +349,14 @@ class InputScheduler:
     @property
     def session_ids(self) -> list[str]:
         """所有会话 ID 列表"""
-        return list(self._sessions.keys())
+        return [k[3] for k in self._sessions.keys()]
+
+    def get_sessions_by_world(self, world_id: str) -> list[SessionSlot]:
+        """按世界查询所有会话"""
+        return [
+            s for k, s in self._sessions.items()
+            if k[2] == world_id
+        ]
 
     def get_stats(self) -> dict:
         """获取调度器统计信息"""
@@ -353,8 +414,8 @@ class InputScheduler:
         """清理过期会话"""
         now = time.time()
         expired = [
-            sid
-            for sid, slot in self._sessions.items()
+            key
+            for key, slot in self._sessions.items()
             if (now - slot.last_active) > self.session_timeout
         ]
 
@@ -362,9 +423,9 @@ class InputScheduler:
             return
 
         async with self._lock:
-            for sid in expired:
-                if sid in self._sessions:
-                    del self._sessions[sid]
+            for key in expired:
+                if key in self._sessions:
+                    del self._sessions[key]
 
         logger.info(
             f"Scheduler: 清理了 {len(expired)} 个过期会话 "

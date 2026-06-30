@@ -348,7 +348,11 @@ async def narrate_node(state: GameState) -> dict:
             narrative = _template_narrative(state)
         logger.info(f"narrator_node[TEMPLATE]: {len(narrative)} chars")
 
-    return {"narrative": narrative, "_llm_trace": result.to_trace() if result.is_ok else None}
+    return {
+        "narrative": narrative,
+        "narrative_output": narrative,
+        "_llm_trace": result.to_trace() if result.is_ok else None,
+    }
 
 
 # ====================================================================

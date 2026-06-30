@@ -88,6 +88,7 @@ class VectorStore:
         self.domain = domain
         self.rag: Optional[LightRAG] = None
         self._initialized = False
+        self._world_id_override: str = ""
 
     # ── 单例管理 ──
 
@@ -97,19 +98,26 @@ class VectorStore:
         domain: str = "world",
         llm_tier: str = "standard",
         force_reinit: bool = False,
+        world_id: str = "",
     ) -> "VectorStore":
         """获取指定 domain 的 VectorStore 实例（单例）
 
         参数:
-            domain: 数据域 ("world" / "rules")
-            llm_tier: LLM 模型层级
+            domain:     数据域 ("world" / "rules")
+            llm_tier:   LLM 模型层级
             force_reinit: 强制重新初始化
+            world_id:   世界标识（覆盖 active_world，仅 domain="world" 时生效）
         """
+        # 多世界缓存键：domain + world_id，确保不同世界隔离
+        cache_key = f"{domain}:{world_id}" if world_id and domain == "world" else domain
+
         async with cls._lock:
-            if domain not in cls._instances or force_reinit:
-                cls._instances[domain] = cls(domain)
-                await cls._instances[domain]._initialize(llm_tier)
-            return cls._instances[domain]
+            if cache_key not in cls._instances or force_reinit:
+                instance = cls(domain)
+                instance._world_id_override = world_id
+                await instance._initialize(llm_tier)
+                cls._instances[cache_key] = instance
+            return cls._instances[cache_key]
 
     @classmethod
     async def close_all(cls):
@@ -132,9 +140,10 @@ class VectorStore:
             working_dir = PROJECT_ROOT / "data" / "rules"
             workspace = "rules"
         else:
-            active_world = settings.project.active_world
+            # 优先使用 world_id_override，兜底 active_world
+            world_name = self._world_id_override or settings.project.active_world
             working_dir = PROJECT_ROOT / "data" / "worlds"
-            workspace = active_world
+            workspace = world_name
 
         working_dir.mkdir(parents=True, exist_ok=True)
 

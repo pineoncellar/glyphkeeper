@@ -102,16 +102,17 @@ class AbstractAdapter(ABC):
         self._ensure_engine()
 
         # 确保 session_id 传递
-        session_id = msg.session_id or self.session_id
+        if not msg.session_id:
+            msg.session_id = self.session_id
 
         if msg.type == MessageType.SYSTEM_CMD:
-            return await self._handle_system_cmd(msg.text, session_id)
+            return await self._handle_system_cmd(msg.text, msg.session_id, msg)
 
         if msg.type == MessageType.DICE_RESULT:
-            return await self._handle_dice_result(msg, session_id)
+            return await self._handle_dice_result(msg, msg.session_id)
 
         # PLAYER_INPUT 或未知类型 → 送入引擎
-        return await self._handle_player_input(msg.text, session_id)
+        return await self._handle_player_input(msg.text, msg.session_id, msg)
 
     # ── 内部路由 ──
 
@@ -139,8 +140,9 @@ class AbstractAdapter(ABC):
 
         if cmd == "/reset":
             await self._scheduler.remove_session(session_id)
-            # 重建会话
-            await self._scheduler.submit(session_id, "")
+            # 重建会话（用空消息）
+            reset_msg = InboundMessage(type="", text="", session_id=session_id, platform="cli")
+            await self._scheduler.submit(reset_msg)
             return OutboundMessage.system_msg("会话已重置", session_id=session_id)
 
         if cmd in ("/help", "/h"):
@@ -201,13 +203,14 @@ class AbstractAdapter(ABC):
             state["pending_dice"]["roll_value"] = value
         return OutboundMessage.system_msg(f"掷骰结果: {value}", session_id=session_id)
 
-    async def _handle_player_input(self, text: str, session_id: str) -> OutboundMessage:
+    async def _handle_player_input(self, text: str, session_id: str, msg: Optional[InboundMessage] = None) -> OutboundMessage:
         """处理玩家输入 → 引擎执行"""
         if not text.strip():
             return OutboundMessage.system_msg("输入不能为空", level="warn", session_id=session_id)
 
         try:
-            narrative = await self._scheduler.submit(session_id, text)
+            submit_msg = msg or InboundMessage.player_input(text, session_id)
+            narrative = await self._scheduler.submit(submit_msg)
             state = self._scheduler.get_session_state(session_id)
             game_phase = state.get("game_phase", "") if state else ""
 
@@ -216,6 +219,10 @@ class AbstractAdapter(ABC):
                     text=narrative,
                     session_id=session_id,
                     game_phase=game_phase,
+                    platform=submit_msg.platform,
+                    channel_id=submit_msg.channel_id,
+                    user_id=submit_msg.user_id,
+                    world_id=submit_msg.world_id,
                 )
             return OutboundMessage.system_msg(
                 "系统未返回叙事文本（可能缺少 LLM 配置）",
