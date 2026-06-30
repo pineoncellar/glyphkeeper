@@ -106,7 +106,7 @@ class AbstractAdapter(ABC):
             msg.session_id = self.session_id
 
         if msg.type == MessageType.SYSTEM_CMD:
-            return await self._handle_system_cmd(msg.text, msg.session_id, msg)
+            return await self._handle_system_cmd(msg.text, msg.session_id)
 
         if msg.type == MessageType.DICE_RESULT:
             return await self._handle_dice_result(msg, msg.session_id)
