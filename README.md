@@ -53,13 +53,13 @@ graph TB
         Keeper["👤 Keeper Graph<br/>(StateGraph<GameState>)"]
         Router["🔄 route_by_intent<br/>(条件边)"]
         Combat["⚔️ Combat Subgraph<br/>战斗循环"]
-        Investigate["🔍 Investigation Subgraph<br/>技能检定"]
+        Investigate["🔍 Investigation Subgraph<br/>技能检定 → 线索查询"]
     end
 
     subgraph "🧩 Nodes"
         LLMN["🤖 LLM Nodes<br/>intent / narrate / adjudicate / npc_dialogue"]
         RuleN["📐 Rule Nodes<br/>combat / sanity / skill"]
-        ToolN["🔧 Tool Nodes<br/>dice / db_lookup / rag_lookup / roll"]
+        ToolN["🔧 Tool Nodes<br/>dice / db_lookup / rag_lookup / roll / archivist"]
     end
 
     subgraph "🗄️ State & Memory"
@@ -128,7 +128,7 @@ graph TB
     │       ↓
     ├── route_by_intent (条件边决定下一跳)
     │   ├──→ combat_subgraph (战斗循环: dice_roll → resolve_combat)
-    │   ├──→ investigate_subgraph (技能检定: resolve_skill)
+    │   ├──→ investigate_subgraph (技能检定: resolve_skill → archivist)
     │   ├──→ npc_dialogue_node (NPC 对话生成)
     │   └──→ → rag_lookup_node (按需查 LightRAG → <semantic_knowledge>)
     │               ↓
@@ -156,37 +156,36 @@ graph TB
 
 <table>
 <tr>
-    <th rowspan="15" style="writing-mode:vertical-lr; text-align:center; vertical-align:middle; width:40px; font-weight:bold;">系统框架</th>
-    <th>状态</th>
+    <th rowspan="13" style="text-align:center; vertical-align:middle; width:48px;">系统框架</th>
+    <th style="width:48px; text-align:center;">状态</th>
     <th colspan="2" style="text-align:center;">模块与说明</th>
 </tr>
-<tr><td>✅</td><td colspan="2">CLI适配器，用于简易测试</td></tr>
-<tr><td>⬜</td><td colspan="2">Onebot 适配器</td></tr>
-<tr><td>✅</td><td colspan="2">统一执行协议</td></tr>
-<tr><td>✅</td><td colspan="2">LangGraph引擎，管理图调用与会话生命周期</td></tr>
-<tr><td>✅</td><td colspan="2">StateGraph 图编排，条件路由分流意图，子图处理战斗与调查</td></tr>
-<tr><td>✅</td><td colspan="2">GameState&WorldManager世界状态管理</td></tr>
-<tr><td>🔄</td><td colspan="2">大语言模型云提供方适配</td></tr>
-<tr><td>✅</td><td colspan="2">CQRS 读模型表与写入管线</td></tr>
-<tr><td>✅</td><td colspan="2">LightRAG 接入</td></tr>
-<tr><td>✅</td><td colspan="2">双脑记忆系统</td></tr>
-<tr><td>🔄</td><td colspan="2">Worker 后台任务</td></tr>
-<tr><td>✅</td><td colspan="2">模组导入系统</td></tr>
-<tr><td>⬜</td><td colspan="2">多世界并行与管理</td></tr>
+<tr><td style="text-align:center;">✅</td><td colspan="2">CLI适配器，用于简易测试</td></tr>
+<tr><td style="text-align:center;">⬜</td><td colspan="2">Onebot 适配器</td></tr>
+<tr><td style="text-align:center;">✅</td><td colspan="2">统一执行协议</td></tr>
+<tr><td style="text-align:center;">✅</td><td colspan="2">LangGraph引擎，管理图调用与会话生命周期</td></tr>
+<tr><td style="text-align:center;">✅</td><td colspan="2">StateGraph 图编排，条件路由分流意图，子图处理战斗与调查</td></tr>
+<tr><td style="text-align:center;">✅</td><td colspan="2">GameState&amp;WorldManager世界状态管理</td></tr>
+<tr><td style="text-align:center;">🔄</td><td colspan="2">大语言模型云提供方适配</td></tr>
+<tr><td style="text-align:center;">✅</td><td colspan="2">CQRS 读模型表与写入管线</td></tr>
+<tr><td style="text-align:center;">✅</td><td colspan="2">LightRAG 接入</td></tr>
+<tr><td style="text-align:center;">✅</td><td colspan="2">双脑记忆系统</td></tr>
+<tr><td style="text-align:center;">🔄</td><td colspan="2">Worker 后台任务</td></tr>
+<tr><td style="text-align:center;">⬜</td><td colspan="2">多世界并行与管理</td></tr>
 <tr>
-    <th rowspan="9" style="writing-mode:vertical-lr; text-align:center; vertical-align:middle; width:40px; font-weight:bold; border-top:2px solid #444;">游戏系统</th>
+    <th rowspan="12" style="text-align:center; vertical-align:middle; width:48px; border-top:2px solid #d0d7de;">游戏系统</th>
 </tr>
-<tr><td>🔄</td><td colspan="2">角色卡系统，职业选择、属性骰点、技能与背景</td>
-<tr><td>🔄</td><td colspan="2">调查与线索系统</td></tr>
-<tr><td>⬜</td><td style="padding-left:2em;">├ 重复检定请求</td></tr>
-<tr><td>⬜</td><td style="padding-left:2em;">├ 无线索时的幻觉问题</td></tr>
-<tr><td>🔄</td><td colspan="2">NPC 对话系统</td></tr>
-<tr><td>✅</td><td colspan="2">CoC 7版技能检定</td></tr>
-<tr><td>⬜</td><td colspan="2">战斗轮与体力系统</td></tr>
-<tr><td>⬜</td><td colspan="2">理智与疯狂</td></tr>
-<tr><td>🔄</td><td colspan="2">场景切换与 location 更新</td></tr>
-<tr><td>⬜</td><td style="padding-left:2em;">├ 场景切换后的新场景描述</td></tr>
-<tr><td>⬜</td><td colspan="2">物品背包系统</td></tr>
+<tr><td style="text-align:center;">🔄</td><td colspan="2">角色卡系统，职业选择、属性骰点、技能与背景</td>
+<tr><td style="text-align:center;">🔄</td><td colspan="2">调查与线索系统</td></tr>
+<tr><td style="text-align:center;">⬜</td><td colspan="2" style="padding-left:2em;">├ 重复检定请求</td></tr>
+<tr><td style="text-align:center;">⬜</td><td colspan="2" style="padding-left:2em;">├ 无线索时的幻觉问题</td></tr>
+<tr><td style="text-align:center;">🔄</td><td colspan="2">NPC 对话系统</td></tr>
+<tr><td style="text-align:center;">✅</td><td colspan="2">CoC 7版技能检定</td></tr>
+<tr><td style="text-align:center;">⬜</td><td colspan="2">战斗轮与体力系统</td></tr>
+<tr><td style="text-align:center;">⬜</td><td colspan="2">理智与疯狂</td></tr>
+<tr><td style="text-align:center;">🔄</td><td colspan="2">场景切换与 location 更新</td></tr>
+<tr><td style="text-align:center;">⬜</td><td colspan="2" style="padding-left:2em;">├ 场景切换后的新场景描述</td></tr>
+<tr><td style="text-align:center;">⬜</td><td colspan="2">物品背包系统</td></tr>
 </table>
 
 > To be continue......
@@ -374,7 +373,7 @@ GlyphKeeper/
 │   ├── graph/               # 🔁 LangGraph StateGraph 定义
 │   │   ├── keeper_graph.py       # 守密人主 Graph（双脑路由拓扑）
 │   │   ├── combat_graph.py       # 战斗子 Graph（循环拓扑）
-│   │   ├── investigation_graph.py # 调查子 Graph（技能检定）
+│   │   ├── investigation_graph.py # 调查子 Graph（技能检定 + 线索查询）
 │   │   └── router_graph.py       # route_by_intent 条件边函数
 │   │
 │   ├── nodes/               # 🧩 执行节点
@@ -388,6 +387,7 @@ GlyphKeeper/
 │   │   │   ├── sanity_node.py       # 理智检定与疯狂判定
 │   │   │   └── skill_node.py        # 技能检定
 │   │   └── tools/           # 🔧 工具节点
+│   │       ├── archivist_node.py    # 线索查询（目标解析 + PG 查线索）
 │   │       ├── dice_node.py         # 掷骰执行
 │   │       ├── db_lookup_node.py    # PG 读模型查询 → <physical_reality>
 │   │       ├── rag_lookup_node.py   # LightRAG 检索 → <semantic_knowledge>
@@ -477,8 +477,9 @@ GlyphKeeper/
 
 4. investigate_subgraph
    → resolve_skill: skill_node → 侦查检定
+   → archivist_node: 解析目标 key + 查线索
 
-5. Archivist.inspect_target(session_id, "书桌", ...)
+5. Archivist.inspect_target(session_id, resolved_key, ...)
    → 查 clue_discoveries 表关联线索
    → 发现"书桌→日记"的线索关联
 
