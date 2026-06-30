@@ -247,125 +247,6 @@ def _check_clue_grant(
 
 
 # ====================================================================
-# 实体消歧 — 将模糊称呼映射为系统唯一确定的全名
-# ====================================================================
-
-ENTITY_RESOLUTION_PROMPT = """你是 TRPG 系统中的实体链接器。请将玩家口中的模糊称呼精确映射到当前场景中存在的 NPC 全名。
-
-<player_input>
-{player_input}
-</player_input>
-
-<extracted_target>
-{extracted_target}
-</extracted_target>
-
-<current_context>
-  <location>{location}</location>
-  <present_npcs>{present_npcs}</present_npcs>
-  <recent_dialogue_partners>{recent_partners}</recent_dialogue_partners>
-</current_context>
-
-<instruction>
-根据当前场景出现的 NPC 以及近期对话历史，将玩家提及的模糊称呼【{extracted_target}】精确映射为具体的 NPC 全名。
-- 优先选择当前在场的 NPC
-- 其次选择近期对话过的 NPC
-- 如果在场 NPC 或对话历史中有包含该称呼的 NPC，直接映射
-- 如果完全无法确定，原样返回提取到的称呼
-</instruction>
-
-<output_format>
-仅输出确定后的 NPC 全名，不要附加任何解释或格式标记。
-</output_format>"""
-
-
-async def _resolve_npc_entity(
-    raw_name: str,
-    state: GameState,
-) -> str:
-    """将玩家口中的模糊 NPC 称呼消歧为系统唯一确定的实体全名
-
-    使用结构化上下文（当前场景 NPC + 对话历史）+ fast LLM 做消歧，
-    LLM 失败时用子串匹配兜底。
-    """
-    # ── 收集候选 NPC ──
-    npc_relations = state.get("npc_relations") or {}
-    current_location = state.get("current_location", "")
-
-    # 对话历史候选：npc_relations 中的所有 key
-    recent_partners = list(npc_relations.keys())
-
-    # 当前场景候选：如果 state 中有场景实体列表则用
-    scene_npcs = state.get("scene_npcs", [])
-    present_npcs = list(scene_npcs) if isinstance(scene_npcs, list) else []
-
-    # 合并去重
-    all_candidates = list(dict.fromkeys(present_npcs + recent_partners))
-
-    # 如果原始名称完全等于某个在场 NPC 的全名，直接确认（无需消歧）
-    if raw_name in present_npcs:
-        return raw_name
-
-    # 如果原始名称已经在候选列表中，但候选列表中还有包含它的更完整名称 →
-    # 不能直接返回，因为可能是历史残留的模糊名（如"金博尔先生"已残留在 relations 中）
-    # 需要判断是否已有"更完整"的候选名包含它
-    if raw_name in all_candidates:
-        # 检查是否有其他候选名包含该称呼（说明存在更完整的版本）
-        has_full = any(c != raw_name and raw_name in c for c in all_candidates)
-        if not has_full:
-            return raw_name
-        # 有更完整的版本，继续消歧
-        logger.debug(f"实体消歧: {raw_name} 在候选列表中，但存在更完整版本，继续消歧")
-
-    # ── 尝试 LLM 消歧 ──
-    try:
-        messages = [
-            {"role": "system", "content": ENTITY_RESOLUTION_PROMPT.format(
-                player_input=state.get("player_input", ""),
-                extracted_target=raw_name,
-                location=current_location or "未知",
-                present_npcs=str(present_npcs) if present_npcs else "（无场景信息）",
-                recent_partners=str(recent_partners) if recent_partners else "（无对话历史）",
-            )},
-            {"role": "user", "content": f"请将【{raw_name}】映射为 NPC 全名。"},
-        ]
-        result = await _call_llm("fast", messages)
-        if result.is_ok and result.text:
-            resolved = result.text.strip().strip('"').strip("'").strip("。")
-            if resolved and resolved != raw_name:
-                # 优先选候选列表中最完整的匹配项
-                best = max((c for c in all_candidates if resolved in c or c in resolved),
-                           key=len, default=None)
-                if best:
-                    logger.info(f"实体消歧: {raw_name} → {best}（LLM+候选择优）")
-                    return best
-                if resolved in all_candidates:
-                    logger.info(f"实体消歧: {raw_name} → {resolved}（LLM）")
-                    return resolved
-            # LLM 无法消歧，回退
-    except Exception as e:
-        logger.debug(f"实体消歧 LLM 失败: {e}")
-
-    # ── 规则兜底：子串匹配 ──
-    best_match = raw_name
-    for candidate in all_candidates:
-        # 检查候选人是否包含提取名，或提取名是否包含候选人
-        if raw_name in candidate:
-            best_match = candidate
-            break
-        if candidate in raw_name:
-            best_match = candidate
-            break
-
-    if best_match != raw_name:
-        logger.info(f"实体消歧: {raw_name} → {best_match}（规则匹配）")
-    else:
-        logger.debug(f"实体消歧: {raw_name} 无法消歧，保持原样")
-
-    return best_match
-
-
-# ====================================================================
 # Node 主函数
 # ====================================================================
 
@@ -394,12 +275,16 @@ async def npc_dialogue_node(state: GameState) -> dict:
     npc_relations = state.get("npc_relations") or {}
     active_tags = state.get("active_tags", [])
 
-    # 提取 NPC 名称
-    npc_name = intent_data.get("target", "")
+    # 从 disambiguation_node 输出的 resolved_targets 获取消歧后的 NPC 名称
+    resolved = state.get("resolved_targets") or {}
+    npc_name = resolved.get("primary_id", "")
     if not npc_name:
-        action = intent_data.get("action", "")
-        detail = intent_data.get("detail", "")
-        npc_name = detail or action
+        # 兜底：直接从 intent 提取
+        npc_name = intent_data.get("target", "")
+        if not npc_name:
+            action = intent_data.get("action", "")
+            detail = intent_data.get("detail", "")
+            npc_name = detail or action
 
     if not npc_name:
         logger.debug("npc_dialogue_node: 未指定 NPC 目标")
@@ -407,12 +292,6 @@ async def npc_dialogue_node(state: GameState) -> dict:
             "narrative": "你环顾四周，没有找到可以对话的对象。",
             "resolution": {"success": False, "error": "no_npc_target"},
         }
-
-    # ── 实体消歧：将模糊称呼映射为系统唯一确定的 NPC 全名 ──
-    resolved_name = await _resolve_npc_entity(npc_name, state)
-    if resolved_name != npc_name:
-        logger.info(f"npc_dialogue_node: NPC 名称消歧 {npc_name} → {resolved_name}")
-        npc_name = resolved_name
 
     # 检索 NPC 人设 + 对话历史
     npc_profile, context = await _retrieve_npc_profile(npc_name), ""

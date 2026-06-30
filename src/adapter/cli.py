@@ -369,6 +369,12 @@ class CliAdapter(AbstractAdapter):
                 await self.send(out)
                 continue
 
+            # 处理 /rag — RAG 搜索调试
+            if msg.type == MessageType.SYSTEM_CMD and msg.text.strip().lower().startswith("/rag"):
+                out = await self._handle_rag_cmd(msg.text.strip())
+                await self.send(out)
+                continue
+
             # 处理 /list — 存档列表（覆盖 base 的 /list→modules 路由）
             if msg.type == MessageType.SYSTEM_CMD and msg.text.strip().lower() in ("/list", "/saves"):
                 out = await self._handle_list_saves_cmd(self.session_id)
@@ -823,6 +829,105 @@ class CliAdapter(AbstractAdapter):
         except Exception as e:
             logger.error(f"列出存档失败: {e}")
             return OutboundMessage.system_msg(f"列出存档失败: {e}", level="error", session_id=session_id)
+
+    # ================================================================
+    # RAG 搜索调试命令
+    # ================================================================
+
+    async def _handle_rag_cmd(self, cmd: str) -> OutboundMessage:
+        """处理 /rag — RAG 语义搜索调试
+
+        支持:
+          /rag <查询内容>         — 搜索世界知识 RAG（默认 hybrid 模式）
+          /rag local <查询内容>   — local 模式搜索（仅图内关联）
+          /rag global <查询内容>  — global 模式搜索（全局摘要）
+          /rag naive <查询内容>   — naive 模式搜索（纯向量）
+          /rag rules <查询内容>   — 搜索规则知识 RAG
+
+        示例:
+          /rag 旧图书馆的秘密
+          /rag rules 技能检定规则
+        """
+        session_id = self.session_id
+
+        # 解析命令参数：/rag [mode] <内容...>
+        rest = cmd[len("/rag"):].strip()
+        if not rest:
+            return OutboundMessage.system_msg(
+                "用法: /rag <查询内容>\n"
+                "      /rag local/global/naive <查询内容>\n"
+                "      /rag rules <查询内容>\n"
+                "从 LightRAG 向量/图存储中搜索相关内容。",
+                session_id=session_id,
+            )
+
+        # 解析可选的 mode 前缀
+        mode = "hybrid"  # 默认模式
+        query = rest
+        domain = "world"
+
+        first_word = rest.split(maxsplit=1)[0].lower() if " " in rest else ""
+        known_modes = {"local", "global", "naive", "hybrid", "rules"}
+
+        if first_word in known_modes:
+            mode_or_domain = first_word
+            remaining = rest.split(maxsplit=1)[1] if len(rest.split(maxsplit=1)) > 1 else ""
+            if not remaining:
+                return OutboundMessage.system_msg(
+                    f"请指定查询内容，例如: /rag {mode_or_domain} 查询内容",
+                    level="warn", session_id=session_id,
+                )
+            query = remaining
+            if mode_or_domain == "rules":
+                domain = "rules"
+                mode = "hybrid"
+            else:
+                domain = "world"
+                mode = mode_or_domain
+
+        try:
+            from src.memory.vector_store import VectorStore
+            vs = await VectorStore.get_instance(domain=domain)
+
+            # 显示搜索提示
+            print()
+            print(_color(f"  🔍 RAG 搜索: domain={domain} mode={mode}", _DIM))
+            print(_color(f"     查询: {query[:80]}", _DIM))
+            print()
+
+            result = await vs.query(question=query, mode=mode, top_k=60)
+
+            if not result or not result.strip():
+                return OutboundMessage.system_msg(
+                    "RAG 未返回结果（知识库可能为空或查询无匹配）",
+                    level="warn", session_id=session_id,
+                )
+
+            # 格式化输出，截断过长结果
+            MAX_LEN = 5000
+            text = result.strip()
+            if len(text) > MAX_LEN:
+                text = text[:MAX_LEN] + "\n\n  ... (结果过长，截断显示)"
+
+            lines = result.strip().split("\n")
+            summary = f"RAG 搜索结果: {len(lines)} 行, {len(result)} 字符"
+
+            return OutboundMessage.system_msg(
+                f"{summary}\n\n{text}",
+                session_id=session_id,
+            )
+
+        except ImportError as e:
+            return OutboundMessage.system_msg(
+                f"LightRAG 库未安装: {e}",
+                level="error", session_id=session_id,
+            )
+        except Exception as e:
+            logger.error(f"RAG 查询失败: {e}")
+            return OutboundMessage.system_msg(
+                f"RAG 查询失败: {type(e).__name__}: {e}",
+                level="error", session_id=session_id,
+            )
 
     # ================================================================
     # 信息查询命令

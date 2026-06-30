@@ -64,6 +64,11 @@ class GameState(TypedDict):
     combat_round: int                   # 当前战斗轮次
     combatants: list[dict]              # 参战方快照列表
 
+    # ── 实体对齐结果（由 disambiguation_node 写入） ──
+    resolved_targets: Optional[dict]    # {primary_id, secondary_id, target_type}
+    scene_npcs: list[str]               # 当前场景中的 NPC key 列表
+    attention_focus: Optional[dict]     # {recent_actors, recent_objects} LIFO 焦点栈
+
     # ── 运行时元数据 ──
     errors: list[str]                   # 执行过程中的错误记录
     node_trace: list[dict]              # 节点执行追踪日志
@@ -102,6 +107,9 @@ def create_initial_state(
         "combat_active": False,
         "combat_round": 0,
         "combatants": [],
+        "resolved_targets": None,
+        "scene_npcs": [],
+        "attention_focus": None,
         "errors": [],
         "node_trace": [],
     }
@@ -114,5 +122,5 @@ def create_state_view(state: GameState, view_keys: list[str]) -> dict:
 
 # 常用视图模板
 INTENT_VIEW = ["session_id", "player_input", "game_phase", "active_tags", "narrative", "character", "current_location"]
-RULE_VIEW = ["session_id", "intent", "game_phase", "active_tags", "combat_active", "combatants", "character"]
-NARRATE_VIEW = ["session_id", "intent", "resolution", "world_context", "narrative", "game_phase", "active_tags", "character", "current_location"]
+RULE_VIEW = ["session_id", "intent", "game_phase", "active_tags", "combat_active", "combatants", "character", "resolved_targets", "scene_npcs"]
+NARRATE_VIEW = ["session_id", "intent", "resolution", "world_context", "narrative", "game_phase", "active_tags", "character", "current_location", "resolved_targets", "scene_npcs"]
