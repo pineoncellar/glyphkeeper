@@ -312,6 +312,7 @@ class CliAdapter(AbstractAdapter):
                     "/quit", "/q", "/help", "/h",
                     "/start", "/load", "/list", "/saves", "/save",
                     "/modules", "/ingest", "/debug", "/d",
+                    "/scene", "/sc",
                 )
                 if msg.type == MessageType.PLAYER_INPUT or not any(
                     lower.startswith(a) for a in allowed
@@ -372,6 +373,12 @@ class CliAdapter(AbstractAdapter):
             # 处理 /rag — RAG 搜索调试
             if msg.type == MessageType.SYSTEM_CMD and msg.text.strip().lower().startswith("/rag"):
                 out = await self._handle_rag_cmd(msg.text.strip())
+                await self.send(out)
+                continue
+
+            # 处理 /scene — 查看当前场景实体/物品/出口
+            if msg.type == MessageType.SYSTEM_CMD and msg.text.strip().lower() in ("/scene", "/sc"):
+                out = await self._handle_scene_cmd(self.session_id)
                 await self.send(out)
                 continue
 
@@ -960,6 +967,114 @@ class CliAdapter(AbstractAdapter):
                 qty = f" x{it.get('quantity', 1)}" if it.get("quantity", 1) > 1 else ""
             lines.append(f"  - {name}{qty}")
         return OutboundMessage.system_msg("\n".join(lines), session_id=session_id)
+
+    async def _handle_scene_cmd(self, session_id: str) -> OutboundMessage:
+        """处理 /scene — 查看当前场景的实体、物品、出口。
+
+        调试用命令，从 PG 读模型表查询当前所在场景的结构化数据。
+        """
+        state = self._scheduler.get_session_state(session_id) if self._scheduler else None
+        if state is None:
+            return OutboundMessage.system_msg("当前无活跃会话", level="warn", session_id=session_id)
+
+        current_loc = state.get("current_location", "")
+        if not current_loc:
+            return OutboundMessage.system_msg(
+                "尚未设置初始地点（未开始游戏或模组未加载）。",
+                level="warn", session_id=session_id,
+            )
+
+        try:
+            from src.state.read_models import StaticReadStore
+            store = StaticReadStore()
+
+            # 查场景基本信息
+            loc = await store.get_location(current_loc)
+            if not loc:
+                return OutboundMessage.system_msg(
+                    f"场景 '{current_loc}' 未在数据库中找到（模组可能尚未摄入）。",
+                    level="warn", session_id=session_id,
+                )
+
+            loc_name = loc.get("name", current_loc)
+            loc_desc = loc.get("base_desc", "")
+            loc_tags = loc.get("tags", [])
+            raw_exits = loc.get("exits_json", {})
+            if isinstance(raw_exits, str):
+                import json
+                raw_exits = json.loads(raw_exits) if raw_exits else {}
+
+            # 查物品
+            items = await store.get_interactables_by_location(current_loc)
+
+            # 查 NPC 实体
+            entities = await store.get_entities_by_location(current_loc)
+
+            lines = [
+                f"📍 场景: {loc_name}  ({current_loc})",
+                f"   描述: {loc_desc[:120]}{'...' if len(loc_desc) > 120 else ''}",
+            ]
+
+            if loc_tags:
+                lines.append(f"   标签: {', '.join(loc_tags)}")
+
+            # 出口
+            if raw_exits:
+                exit_lines = [f"   出口 ({len(raw_exits)}):"]
+                for direction, target_key in raw_exits.items():
+                    exit_lines.append(f"     {direction} → {target_key}")
+                lines.append("\n".join(exit_lines))
+            else:
+                lines.append("   出口: 无")
+
+            # 物品
+            if items:
+                lines.append(f"\n  🪑 物品 ({len(items)} 件):")
+                for item in items:
+                    item_name = item.get("name", item.get("key", "?"))
+                    item_key = item.get("key", "")
+                    item_tags = item.get("tags", [])
+                    tag_str = f" [{', '.join(item_tags)}]" if item_tags else ""
+                    lines.append(f"    - {item_name}  ({item_key}){tag_str}")
+            else:
+                lines.append(f"\n  🪑 物品: 无")
+
+            # NPC 实体
+            if entities:
+                lines.append(f"\n  🧑 NPC ({len(entities)} 位):")
+                for ent in entities:
+                    ent_name = ent.get("name", ent.get("key", "?"))
+                    ent_key = ent.get("key", "")
+                    ent_tags = ent.get("tags", [])
+                    tag_str = f" [{', '.join(ent_tags)}]" if ent_tags else ""
+                    lines.append(f"    - {ent_name}  ({ent_key}){tag_str}")
+            else:
+                lines.append(f"\n  🧑 NPC: 无")
+
+            # GameState 中的额外运行时信息
+            scene_npcs = state.get("scene_npcs") or []
+            entity_name_map = state.get("entity_name_map") or {}
+            if entity_name_map:
+                lines.append(f"\n  📋 entity_name_map ({len(entity_name_map)} 条):")
+                for ek, en in entity_name_map.items():
+                    lines.append(f"    {ek} → {en}")
+
+            return OutboundMessage.system_msg(
+                "\n".join(lines),
+                session_id=session_id,
+            )
+
+        except ImportError as e:
+            return OutboundMessage.system_msg(
+                f"数据库模块不可用: {e}",
+                level="error", session_id=session_id,
+            )
+        except Exception as e:
+            logger.error(f"场景查询失败: {e}")
+            return OutboundMessage.system_msg(
+                f"场景查询失败: {type(e).__name__}: {e}",
+                level="error", session_id=session_id,
+            )
 
     async def _handle_time_cmd(self, session_id: str) -> OutboundMessage:
         """处理 /time — 显示游戏内时间。"""

@@ -159,6 +159,7 @@ class AbstractAdapter(ABC):
                 "  /list /saves       - 列出所有存档\n"
                 "======= 调试 =======\n"
                 "  /rag [模式] <内容>   - RAG 语义搜索调试\n"
+                "  /scene /sc         - 查看当前场景实体/物品/出口\n"
                 "  /debug /d          - 显示原始游戏状态\n"
                 "======= 系统 =======\n"
                 "  /modules           - 列出已摄入的模组\n"
