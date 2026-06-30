@@ -138,10 +138,22 @@ async def db_lookup_node(state: GameState) -> dict:
         except Exception as e:
             logger.debug(f"db_lookup_node: 查询 NPC 失败: {e}")
 
-        # 出口格式化
-        exit_desc = ", ".join(
-            f"{k}({v})" for k, v in exits_json.items()
-        ) if exits_json else "无"
+        # 出口格式化 — 从 locations 表查目标场景中文名
+        exit_parts = []
+        for direction, target_key in exits_json.items():
+            # 查询目标场景的显示名（如 loc_kimball_house_study → "金博尔宅-书房"）
+            target_name = target_key
+            try:
+                target_row = await conn.fetchrow(
+                    "SELECT name FROM locations WHERE key = $1", target_key
+                )
+                if target_row:
+                    target_name = target_row["name"]
+            except Exception:
+                pass
+            # 用「;」分隔多条目避免中文名内逗号冲突
+            exit_parts.append(f"{direction}|{target_name}|{target_key}")
+        exit_desc = "; ".join(exit_parts) if exit_parts else "无"
 
         # 环境标签
         tag_desc = ", ".join(loc_tags) if loc_tags else ""

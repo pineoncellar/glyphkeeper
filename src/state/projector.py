@@ -116,7 +116,7 @@ class StateProjector:
             # 投影 NPC 实体到 entities 表 — 供 disambiguation_node 消歧使用
             for entity_data in loc_data.get("entities", []):
                 all_entities.append({
-                    "id": entity_data.get("id", str(uuid.uuid4())),
+                    "id": entity_data.get("id", str(_uuid.uuid4())),
                     "key": entity_data.get("key", ""),
                     "name": entity_data.get("name", ""),
                     "location_id": location_id,
