@@ -114,15 +114,36 @@ async def _build_candidates(
         pr = state.get("physical_reality") or state.get("world_context") or ""
         exits_match = re.findall(r"<exits>(.*?)</exits>", pr)
         if exits_match:
-            # 格式: north(loc_01), east(loc_02)
-            parts = exits_match[0].split(",")
+            # 格式: 方向|目标中文名|目标key
+            # 如: KimballHouse|金博尔宅-书房|loc_kimball_house_study
+            # 用「;」分隔多条目（避免中文名内逗号冲突）
+            parts = exits_match[0].split(";")
             for part in parts:
                 part = part.strip()
-                m = re.match(r"(\w+)\((\w+)\)", part)
+                if not part:
+                    continue
+                # 新格式: 方向|中文名|key
+                m = re.match(r"(\w+)\|(.+?)\|(\w+)", part)
                 if m:
-                    dir_name = m.group(1)
-                    loc_key = m.group(2)
-                    candidates.append({"id": loc_key, "name": f"{dir_name}({loc_key})", "source": "exit"})
+                    _dir = m.group(1)
+                    target_name = m.group(2)
+                    loc_key = m.group(3)
+                    candidates.append({
+                        "id": loc_key,
+                        "name": f"{target_name}({loc_key})",
+                        "source": "exit",
+                    })
+                else:
+                    # 旧格式兜底: 方向(key)
+                    m = re.match(r"(\w+)\((\w+)\)", part)
+                    if m:
+                        _dir = m.group(1)
+                        loc_key = m.group(2)
+                        candidates.append({
+                            "id": loc_key,
+                            "name": f"{_dir}({loc_key})",
+                            "source": "exit",
+                        })
 
     elif target_type == "inventory_item":
         # 从角色背包获取（当前未实现完整背包系统）

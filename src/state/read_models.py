@@ -150,28 +150,38 @@ class StaticReadStore:
 
     # ── 批量写入 — 仅在摄入期由 StateProjector 调用 ──
 
-    async def bulk_insert_locations(self, locations: list[dict]) -> int:
-        """批量插入场景，key 冲突时跳过（幂等）"""
+    async def bulk_insert_locations(self, locations: list[dict]) -> dict[str, str]:
+        """批量插入场景，返回 {key: actual_db_id} 映射
+
+        重新摄入时，已有场景的 key 不变但 ID 可能不同。
+        此映射确保外键（interactables/entities 的 location_id）指向正确的 DB 行。
+        """
         conn = await self._get_conn()
-        count = 0
+        id_map: dict[str, str] = {}
         for loc in locations:
             lid = loc.get("id", str(uuid.uuid4()))
             try:
+                # 先查已有 ID——重新摄入时保留原 ID 保证外键一致性
+                existing = await conn.fetchval(
+                    "SELECT id FROM locations WHERE key = $1", loc["key"]
+                )
+                if existing:
+                    id_map[loc["key"]] = existing
+                    continue
                 await conn.execute(
                     """INSERT INTO locations (id, key, name, base_desc, tags, exits_json)
-                       VALUES ($1,$2,$3,$4,$5::text[],$6::jsonb)
-                       ON CONFLICT (key) DO NOTHING""",
+                       VALUES ($1,$2,$3,$4,$5::text[],$6::jsonb)""",
                     lid, loc["key"], loc["name"], loc.get("base_desc", ""),
                     loc.get("tags", []),
                     json.dumps(loc.get("exits", {}), ensure_ascii=False),
                 )
-                count += 1
+                id_map[loc["key"]] = lid
             except Exception as e:
                 logger.warning(f"插入场景失败 ({loc.get('key')}): {e}")
-        return count
+        return id_map
 
     async def bulk_insert_interactables(self, interactables: list[dict]) -> int:
-        """批量插入物品，key 冲突时跳过"""
+        """批量插入物品，key 冲突时跳过（幂等，外键用 location_id，无需返回映射）"""
         conn = await self._get_conn()
         count = 0
         for item in interactables:
@@ -197,10 +207,16 @@ class StaticReadStore:
         for ent in entities:
             eid = ent.get("id", str(uuid.uuid4()))
             try:
+                # 先查已有 ID，保留原 ID 保证后续外键一致性
+                existing = await conn.fetchval(
+                    "SELECT id FROM entities WHERE key = $1", ent["key"]
+                )
+                if existing:
+                    count += 1
+                    continue
                 await conn.execute(
                     """INSERT INTO entities (id, key, name, location_id, tags, stats_json)
-                       VALUES ($1,$2,$3,$4,$5::text[],$6::jsonb)
-                       ON CONFLICT (key) DO NOTHING""",
+                       VALUES ($1,$2,$3,$4,$5::text[],$6::jsonb)""",
                     eid, ent["key"], ent["name"],
                     ent.get("location_id"),
                     ent.get("tags", []),

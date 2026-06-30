@@ -99,18 +99,15 @@ class StateProjector:
             await store.bulk_insert_knowledge(knowledge_list)
 
         locations_data = data.get("locations", [])
+        loc_id_map: dict[str, str] = {}
         if locations_data:
-            await store.bulk_insert_locations(locations_data)
+            # bulk_insert_locations 返回 {key: actual_db_id} 映射
+            loc_id_map = await store.bulk_insert_locations(locations_data)
 
         # 遍历原始场景数据，拆解物品和 NPC 中的线索
         all_interactables = []
         all_entities = []
         all_clues = []
-
-        loc_id_map = {}  # location_key → location_id 供外键引用
-        if locations_data:
-            for loc in locations_data:
-                loc_id_map[loc["key"]] = loc.get("id")
 
         for loc_data in data.get("raw_locations", []):
             loc_key = loc_data.get("key", "")

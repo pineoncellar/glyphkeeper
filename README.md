@@ -170,6 +170,7 @@ graph TB
 <tr><td style="text-align:center;">✅</td><td colspan="2">CQRS 读模型表与写入管线</td></tr>
 <tr><td style="text-align:center;">✅</td><td colspan="2">LightRAG 接入</td></tr>
 <tr><td style="text-align:center;">✅</td><td colspan="2">双脑记忆系统</td></tr>
+<tr><td style="text-align:center;">✅</td><td colspan="2">对象名称消岐系统</td></tr>
 <tr><td style="text-align:center;">🔄</td><td colspan="2">Worker 后台任务</td></tr>
 <tr><td style="text-align:center;">⬜</td><td colspan="2">多世界并行与管理</td></tr>
 <tr>

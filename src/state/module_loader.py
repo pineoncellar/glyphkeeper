@@ -156,7 +156,10 @@ class ModuleLoader:
 
         # 构建 world_data 快照供 WorldManager 后续使用
         # 以事件方式写入新会话，确保 WorldManager.load_location() 可访问
+        # 同时拷贝 raw_locations + knowledge_registry 确保实体全量数据
         locations = world_data.get("locations", {})
+        raw_locations = world_data.get("raw_locations", [])
+        knowledge_registry = world_data.get("knowledge_registry", [])
         if locations:
             await es.append(
                 session_id=session_id,
@@ -164,6 +167,8 @@ class ModuleLoader:
                 data={
                     "module_name": module_name,
                     "locations": locations,
+                    "raw_locations": raw_locations,
+                    "knowledge_registry": knowledge_registry,
                     "start_location_key": start_location_key,
                     "timestamp": datetime.now(timezone.utc).isoformat(),
                 },

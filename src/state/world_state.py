@@ -67,14 +67,22 @@ class WorldManager:
         events = await self._event_store.get_events(session_id, since_version=0)
         location: Optional[dict] = None
 
+        def _loc_list_to_dict(locs):
+            """将 locations 列表按 key 转为字典（Events 中 locations 存为 list）"""
+            if isinstance(locs, dict):
+                return locs
+            return {loc.get("key", ""): loc for loc in locs if isinstance(loc, dict)}
+
         for event in events:
             data = event.get("data", {})
             event_type = event.get("type", "")
             patch = data.get("patch", {})
 
             if event_type in ("LocationCreated", "WorldInitialized"):
-                loc_data = patch.get(LOCATIONS_KEY, {}).get(location_key) or \
-                           data.get("locations", {}).get(location_key)
+                loc_dict = _loc_list_to_dict(
+                    patch.get(LOCATIONS_KEY, data.get("locations", {}))
+                )
+                loc_data = loc_dict.get(location_key)
                 if loc_data:
                     location = loc_data
 
@@ -100,6 +108,11 @@ class WorldManager:
 
     async def load_all_locations(self, session_id: str) -> dict[str, dict]:
         """加载会话中所有场景"""
+        def _loc_list_to_dict(locs):
+            if isinstance(locs, dict):
+                return locs
+            return {loc.get("key", ""): loc for loc in locs if isinstance(loc, dict)}
+
         events = await self._event_store.get_events(session_id, since_version=0)
         locations: dict[str, dict] = {}
 
@@ -109,8 +122,10 @@ class WorldManager:
             patch = data.get("patch", {})
 
             if event_type in ("LocationCreated", "WorldInitialized"):
-                locs = patch.get(LOCATIONS_KEY, data.get("locations", {}))
-                if isinstance(locs, dict):
+                locs = _loc_list_to_dict(
+                    patch.get(LOCATIONS_KEY, data.get("locations", {}))
+                )
+                if locs:
                     locations.update(locs)
 
             elif event_type == "LocationUpdated":
