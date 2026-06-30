@@ -55,6 +55,7 @@ _RUNTIME_FIELDS: dict[str, object] = {
     "physical_reality": "",       # db_lookup_node 写
     "rag_context": "",            # rag_lookup_node 写
     "archivist_result": None,     # skill_node 写（有线索时）
+    "entity_name_map": {},        # db_lookup_node 写（NPC key→显示名映射，供消歧）
     "_llm_trace": None,           # narrator_node 写
 }
 """

@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
 @File     :   read_models.py
-@Desc     :   静态读模型存储 — CQRS 读端，含 locations/interactables/clue_discoveries/knowledge_registry
+@Desc     :   静态读模型存储 — CQRS 读端，含 locations/interactables/entities/clue_discoveries/knowledge_registry
 @Note     :   摄入期由 StateProjector 唯一写入，运行时只读；不可变世界蓝图
 """
 
@@ -79,6 +79,19 @@ class StaticReadStore:
             )
         """)
 
+        # NPC/实体表 — 场景中的 NPC 角色，存储系统 key 与显示名的映射
+        # 供 disambiguation_node 做 NPC 消歧时通过显示名匹配玩家自然语言输入
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS entities (
+                id UUID PRIMARY KEY,
+                key TEXT UNIQUE NOT NULL,
+                name TEXT NOT NULL,
+                location_id UUID REFERENCES locations(id),
+                tags TEXT[] DEFAULT '{}',
+                stats_json JSONB DEFAULT '{}'::jsonb
+            )
+        """)
+
         # 知识注册表 — 线索本体定义，knowledge_id 是跨系统的逻辑标识符
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS knowledge_registry (
@@ -116,6 +129,10 @@ class StaticReadStore:
             CREATE INDEX IF NOT EXISTS idx_interactable_location
             ON interactables(location_id)
         """)
+        await conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_entity_location
+            ON entities(location_id)
+        """)
 
         logger.debug("static_read_store: 读模型表已就绪")
 
@@ -126,6 +143,7 @@ class StaticReadStore:
         conn = await self._get_conn()
         await conn.execute("DELETE FROM clue_discoveries")
         await conn.execute("DELETE FROM knowledge_registry")
+        await conn.execute("DELETE FROM entities")
         await conn.execute("DELETE FROM interactables")
         await conn.execute("DELETE FROM locations")
         logger.info("static_read_store: 已清空所有读模型表")
@@ -170,6 +188,27 @@ class StaticReadStore:
                 count += 1
             except Exception as e:
                 logger.warning(f"插入物品失败 ({item.get('key')}): {e}")
+        return count
+
+    async def bulk_insert_entities(self, entities: list[dict]) -> int:
+        """批量插入实体（NPC），key 冲突时跳过（幂等）"""
+        conn = await self._get_conn()
+        count = 0
+        for ent in entities:
+            eid = ent.get("id", str(uuid.uuid4()))
+            try:
+                await conn.execute(
+                    """INSERT INTO entities (id, key, name, location_id, tags, stats_json)
+                       VALUES ($1,$2,$3,$4,$5::text[],$6::jsonb)
+                       ON CONFLICT (key) DO NOTHING""",
+                    eid, ent["key"], ent["name"],
+                    ent.get("location_id"),
+                    ent.get("tags", []),
+                    json.dumps(ent.get("stats", {}), ensure_ascii=False),
+                )
+                count += 1
+            except Exception as e:
+                logger.warning(f"插入实体失败 ({ent.get('key')}): {e}")
         return count
 
     async def bulk_insert_knowledge(self, knowledge_list: list[dict]) -> int:
@@ -242,6 +281,17 @@ class StaticReadStore:
         rows = await conn.fetch(
             """SELECT i.* FROM interactables i
                JOIN locations l ON i.location_id = l.id
+               WHERE l.key = $1""",
+            location_key,
+        )
+        return [dict(r) for r in rows]
+
+    async def get_entities_by_location(self, location_key: str) -> list[dict]:
+        """查询某个场景下的所有 NPC 实体（含显示名和系统 key）"""
+        conn = await self._get_conn()
+        rows = await conn.fetch(
+            """SELECT e.* FROM entities e
+               JOIN locations l ON e.location_id = l.id
                WHERE l.key = $1""",
             location_key,
         )

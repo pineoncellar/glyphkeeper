@@ -72,14 +72,19 @@ async def _build_candidates(
         # 候选 NPC 来源：当前场景 NPC + 对话历史 NPC
         scene_npcs = state.get("scene_npcs") or []
         npc_relations = state.get("npc_relations") or {}
+        entity_name_map = state.get("entity_name_map") or {}
 
         seen = set()
-        for name in scene_npcs:
-            if name not in seen:
-                candidates.append({"id": name, "name": name, "source": "scene"})
-                seen.add(name)
+        for entity_key in scene_npcs:
+            if entity_key not in seen:
+                # 优先使用 entity_name_map 中的显示名（如"托马斯·金博尔"），
+                # 兜底使用系统 key——确保 Level 1/2 匹配能命中用户自然语言输入
+                display_name = entity_name_map.get(entity_key, entity_key)
+                candidates.append({"id": entity_key, "name": display_name, "source": "scene"})
+                seen.add(entity_key)
         for name in npc_relations:
             if name not in seen:
+                # npc_relations 中可能已经是显示名或 key，不做转换
                 candidates.append({"id": name, "name": name, "source": "history"})
                 seen.add(name)
 

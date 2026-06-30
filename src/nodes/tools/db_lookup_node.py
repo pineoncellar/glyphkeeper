@@ -60,9 +60,11 @@ async def db_lookup_node(state: GameState) -> dict:
       拼为 <physical_reality> XML + scene_npcs 列表
     """
     current_loc = state.get("current_location", "")
+    EMPTY = {"physical_reality": "", "world_context": "", "scene_npcs": [], "entity_name_map": {}}
+
     if not current_loc:
         logger.debug("db_lookup_node: 无 current_location")
-        return {"physical_reality": "", "world_context": "", "scene_npcs": []}
+        return EMPTY
 
     try:
         store = await _get_store()
@@ -75,7 +77,7 @@ async def db_lookup_node(state: GameState) -> dict:
         )
         if not loc_row:
             logger.debug(f"db_lookup_node: 未找到场景 '{current_loc}'")
-            return {"physical_reality": "", "world_context": "", "scene_npcs": []}
+            return EMPTY
 
         loc_name = loc_row["name"]
         loc_desc = loc_row["base_desc"]
@@ -106,18 +108,35 @@ async def db_lookup_node(state: GameState) -> dict:
                 clue_hint = " (含线索)"
             items.append(f"{r['name']}{clue_hint}")
 
-        # 从 WorldManager 获取当前场景的 NPC 实体列表
+        # 从 entities 表获取 NPC 显示名 + 从 WorldManager 获取场景 NPC key 列表
         scene_npcs: list[str] = []
+        entity_name_map: dict[str, str] = {}
         try:
             session_id = state.get("session_id", "")
+            # 从读模型 entities 表查询显示名（精确、高效）
+            entity_rows = await conn.fetch(
+                """SELECT e.key, e.name FROM entities e
+                   JOIN locations l ON e.location_id = l.id
+                   WHERE l.key = $1""",
+                current_loc,
+            )
+            for r in entity_rows:
+                entity_name_map[r["key"]] = r["name"]
+                scene_npcs.append(r["key"])
+
+            # 兜底：WorldManager 可能还有额外实体（如通过运行时事件添加的）
             world_mgr = await _get_world_manager(session_id)
             location_data = await world_mgr.load_location(session_id, current_loc)
             if location_data:
                 raw_entities = location_data.get("entities") or []
-                scene_npcs = [e if isinstance(e, str) else e.get("key", e.get("name", ""))
-                              for e in raw_entities]
+                for e in raw_entities:
+                    ek = e if isinstance(e, str) else e.get("key", e.get("name", ""))
+                    if ek not in entity_name_map:
+                        en = e if isinstance(e, str) else e.get("name", ek)
+                        entity_name_map[ek] = en
+                        scene_npcs.append(ek)
         except Exception as e:
-            logger.debug(f"db_lookup_node: WorldManager 查询 NPC 失败: {e}")
+            logger.debug(f"db_lookup_node: 查询 NPC 失败: {e}")
 
         # 出口格式化
         exit_desc = ", ".join(
@@ -141,8 +160,13 @@ async def db_lookup_node(state: GameState) -> dict:
         xml_str = "\n".join(parts)
         logger.debug(f"db_lookup_node: {loc_name} → {len(items)} 物品, {len(scene_npcs)} NPCs")
 
-        return {"physical_reality": xml_str, "world_context": xml_str, "scene_npcs": scene_npcs}
+        return {
+            "physical_reality": xml_str,
+            "world_context": xml_str,
+            "scene_npcs": scene_npcs,
+            "entity_name_map": entity_name_map,
+        }
 
     except Exception as e:
         logger.error(f"db_lookup_node: 查询失败: {e}")
-        return {"physical_reality": "", "world_context": "", "scene_npcs": []}
+        return {"physical_reality": "", "world_context": "", "scene_npcs": [], "entity_name_map": {}}

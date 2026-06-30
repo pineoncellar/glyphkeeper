@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import uuid as _uuid
 from typing import Optional
 
 from src.tools import get_logger
@@ -103,6 +104,7 @@ class StateProjector:
 
         # 遍历原始场景数据，拆解物品和 NPC 中的线索
         all_interactables = []
+        all_entities = []
         all_clues = []
 
         loc_id_map = {}  # location_key → location_id 供外键引用
@@ -113,6 +115,17 @@ class StateProjector:
         for loc_data in data.get("raw_locations", []):
             loc_key = loc_data.get("key", "")
             location_id = loc_id_map.get(loc_key)
+
+            # 投影 NPC 实体到 entities 表 — 供 disambiguation_node 消歧使用
+            for entity_data in loc_data.get("entities", []):
+                all_entities.append({
+                    "id": entity_data.get("id", str(uuid.uuid4())),
+                    "key": entity_data.get("key", ""),
+                    "name": entity_data.get("name", ""),
+                    "location_id": location_id,
+                    "tags": entity_data.get("tags", []),
+                    "stats": entity_data.get("stats", {}),
+                })
 
             for item_data in loc_data.get("interactables", []):
                 item_id = item_data.get("id", "")
@@ -161,17 +174,21 @@ class StateProjector:
         if all_interactables:
             await store.bulk_insert_interactables(all_interactables)
 
+        if all_entities:
+            await store.bulk_insert_entities(all_entities)
+
         if all_clues:
             await store.bulk_insert_clues(all_clues)
 
         loc_count = len(locations_data)
         item_count = len(all_interactables)
+        entity_count = len(all_entities)
         clue_count = len(all_clues)
         kn_count = len(knowledge_list)
         logger.info(
             f"projector: WorldInitialized 投影完成 "
             f"(locations={loc_count}, interactables={item_count}, "
-            f"clues={clue_count}, knowledge={kn_count})"
+            f"entities={entity_count}, clues={clue_count}, knowledge={kn_count})"
         )
 
     # ── 运行时事件投影（事务解耦，尽力而为） ──

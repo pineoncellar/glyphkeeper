@@ -308,6 +308,55 @@ class ModuleIngestor:
                 + "\n\n---\n\n".join(scene_parts)
             )
 
+        # ── 实体名称索引 — 供 disambiguation_node 消歧向量匹配使用 ──
+        # 将 NPC/物品/场景的显示名称 + 系统 ID 嵌入 LightRAG，
+        # 使玩家自然语言称呼（如"托马斯"）能与实体名称在向量空间中匹配。
+        entity_index_parts = []
+        for loc_data in json_data.get("locations", []):
+            loc_name = loc_data.get("name", "?")
+            loc_key = loc_data.get("key", "?")
+
+            # NPC 实体名称
+            for entity_data in loc_data.get("entities", []):
+                ent_name = entity_data.get("name", "")
+                ent_key = entity_data.get("key", "")
+                if ent_name and ent_key:
+                    entity_index_parts.append(
+                        f"[实体: {ent_name}]\n"
+                        + f"  系统ID: {ent_key}\n"
+                        + f"  类型: npc\n"
+                        + f"  场景: {loc_name} ({loc_key})\n"
+                        + f"  标签: {', '.join(entity_data.get('tags', []))}"
+                    )
+
+            # 物品名称
+            for item_data in loc_data.get("interactables", []):
+                item_name = item_data.get("name", "")
+                item_key = item_data.get("key", "")
+                if item_name and item_key:
+                    entity_index_parts.append(
+                        f"[物品: {item_name}]\n"
+                        + f"  系统ID: {item_key}\n"
+                        + f"  类型: interactable\n"
+                        + f"  场景: {loc_name} ({loc_key})\n"
+                        + f"  标签: {', '.join(item_data.get('tags', []))}"
+                    )
+
+            # 场景名称
+            loc_desc = loc_data.get("base_desc", "")
+            entity_index_parts.append(
+                f"[场景: {loc_name}]\n"
+                + f"  系统ID: {loc_key}\n"
+                + f"  类型: location\n"
+                + f"  描述: {loc_desc[:100]}"
+            )
+
+        if entity_index_parts:
+            docs.append(
+                f"# {module_name} — 实体名称索引\n\n"
+                + "\n\n---\n\n".join(entity_index_parts)
+            )
+
         if not docs:
             logger.info(f"  [SKIP] 无非叙事内容需写入 LightRAG")
             return True
