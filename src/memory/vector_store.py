@@ -64,6 +64,19 @@ try:
 except Exception:
     pass
 
+# ── 屏蔽 LightRAG 文件锁噪音日志 ──
+# LightRAG 每次 KG 查询都会刷几十行 "== Lock == Process N: Acquired/released lock"
+# 这些是 PG 后端不需要的文件锁操作，但 LightRAG 仍会打印。
+class _LockFilter(logging.Filter):
+    def filter(self, record):
+        msg = record.getMessage()
+        return "== Lock ==" not in msg and "lock " not in msg.lower()
+
+# 如果 debug 模式开启，至少过滤掉锁日志
+for _h in _lightrag_logger.handlers:
+    _h.addFilter(_LockFilter())
+_lightrag_logger.addFilter(_LockFilter())
+
 
 class VectorStore:
     """向量/图存储 — LightRAG 单例封装"""
