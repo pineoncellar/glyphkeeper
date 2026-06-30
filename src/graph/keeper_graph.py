@@ -5,18 +5,19 @@
               rag_lookup 条件执行（按 intent.needs_rag 决定是否查 LightRAG）
 
 主流程:
-    START → intent → db_lookup → router
-        ├── combat  → combat_subgraph     → rag_lookup → narrate → END
+    START → intent → db_lookup → disambiguation → router
+        ├── combat  → combat_subgraph         → rag_lookup → narrate → END
         ├── investigate → investigate_subgraph → rag_lookup → narrate → END
-        ├── navigation → navigation_node  → rag_lookup → narrate → END
-        ├── npc_dialogue → npc_dialogue_node → rag_lookup → narrate → END
-        └── narrate (直接)                      → rag_lookup → narrate → END
+        ├── navigation → navigation_node      → rag_lookup → narrate → END
+        ├── npc_dialogue → npc_dialogue_node   → rag_lookup → narrate → END
+        └── narrate (直接)                          → rag_lookup → narrate → END
 
 节点说明:
-  - intent:        IntentNode（LLM 意图分析 + needs_rag 标记）
-  - db_lookup:     DB Lookup Node（查 PG 读模型表 → <physical_reality> XML）
-  - rag_lookup:    RAG Lookup Node（按需查 LightRAG → <semantic_knowledge>）
-  - navigation:    NavigationNode（纯逻辑验证出口并更新位置）
+  - intent:           IntentNode（LLM 意图分析 + needs_rag 标记）
+  - db_lookup:        DB Lookup Node（查 PG 读模型表 → <physical_reality> XML）
+  - disambiguation:   DisambiguationNode（按意图策略路由，三级降级匹配实体 ID）
+  - rag_lookup:       RAG Lookup Node（按需查 LightRAG → <semantic_knowledge>）
+  - navigation:       NavigationNode（纯逻辑验证出口并更新位置）
   - 其余节点保持不变
 """
 
@@ -29,6 +30,7 @@ from src.nodes.llm.narrator_node import narrate_node
 from src.nodes.llm.npc_dialogue_node import npc_dialogue_node
 from src.nodes.tools.db_lookup_node import db_lookup_node
 from src.nodes.tools.rag_lookup_node import rag_lookup_node
+from src.nodes.tools.disambiguation_node import disambiguation_node
 from src.nodes.rules.navigation_node import navigation_node
 from src.graph.router_graph import route_by_intent
 from src.graph.combat_graph import combat_subgraph
@@ -51,6 +53,7 @@ def build_keeper_graph() -> StateGraph:
     # ── 注册节点 ──
     builder.add_node("intent", intent_node)
     builder.add_node("db_lookup", db_lookup_node)
+    builder.add_node("disambiguation", disambiguation_node)
     builder.add_node("rag_lookup", rag_lookup_node)
     builder.add_node("narrate", narrate_node)
     builder.add_node("combat", combat_subgraph)
@@ -60,13 +63,14 @@ def build_keeper_graph() -> StateGraph:
 
     # ── 定义边 ──
 
-    # START → 意图分析 → 查 PG 物理现实（始终执行）
+    # START → 意图分析 → 查 PG 物理现实（始终执行）→ 实体对齐
     builder.add_edge(START, "intent")
     builder.add_edge("intent", "db_lookup")
+    builder.add_edge("db_lookup", "disambiguation")
 
-    # db_lookup → 条件路由到子图或直接叙事
+    # disambiguation → 条件路由到子图或直接叙事
     builder.add_conditional_edges(
-        "db_lookup",
+        "disambiguation",
         route_by_intent,
         {
             "combat": "combat",
