@@ -164,11 +164,22 @@ async def db_lookup_node(state: GameState) -> dict:
         xml_parts = ["<physical_reality>"]
 
         # --- current_location ---
+        cur_loc_id = str(loc_row["id"])
+        cur_entities = entities_by_loc.get(cur_loc_id, [])
+
         xml_parts.append(f'  <current_location id="{current_loc}">')
         xml_parts.append(f'    <name>{cur["name"]}</name>')
         xml_parts.append(f'    <base_desc>{cur["base_desc"]}</base_desc>')
         if cur_tags:
             xml_parts.append(f'    <tags>{json.dumps(cur_tags, ensure_ascii=False)}</tags>')
+        if cur_entities:
+            xml_parts.append("    <present_entities>")
+            for ent in cur_entities:
+                xml_parts.append(f'      <entity id="{ent["key"]}">')
+                xml_parts.append(f'        <name>{ent["name"]}</name>')
+                xml_parts.append(f'        <tags>{json.dumps(ent["tags"], ensure_ascii=False)}</tags>')
+                xml_parts.append("      </entity>")
+            xml_parts.append("    </present_entities>")
         xml_parts.append("  </current_location>")
 
         # --- items (当前场景物品，供 disambiguation_node 消歧用) ---

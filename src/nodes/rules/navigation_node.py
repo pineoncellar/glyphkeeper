@@ -112,6 +112,129 @@ def _match_any_location(target: str, location_keys: list[str], location_names: l
     return None
 
 
+async def _build_location_physical_reality(
+    conn, location_key: str, state: GameState,
+) -> str:
+    """为目标地点构建 <physical_reality> XML，语义等价于 db_lookup_node
+
+    导航移动成功后调用，用新位置的完整数据覆盖 state 中的旧物理现实。
+    查询链路：目标地点信息 + 邻接场景 + 实体 + 物品，格式与 db_lookup_node 一致。
+    """
+    import json
+
+    time_slot = state.get("time_slot", "AFTERNOON")
+    game_phase = state.get("game_phase", "exploration")
+
+    # 查目标地点
+    loc_row = await conn.fetchrow(
+        "SELECT id, key, name, base_desc, tags, exits_json FROM locations WHERE key = $1",
+        location_key,
+    )
+    if not loc_row:
+        return ""
+
+    raw_exits = loc_row["exits_json"]
+    exits_json = json.loads(raw_exits) if isinstance(raw_exits, str) else (raw_exits or {})
+    adjacent_keys = list(exits_json.values())
+
+    # 批量查邻接场景
+    all_loc_keys = [location_key] + adjacent_keys
+    loc_rows = await conn.fetch(
+        "SELECT id, key, name, base_desc, tags, exits_json FROM locations WHERE key = ANY($1)",
+        all_loc_keys,
+    )
+    loc_map = {r["key"]: r for r in loc_rows}
+
+    # 批量查实体
+    all_loc_ids = [r["id"] for r in loc_rows]
+    entity_rows = await conn.fetch(
+        """SELECT e.key, e.name, e.location_id, e.tags FROM entities e
+           WHERE e.location_id = ANY($1)""",
+        all_loc_ids,
+    )
+    entities_by_loc: dict[str, list[dict]] = {}
+    for er in entity_rows:
+        lid = str(er["location_id"])
+        entities_by_loc.setdefault(lid, []).append({
+            "key": er["key"], "name": er["name"], "tags": er["tags"] or [],
+        })
+
+    # 查目标地点的物品
+    interactable_rows = await conn.fetch(
+        """SELECT i.key, i.name, i.tags FROM interactables i
+           JOIN locations l ON i.location_id = l.id
+           WHERE l.key = $1""",
+        location_key,
+    )
+
+    # ── 组装 XML ──
+    cur = loc_map.get(location_key, loc_row)
+    cur_tags = cur["tags"] or []
+
+    # 当前地点的实体
+    cur_loc_id = str(loc_row["id"])
+    cur_entities = entities_by_loc.get(cur_loc_id, [])
+
+    xml_parts = ["<physical_reality>"]
+    xml_parts.append(f'  <current_location id="{location_key}">')
+    xml_parts.append(f'    <name>{cur["name"]}</name>')
+    xml_parts.append(f'    <base_desc>{cur["base_desc"]}</base_desc>')
+    if cur_tags:
+        xml_parts.append(f'    <tags>{json.dumps(cur_tags, ensure_ascii=False)}</tags>')
+    if cur_entities:
+        xml_parts.append("    <present_entities>")
+        for ent in cur_entities:
+            xml_parts.append(f'      <entity id="{ent["key"]}">')
+            xml_parts.append(f'        <name>{ent["name"]}</name>')
+            xml_parts.append(f'        <tags>{json.dumps(ent["tags"], ensure_ascii=False)}</tags>')
+            xml_parts.append("      </entity>")
+        xml_parts.append("    </present_entities>")
+    xml_parts.append("  </current_location>")
+
+    # 物品
+    if interactable_rows:
+        item_names = ";".join(r["name"] for r in interactable_rows)
+        xml_parts.append(f'  <items>{item_names}</items>')
+
+    # 邻接场景
+    xml_parts.append("  <adjacent_locations>")
+    for adj_key in adjacent_keys:
+        adj = loc_map.get(adj_key)
+        if not adj:
+            continue
+        direction = next((k for k, v in exits_json.items() if v == adj_key), "Unknown")
+        adj_id = str(adj["id"])
+        adj_tags = adj["tags"] or []
+
+        xml_parts.append(f'    <location id="{adj_key}">')
+        xml_parts.append(f'      <name>{adj["name"]}</name>')
+        xml_parts.append(f'      <direction>{direction}</direction>')
+        if adj_tags:
+            xml_parts.append(f'      <tags>{json.dumps(adj_tags, ensure_ascii=False)}</tags>')
+
+        adj_entities = entities_by_loc.get(adj_id, [])
+        if adj_entities:
+            xml_parts.append("      <present_entities>")
+            for ent in adj_entities:
+                xml_parts.append(f'        <entity id="{ent["key"]}">')
+                xml_parts.append(f'          <name>{ent["name"]}</name>')
+                xml_parts.append(f'          <tags>{json.dumps(ent["tags"], ensure_ascii=False)}</tags>')
+                xml_parts.append("        </entity>")
+            xml_parts.append("      </present_entities>")
+
+        xml_parts.append(f'    </location>')
+    xml_parts.append("  </adjacent_locations>")
+
+    # session_state
+    xml_parts.append("  <session_state>")
+    xml_parts.append(f'    <current_time>{time_slot}</current_time>')
+    xml_parts.append(f'    <game_phase>{game_phase}</game_phase>')
+    xml_parts.append("  </session_state>")
+    xml_parts.append("</physical_reality>")
+
+    return "\n".join(xml_parts)
+
+
 async def _llm_resolve_target(target: str, location_names: list[str], location_keys: list[str]) -> Optional[str]:
     """LLM 辅助解析 — 当 rule 匹配不到时，让 LLM 猜玩家想去哪
 
@@ -236,9 +359,14 @@ async def navigation_node(state: GameState) -> dict:
                 "resolution": {"success": False, "error": "你已经在这里了。", "action": "move", "from_location": current_loc},
             }
 
+        # 移动成功后，为目标地点构建物理现实 XML，供 narrate_node 直接使用
+        physical_xml = await _build_location_physical_reality(conn, resolved_key, state)
+
         logger.info(f"navigation_node: {current_loc} → {resolved_key} (target='{target}')")
         result = {
             "current_location": resolved_key,
+            "physical_reality": physical_xml,
+            "world_context": physical_xml,
             "resolution": {
                 "success": True, "error": "", "action": "move",
                 "from_location": current_loc, "to_location": resolved_key, "target_label": target,

@@ -2,6 +2,7 @@
 @File     :   keeper_graph.py
 @Desc     :   守密人主 Graph — 双脑路由拓扑
 @Note     :   db_lookup 始终执行（毫秒级 PG 查物理现实）
+              navigation 移动成功时自身输出新位置的 physical_reality
               rag_lookup 条件执行（按 intent.needs_rag 决定是否查 LightRAG）
 
 主流程:
@@ -9,6 +10,7 @@
         ├── combat  → combat_subgraph         → rag_lookup → narrate
         ├── investigate → investigate_subgraph → rag_lookup → narrate
         ├── navigation → navigation_node      → rag_lookup → narrate
+        │   └─ 成功时自负 physical_reality 刷新
         ├── npc_dialogue → npc_dialogue_node   → rag_lookup → narrate
         └── narrate (直接)                          → rag_lookup → narrate
                                                                     ↓
@@ -87,6 +89,7 @@ def build_keeper_graph() -> StateGraph:
     )
 
     # 子图/NPC 对话/导航执行完后 → rag_lookup（条件查 LightRAG）
+    # 移动成功后 navigation_node 自身已刷新 physical_reality，无需二次 db_lookup
     builder.add_edge("combat", "rag_lookup")
     builder.add_edge("investigate", "rag_lookup")
     builder.add_edge("navigation", "rag_lookup")
