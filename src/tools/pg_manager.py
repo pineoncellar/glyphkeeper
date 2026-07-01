@@ -25,6 +25,9 @@ import psutil
 
 from src.tools import get_logger, PROJECT_ROOT
 
+from pgembed import get_server
+from pgembed._commands import POSTGRES_BIN_PATH as _PG_BIN
+
 logger = get_logger(__name__)
 
 
@@ -155,8 +158,6 @@ class PgManager:
     async def _start_local(self):
         """启动嵌入式 PostgreSQL"""
         try:
-            from pgembed import get_server
-
             pgdata = str(self._pgdata_dir)
             os.makedirs(pgdata, exist_ok=True)
 
@@ -172,6 +173,12 @@ class PgManager:
                 if not proc_exists:
                     pid_file.unlink(missing_ok=True)
                     logger.debug("pgembed: 已清理残留的 postmaster.pid")
+
+            # ── 预恢复：解决 Windows crash recovery 共享冲突问题 ──
+            # pgembed 硬编码 pg_ctl 超时 10s，但 Windows 上 recovery 中 log 文件
+            # 可能被防病毒锁定导致重试 30s+。这里先用长超时完成 recovery 再干净关闭。
+            if (self._pgdata_dir / "PG_VERSION").exists():
+                await self._run_crash_recovery(pgdata, _PG_BIN)
 
             self._pg_server = get_server(pgdata, cleanup_mode="stop")
             self._pg_server.ensure_pgdata_inited()
@@ -230,14 +237,115 @@ class PgManager:
             self._backend = PgBackend.NONE
             self._started = False
 
+    async def _run_crash_recovery(
+        self, pgdata: str, pg_bin: Path
+    ):
+        """先手动完成 crash recovery，避免 pgembed 的 10s 超时问题
+
+        ⚠ 注意: 必须用 tempfile 而非 capture_output=True 来捕获 pg_ctl 输出，
+          否则 Windows 上 pg_ctl 的子进程继承管道句柄会导致无限挂起。
+          （参考 pgembed._commands 中的相同处理方式）
+        """
+        import subprocess
+        import tempfile
+
+        pg_ctl = str(pg_bin / "pg_ctl.exe")
+        port = self._find_free_port()
+
+        pg_ctl_args = [
+            pg_ctl, "-D", pgdata, "-w",
+            "-o", '-h "127.0.0.1"',
+            "-o", f"-p {port}",
+            "start",
+        ]
+
+        def _do_start(timeout: int) -> bool:
+            """尝试启动 PG，返回是否成功"""
+            with (
+                tempfile.TemporaryFile("w+") as stdout,
+                tempfile.TemporaryFile("w+") as stderr,
+            ):
+                try:
+                    result = subprocess.run(
+                        pg_ctl_args, timeout=timeout,
+                        stdout=stdout, stderr=stderr,
+                    )
+                    return result.returncode == 0
+                except subprocess.TimeoutExpired:
+                    return False
+
+        # 先快试：数据目录干净时秒级返回
+        started = _do_start(5)
+        if not started:
+            # 慢试：需要 crash recovery，重命名日志避免 sharing violation
+            old_log = self._pgdata_dir / "log"
+            if old_log.exists():
+                old_log.rename(self._pgdata_dir / "log.bak")
+                logger.debug("pgembed: 旧 log 已重命名为 log.bak")
+            started = _do_start(60)
+            if started:
+                logger.info("pgembed: crash recovery 完成")
+
+        if started:
+            logger.info("pgembed: recovery 完成，干净关闭...")
+            subprocess.run(
+                [pg_ctl, "-D", pgdata, "-m", "fast", "-w", "stop"],
+                timeout=30,
+            )
+            logger.info("pgembed: 数据目录已恢复到干净状态")
+        else:
+            logger.warning("pgembed: recovery 超时，强制终止后交由 pgembed 重试")
+            subprocess.run(
+                [pg_ctl, "-D", pgdata, "-m", "immediate", "stop"],
+                timeout=10,
+            )
+
     async def _stop_local(self):
-        """停止本地 pgembed"""
+        """停止本地 pgembed，兜底清理残留进程"""
+        import subprocess
+        pgdata = str(self._pgdata_dir)
+
+        # 1. pgembed 自带清理（可能因 handle_pids 残留 PID 而跳过）
         try:
             if self._pg_server is not None:
                 self._pg_server.cleanup()
-                logger.info("pgembed: PostgreSQL 已停止")
         except Exception as e:
-            logger.warning(f"pgembed: 停止时异常: {e}")
+            logger.debug(f"pgembed: pg_server.cleanup() 异常: {e}")
+
+        # 2. 直接 pg_ctl stop -m fast
+        from pgembed._commands import POSTGRES_BIN_PATH as _PG_BIN
+        pg_ctl = str(_PG_BIN / "pg_ctl.exe")
+        try:
+            subprocess.run(
+                [pg_ctl, "-D", pgdata, "-m", "fast", "-w", "stop"],
+                timeout=15, capture_output=True,
+            )
+        except Exception:
+            pass
+
+        # 3. 兜底：杀掉指向本 pgdata 目录的流浪 postgres 进程
+        pgdata_abs = str(self._pgdata_dir.resolve()).lower()
+        for proc in psutil.process_iter(["pid", "name", "cmdline"]):
+            try:
+                if proc.info.get("name", "").lower() != "postgres.exe":
+                    continue
+                cl = proc.info.get("cmdline")
+                if cl and pgdata_abs in " ".join(cl).lower():
+                    proc.kill()
+                    logger.debug(f"pgembed: 已强制终止流浪 postgres (PID={proc.info['pid']})")
+            except (psutil.NoSuchProcess, psutil.AccessDenied):
+                pass
+
+        # 4. 清理残留文件
+        for stale_file in ["postmaster.pid", ".handle_pids.json"]:
+            fp = self._pgdata_dir / stale_file
+            if fp.exists():
+                try:
+                    fp.unlink()
+                except Exception:
+                    pass
+
+        logger.info("pgembed: PostgreSQL 已停止")
 
 
 
