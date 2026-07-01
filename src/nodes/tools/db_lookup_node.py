@@ -49,17 +49,19 @@ async def _get_world_manager(session_id: str):
 
 async def db_lookup_node(state: GameState) -> dict:
     """
-    从 PG 读模型表查询当前场景的物理事实，拼为 XML。
-    同时查询 WorldManager 获取当前场景中的 NPC 列表。
+    全量空间拓扑拉取 — 查询当前场景及所有邻接场景的静态元数据。
+    不触碰 clue_discoveries 表，确保左脑零推导、零剧透。
 
     查询链路：
-      查 locations 表获取名称/出口/描述
-      查 interactables 表获取该场景的物品列表
-      查 clue_discoveries 表关联线索
-      通过 WorldManager 获取场景 NPC 实体
-      拼为 <physical_reality> XML + scene_npcs 列表
+      查 locations 表获取当前场景信息 + exits_json
+      按 exits_json 批量拉取所有邻接场景的元数据
+      批量拉取所有相关场景的 entities（只取 tags/stats，不碰线索）
+      透传 time_slot 和 game_phase 到 XML
+      产出 scene_npcs / entity_name_map 供 disambiguation_node 消歧
     """
     current_loc = state.get("current_location", "")
+    time_slot = state.get("time_slot", "AFTERNOON")
+    game_phase = state.get("game_phase", "exploration")
     EMPTY = {"physical_reality": "", "world_context": "", "scene_npcs": [], "entity_name_map": {}}
 
     if not current_loc:
@@ -70,19 +72,14 @@ async def db_lookup_node(state: GameState) -> dict:
         store = await _get_store()
         conn = await store._get_conn()
 
-        # 查场景
+        # 查当前场景
         loc_row = await conn.fetchrow(
-            "SELECT id, name, base_desc, tags, exits_json FROM locations WHERE key = $1",
+            "SELECT id, key, name, base_desc, tags, exits_json FROM locations WHERE key = $1",
             current_loc,
         )
         if not loc_row:
             logger.debug(f"db_lookup_node: 未找到场景 '{current_loc}'")
             return EMPTY
-
-        loc_name = loc_row["name"]
-        loc_desc = loc_row["base_desc"]
-        loc_tags = loc_row["tags"] or []
-        loc_id = loc_row["id"]
 
         # asyncpg 在测试环境下 JSONB 列可能返回 str 而非 dict，一律 json.loads 保底
         raw_exits = loc_row["exits_json"]
@@ -91,40 +88,47 @@ async def db_lookup_node(state: GameState) -> dict:
         else:
             exits_json = raw_exits or {}
 
-        # 查物品
-        item_rows = await conn.fetch(
-            "SELECT id, key, name, tags FROM interactables WHERE location_id = $1",
-            loc_id,
-        )
-        items = []
-        for r in item_rows:
-            clue_rows = await conn.fetch(
-                """SELECT flavor_text FROM clue_discoveries
-                   WHERE interactable_id = $1""",
-                r["id"],
-            )
-            clue_hint = ""
-            if clue_rows:
-                clue_hint = " (含线索)"
-            items.append(f"{r['name']}{clue_hint}")
+        # 收集所有相关场景 key：当前场景 + 所有邻接场景
+        adjacent_keys = list(exits_json.values())
+        all_loc_keys = [current_loc] + adjacent_keys
 
-        # 从 entities 表获取 NPC 显示名 + 从 WorldManager 获取场景 NPC key 列表
+        # 批量查询所有相关场景的基础数据
+        loc_rows = await conn.fetch(
+            "SELECT id, key, name, base_desc, tags, exits_json FROM locations WHERE key = ANY($1)",
+            all_loc_keys,
+        )
+        loc_map = {r["key"]: r for r in loc_rows}  # key -> row
+
+        # 收集所有相关场景的 id，批量查 entities
+        all_loc_ids = [r["id"] for r in loc_rows]
+        entity_rows = await conn.fetch(
+            """SELECT e.key, e.name, e.location_id, e.tags, e.stats_json FROM entities e
+               WHERE e.location_id = ANY($1)""",
+            all_loc_ids,
+        )
+
+        # 按 location_id 分组 entities
+        entities_by_loc: dict[str, list[dict]] = {}
+        for er in entity_rows:
+            lid = str(er["location_id"])
+            entities_by_loc.setdefault(lid, []).append({
+                "key": er["key"],
+                "name": er["name"],
+                "tags": er["tags"] or [],
+                "stats": er["stats_json"] or {},
+            })
+
+        # 构建 scene_npcs 和 entity_name_map（供 disambiguation_node 消歧）
         scene_npcs: list[str] = []
         entity_name_map: dict[str, str] = {}
+        current_loc_id = str(loc_row["id"])
+        for ent in entities_by_loc.get(current_loc_id, []):
+            entity_name_map[ent["key"]] = ent["name"]
+            scene_npcs.append(ent["key"])
+
+        # 附加 WorldManager 运行时实体（兜底）
         try:
             session_id = state.get("session_id", "")
-            # 从读模型 entities 表查询显示名（精确、高效）
-            entity_rows = await conn.fetch(
-                """SELECT e.key, e.name FROM entities e
-                   JOIN locations l ON e.location_id = l.id
-                   WHERE l.key = $1""",
-                current_loc,
-            )
-            for r in entity_rows:
-                entity_name_map[r["key"]] = r["name"]
-                scene_npcs.append(r["key"])
-
-            # 兜底：WorldManager 可能还有额外实体（如通过运行时事件添加的）
             world_mgr = await _get_world_manager(session_id)
             location_data = await world_mgr.load_location(session_id, current_loc)
             if location_data:
@@ -136,41 +140,66 @@ async def db_lookup_node(state: GameState) -> dict:
                         entity_name_map[ek] = en
                         scene_npcs.append(ek)
         except Exception as e:
-            logger.debug(f"db_lookup_node: 查询 NPC 失败: {e}")
+            logger.debug(f"db_lookup_node: WorldManager 查询失败: {e}")
 
-        # 出口格式化 — 从 locations 表查目标场景中文名
-        exit_parts = []
-        for direction, target_key in exits_json.items():
-            # 查询目标场景的显示名（如 loc_kimball_house_study → "金博尔宅-书房"）
-            target_name = target_key
-            try:
-                target_row = await conn.fetchrow(
-                    "SELECT name FROM locations WHERE key = $1", target_key
-                )
-                if target_row:
-                    target_name = target_row["name"]
-            except Exception:
-                pass
-            # 用「;」分隔多条目避免中文名内逗号冲突
-            exit_parts.append(f"{direction}|{target_name}|{target_key}")
-        exit_desc = "; ".join(exit_parts) if exit_parts else "无"
+        # 构建当前场景 XML
+        cur = loc_map.get(current_loc, loc_row)
+        cur_tags = cur["tags"] or []
 
-        # 环境标签
-        tag_desc = ", ".join(loc_tags) if loc_tags else ""
+        xml_parts = ["<physical_reality>"]
 
-        # 构建 XML
-        parts = ["<physical_reality>"]
-        parts.append(f"  <location>{loc_name}</location>")
-        parts.append(f"  <description>{loc_desc}</description>")
-        parts.append(f"  <exits>{exit_desc}</exits>")
-        if items:
-            parts.append(f"  <items>{'; '.join(items)}</items>")
-        if tag_desc:
-            parts.append(f"  <environment_tags>{tag_desc}</environment_tags>")
-        parts.append("</physical_reality>")
+        # --- current_location ---
+        xml_parts.append(f'  <current_location id="{current_loc}">')
+        xml_parts.append(f'    <name>{cur["name"]}</name>')
+        xml_parts.append(f'    <base_desc>{cur["base_desc"]}</base_desc>')
+        if cur_tags:
+            xml_parts.append(f'    <tags>{json.dumps(cur_tags, ensure_ascii=False)}</tags>')
+        xml_parts.append("  </current_location>")
 
-        xml_str = "\n".join(parts)
-        logger.debug(f"db_lookup_node: {loc_name} → {len(items)} 物品, {len(scene_npcs)} NPCs")
+        # --- adjacent_locations ---
+        xml_parts.append("  <adjacent_locations>")
+        for adj_key in adjacent_keys:
+            adj = loc_map.get(adj_key)
+            if not adj:
+                continue
+            # 反向映射获取方向名
+            direction = next((k for k, v in exits_json.items() if v == adj_key), "Unknown")
+            adj_id = str(adj["id"])
+            adj_tags = adj["tags"] or []
+
+            xml_parts.append(f'    <location id="{adj_key}">')
+            xml_parts.append(f'      <name>{adj["name"]}</name>')
+            xml_parts.append(f'      <direction>{direction}</direction>')
+            if adj_tags:
+                xml_parts.append(f'      <tags>{json.dumps(adj_tags, ensure_ascii=False)}</tags>')
+
+            adj_entities = entities_by_loc.get(adj_id, [])
+            if adj_entities:
+                xml_parts.append("      <present_entities>")
+                for ent in adj_entities:
+                    xml_parts.append(f'        <entity id="{ent["key"]}">')
+                    xml_parts.append(f'          <name>{ent["name"]}</name>')
+                    xml_parts.append(f'          <tags>{json.dumps(ent["tags"], ensure_ascii=False)}</tags>')
+                    xml_parts.append("        </entity>")
+                xml_parts.append("      </present_entities>")
+
+            xml_parts.append(f'    </location>')
+        xml_parts.append("  </adjacent_locations>")
+
+        # --- session_state (透传动态参数，不做逻辑计算) ---
+        xml_parts.append("  <session_state>")
+        xml_parts.append(f'    <current_time>{time_slot}</current_time>')
+        xml_parts.append(f'    <game_phase>{game_phase}</game_phase>')
+        xml_parts.append("  </session_state>")
+
+        xml_parts.append("</physical_reality>")
+
+        xml_str = "\n".join(xml_parts)
+        logger.debug(
+            f"db_lookup_node: {cur['name']} -> "
+            f"{len(adjacent_keys)} adjacent, "
+            f"{len(entity_rows)} entities total"
+        )
 
         return {
             "physical_reality": xml_str,
