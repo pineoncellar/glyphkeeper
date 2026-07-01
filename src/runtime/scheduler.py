@@ -15,15 +15,13 @@ import time
 from collections import OrderedDict
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Any, Optional, TYPE_CHECKING
+from typing import Any, Optional
 
 from src.state.game_state import GameState, create_initial_state
 from src.runtime.engine import GraphEngine
 from src.runtime.context import ExecutionContext
+from src.adapter.protocol import InboundMessage
 from src.tools import get_logger
-
-if TYPE_CHECKING:
-    from src.adapter.protocol import InboundMessage
 
 logger = get_logger(__name__)
 
