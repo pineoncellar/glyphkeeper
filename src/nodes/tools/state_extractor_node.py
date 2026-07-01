@@ -107,6 +107,9 @@ async def state_extractor_node(state: GameState) -> dict[str, Any]:
             logger.warning(f"state_extractor: LLM 调用失败: {result.error}")
             return {"pending_tier1_events": [], "pending_tier2_facts": []}
 
+        if not result.text or not result.text.strip():
+            logger.debug("state_extractor: LLM 返回空，跳过提取")
+            return {"pending_tier1_events": [], "pending_tier2_facts": []}
         data = json.loads(result.text)
     except json.JSONDecodeError as e:
         logger.warning(f"state_extractor: JSON 解析失败: {e}")
