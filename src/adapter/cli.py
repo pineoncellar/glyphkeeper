@@ -356,7 +356,7 @@ class CliAdapter(AbstractAdapter):
                     await self.send(out)
                     continue
                 if cmd_lower.startswith("/load"):
-                    out = await self._handle_load_cmd(cmd_lower, self.session_id)
+                    out = await self._handle_load_cmd(cmd_lower, self.session_id, msg)
                     await self.send(out)
                     continue
 
@@ -440,7 +440,7 @@ class CliAdapter(AbstractAdapter):
     # 游戏生命周期
     # ================================================================
 
-    async def _handle_start_cmd(self, cmd: str, session_id: str) -> OutboundMessage:
+    async def _handle_start_cmd(self, cmd: str, session_id: str, msg: Optional[InboundMessage] = None) -> OutboundMessage:
         """处理 /start [模组名] — 创建角色 + 加载模组开始游戏。
 
         覆盖 base._handle_start_cmd，在加载模组之前先创建/选择角色。
@@ -466,7 +466,7 @@ class CliAdapter(AbstractAdapter):
                 await self._player_loader.save(session_id, self._character)
 
         # ── 加载模组（委托给 base 类） ──
-        result = await super()._handle_start_cmd(cmd, session_id)
+        result = await super()._handle_start_cmd(cmd, session_id, msg)
 
         # ── 确认模组已加载（scheduler 中有该会话） ──
         session_exists = (
@@ -709,7 +709,7 @@ class CliAdapter(AbstractAdapter):
                 text=state.get("player_input", ""),
                 session_id=session_id,
                 platform="cli",
-                world_id=state.get("world_id", "test"),
+                world_id=state.get("world_id", ""),
             )
             narrative = await self._scheduler.submit(replay_msg)
             if narrative:
@@ -768,7 +768,7 @@ class CliAdapter(AbstractAdapter):
             logger.error(f"存档失败: {e}")
             return OutboundMessage.system_msg(f"存档失败: {e}", level="error", session_id=session_id)
 
-    async def _handle_load_cmd(self, cmd: str, session_id: str) -> OutboundMessage:
+    async def _handle_load_cmd(self, cmd: str, session_id: str, msg: Optional[InboundMessage] = None) -> OutboundMessage:
         """处理 /load [存档名] — 读取游戏快照。
 
         先按标签名查找快照，匹配到后调用 SnapshotManager.restore()
@@ -808,7 +808,16 @@ class CliAdapter(AbstractAdapter):
                 if not restored.get("character") and self._character:
                     from dataclasses import asdict
                     restored["character"] = asdict(self._character)
-                await self._scheduler.restore_session_state(session_id, restored)
+                # 使用 msg 中的 routing 信息，确保 key 与玩家当前会话一致
+                platform = msg.platform if msg else "cli"
+                channel_id = msg.channel_id if msg else ""
+                world_id = msg.world_id if msg else ""
+                await self._scheduler.restore_session_state(
+                    session_id, restored,
+                    platform=platform,
+                    channel_id=channel_id,
+                    world_id=world_id,
+                )
                 # 恢复角色引用
                 char_data = restored.get("character")
                 if char_data and self._player_loader:

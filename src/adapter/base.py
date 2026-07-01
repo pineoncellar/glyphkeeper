@@ -106,7 +106,7 @@ class AbstractAdapter(ABC):
             msg.session_id = self.session_id
 
         if msg.type == MessageType.SYSTEM_CMD:
-            return await self._handle_system_cmd(msg.text, msg.session_id)
+            return await self._handle_system_cmd(msg.text, msg.session_id, msg)
 
         if msg.type == MessageType.DICE_RESULT:
             return await self._handle_dice_result(msg, msg.session_id)
@@ -116,7 +116,7 @@ class AbstractAdapter(ABC):
 
     # ── 内部路由 ──
 
-    async def _handle_system_cmd(self, cmd: str, session_id: str) -> OutboundMessage:
+    async def _handle_system_cmd(self, cmd: str, session_id: str, msg: Optional[InboundMessage] = None) -> OutboundMessage:
         """处理系统命令"""
         cmd = cmd.lower().strip()
 
@@ -180,7 +180,7 @@ class AbstractAdapter(ABC):
 
         # ── /start 命令 — 开始游戏 ──
         if cmd.startswith("/start"):
-            return await self._handle_start_cmd(cmd, session_id)
+            return await self._handle_start_cmd(cmd, session_id, msg)
 
         # ── /ingest 命令 — 模组数据摄入 ──
         if cmd.startswith("/ingest"):
@@ -333,7 +333,7 @@ class AbstractAdapter(ABC):
 
     # ── 开始游戏命令 ──
 
-    async def _handle_start_cmd(self, cmd: str, session_id: str) -> OutboundMessage:
+    async def _handle_start_cmd(self, cmd: str, session_id: str, msg: Optional[InboundMessage] = None) -> OutboundMessage:
         """处理 /start [模组名] — 加载模组并开始游戏"""
         parts = cmd.split(maxsplit=1)
         module_name = parts[1].strip() if len(parts) > 1 else ""
@@ -375,12 +375,25 @@ class AbstractAdapter(ABC):
         from src.runtime.context import ExecutionContext as ECtx
 
         await self._scheduler.remove_session(session_id)
+        # ⚠ key 必须是 SessionKey tuple，不是纯字符串！
+        # 否则 get_session() 遍历时 key[3] 取不到 session_id
+        # 使用 msg 中的真实 routing 信息，确保与后续玩家输入的 _make_key() 一致
+        from src.runtime.scheduler import SessionKey
+        platform = msg.platform if msg else ""
+        channel_id = msg.channel_id if msg else ""
+        user_id = msg.user_id if msg else ""
+        world_id = msg.world_id if msg else ""
+        key: SessionKey = (platform, channel_id, world_id, session_id)
         slot = SessionSlot(
             session_id=session_id,
             state=state,
             ctx=ECtx(session_id=session_id),
+            platform=platform,
+            channel_id=channel_id,
+            user_id=user_id,
+            world_id=world_id,
         )
-        self._scheduler._sessions[session_id] = slot
+        self._scheduler._sessions[key] = slot
 
         narrative = state.get("narrative", "")
         if narrative:
