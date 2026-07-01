@@ -117,7 +117,9 @@ class Archivist:
         有检定条件的线索需比对技能名和掷骰结果，通过则授予。
         """
         for clue in clues:
-            required_check = clue.get("required_check", {}) or {}
+            raw_check = clue.get("required_check", {}) or {}
+            # 防御：required_check 可能被存为 JSONB null 或意外字符串
+            required_check = raw_check if isinstance(raw_check, dict) else {}
 
             if not required_check:
                 return await self._grant_clue(

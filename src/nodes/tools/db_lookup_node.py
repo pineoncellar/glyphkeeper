@@ -118,6 +118,18 @@ async def db_lookup_node(state: GameState) -> dict:
                 "stats": er["stats_json"] or {},
             })
 
+        # 批量查当前场景物品（interactables 表）— 供 disambiguation 消歧
+        interactable_rows = await conn.fetch(
+            """SELECT i.key, i.name, i.tags FROM interactables i
+               JOIN locations l ON i.location_id = l.id
+               WHERE l.key = $1""",
+            current_loc,
+        )
+        scene_items = [
+            {"key": r["key"], "name": r["name"], "tags": r["tags"] or []}
+            for r in interactable_rows
+        ]
+
         # 构建 scene_npcs 和 entity_name_map（供 disambiguation_node 消歧）
         scene_npcs: list[str] = []
         entity_name_map: dict[str, str] = {}
@@ -125,6 +137,9 @@ async def db_lookup_node(state: GameState) -> dict:
         for ent in entities_by_loc.get(current_loc_id, []):
             entity_name_map[ent["key"]] = ent["name"]
             scene_npcs.append(ent["key"])
+        # 物品也加入 entity_name_map，便于后续消歧使用
+        for item in scene_items:
+            entity_name_map[item["key"]] = item["name"]
 
         # 附加 WorldManager 运行时实体（兜底）
         try:
@@ -155,6 +170,11 @@ async def db_lookup_node(state: GameState) -> dict:
         if cur_tags:
             xml_parts.append(f'    <tags>{json.dumps(cur_tags, ensure_ascii=False)}</tags>')
         xml_parts.append("  </current_location>")
+
+        # --- items (当前场景物品，供 disambiguation_node 消歧用) ---
+        if scene_items:
+            item_names = ";".join(it["name"] for it in scene_items)
+            xml_parts.append(f'  <items>{item_names}</items>')
 
         # --- adjacent_locations ---
         xml_parts.append("  <adjacent_locations>")

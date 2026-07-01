@@ -44,7 +44,11 @@ class GameState(TypedDict):
     # ── 当前处理结果 ──
     intent: Optional[dict]              # IntentNode 的输出
     resolution: Optional[dict]          # RuleNode 的输出
+    physical_reality: str               # db_lookup_node 的物理现实 XML
     world_context: str                  # LookupNode 的世界知识上下文
+    rag_context: str                    # rag_lookup_node 的语义知识 XML
+    archivist_result: Optional[dict]    # archivist_node 的线索查询结果
+    entity_name_map: dict               # db_lookup_node 的 NPC 显示名映射
     narrative: str                      # NarratorNode 的叙事文本
 
     # ── 游戏控制 ──
@@ -113,7 +117,11 @@ def create_initial_state(
         "player_input": "",
         "intent": None,
         "resolution": None,
+        "physical_reality": "",
         "world_context": "",
+        "rag_context": "",
+        "archivist_result": None,
+        "entity_name_map": {},
         "narrative": "",
         "narrative_output": "",
         "npc_dialogue": "",

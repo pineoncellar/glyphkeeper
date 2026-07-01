@@ -259,7 +259,7 @@ async def _call_llm_for_narrative(
         if is_npc_scene:
             context_parts.append(f"\n<NPC_DIALOGUE>\n{npc_dialogue}\n</NPC_DIALOGUE>")
         if physical_reality:
-            context_parts.append(f"\n<physical_reality>\n{physical_reality}\n</physical_reality>")
+            context_parts.append(f"\n{physical_reality}")
         if rag_context:
             context_parts.append(f"\n{rag_context}")
         if clue_discovery:

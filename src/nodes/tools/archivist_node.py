@@ -96,7 +96,13 @@ async def _llm_resolve_target(target: str, scene_items: list[dict]) -> Optional[
             # 清理可能的 markdown 代码块标记
             text = text.removeprefix("```json").removeprefix("```").removesuffix("```").strip()
             parsed = json.loads(text)
-            matched_key = parsed.get("matched_key", "")
+            # 防御：LLM 可能返回裸字符串（如 "item_window"）而非 JSON 对象
+            if isinstance(parsed, dict):
+                matched_key = parsed.get("matched_key", "")
+            elif isinstance(parsed, str):
+                matched_key = parsed
+            else:
+                matched_key = ""
             if matched_key:
                 logger.info(f"archivist_node[LLM]: '{target}' → '{matched_key}'")
                 return matched_key
