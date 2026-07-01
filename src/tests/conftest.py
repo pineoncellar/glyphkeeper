@@ -32,6 +32,55 @@ from src.tests.fake_llm import (
 
 
 # ====================================================================
+# 测试数据库隔离 — 使用独立数据库，不污染生产数据
+# ====================================================================
+
+import asyncio as _asyncio
+
+
+def pytest_sessionstart(session):
+    """所有测试开始前：创建 test 数据库并切换"""
+    _asyncio.run(_setup_test_db())
+
+
+def pytest_sessionfinish(session, exitstatus):
+    """所有测试结束后：恢复生产数据库并删除 test 数据库"""
+    _asyncio.run(_teardown_test_db())
+
+
+async def _setup_test_db():
+    """创建测试数据库 'glyphkeeper_test' 并让 PgManager 指向它"""
+    from src.tools.pg_manager import PgManager
+    try:
+        mgr = await PgManager.get_instance()
+        await mgr.start()
+        await mgr.ensure_test_database("glyphkeeper_test")
+    except Exception as e:
+        print(f"[conftest] 测试数据库创建失败（测试将继续，但可能污染生产数据）: {e}")
+
+
+async def _teardown_test_db():
+    """恢复生产数据库并删除测试数据库
+
+    注意：部分测试 fixture 会在结束后 stop() PG 实例，
+    导致无法连接删除。此时跳过删除，下次测试运行时
+    ensure_test_database 会自动 DROP 重建。
+    """
+    from src.tools.pg_manager import PgManager
+    try:
+        mgr = await PgManager.get_instance()
+        # 如果 PG 已停止，跳过删除（下次运行会自动重建）
+        if not mgr._started:
+            return
+        await mgr.drop_test_database("glyphkeeper_test")
+    except (ConnectionRefusedError, OSError) as e:
+        # PG 已停止，正常跳过
+        pass
+    except Exception as e:
+        print(f"[conftest] 测试数据库删除失败（可忽略，下次测试会自动重建）: {e}")
+
+
+# ====================================================================
 # CLI 选项：--use-real-llm
 # ====================================================================
 

@@ -63,12 +63,14 @@ class PgManager:
 
     _instance: Optional["PgManager"] = None
     _lock = asyncio.Lock()
+    _test_dbname: Optional[str] = None  # reset_instance 后恢复测试数据库用
 
     def __init__(self):
         self._backend: PgBackend = PgBackend.NONE
         self._uri: str = ""
         self._port: str = ""
         self._dbname: str = "glyphkeeper"
+        self._original_dbname: str = "glyphkeeper"  # 测试恢复用
         self._pg_server = None  # pgembed.PostgresServer 实例
         self._pgdata_dir: Optional[Path] = None
         self._started: bool = False
@@ -77,18 +79,32 @@ class PgManager:
 
     @classmethod
     async def get_instance(cls) -> "PgManager":
-        """获取 PgManager 单例"""
+        """获取 PgManager 单例
+
+        如果先前设置了测试数据库（_test_dbname），新实例自动切换过去。
+        """
         async with cls._lock:
             if cls._instance is None:
                 cls._instance = cls()
                 await cls._instance._detect_backend()
+                # reset_instance 后自动恢复测试数据库指向
+                if cls._test_dbname:
+                    cls._instance._dbname = cls._test_dbname
+                    cls._instance._original_dbname = cls._test_dbname
+                    cls._instance._uri = cls._instance._build_uri()
             return cls._instance
 
     @classmethod
     async def reset_instance(cls):
-        """重置单例（测试/重载时使用）"""
+        """重置单例（测试/重载时使用）
+
+        保留测试数据库名（_test_dbname），新实例创建后自动切换回测试库。
+        """
         async with cls._lock:
             if cls._instance is not None:
+                # 保存测试数据库名以备后续恢复
+                if cls._instance._original_dbname != cls._instance._dbname:
+                    cls._test_dbname = cls._instance._dbname
                 await cls._instance.stop()
                 cls._instance = None
 
@@ -403,6 +419,76 @@ class PgManager:
         else:
             result["status"] = "unavailable"
         return result
+
+    # ── 测试数据库隔离 ──
+
+    async def ensure_test_database(self, dbname: str = "glyphkeeper_test") -> None:
+        """创建测试数据库并切换到它（仅测试使用）
+
+        在生产数据库 'glyphkeeper' 同级创建测试数据库，
+        所有测试中的读写操作完全隔离，不影响生产数据。
+        """
+        if not self._started:
+            await self.start()
+        if self._backend != PgBackend.LOCAL:
+            return
+
+        self._original_dbname = self._dbname
+        uri_admin = f"postgresql://postgres@localhost:{self._port}/postgres"
+        import asyncpg
+        conn = await asyncpg.connect(uri_admin, timeout=5.0)
+        try:
+            exists = await conn.fetchval(
+                "SELECT 1 FROM pg_database WHERE datname = $1", dbname
+            )
+            if exists:
+                await conn.execute(
+                    "SELECT pg_terminate_backend(pid) FROM pg_stat_activity "
+                    "WHERE datname = $1 AND pid <> pg_backend_pid()",
+                    dbname,
+                )
+                await conn.execute(f"DROP DATABASE IF EXISTS {dbname}")
+            await conn.execute(f"CREATE DATABASE {dbname}")
+            logger.info(f"PgManager: 测试数据库 '{dbname}' 已创建")
+        finally:
+            await conn.close()
+
+        self._dbname = dbname
+        self._uri = self._build_uri()
+        type(self)._test_dbname = dbname
+
+    async def restore_production_database(self) -> None:
+        """恢复 PgManager 指向生产数据库"""
+        if self._original_dbname and self._original_dbname != self._dbname:
+            self._dbname = self._original_dbname
+            self._uri = self._build_uri()
+            logger.info(f"PgManager: 已恢复指向生产数据库 '{self._dbname}'")
+
+    async def drop_test_database(self, dbname: str = "glyphkeeper_test") -> None:
+        """删除测试数据库（测试结束后清理用）"""
+        if self._backend != PgBackend.LOCAL:
+            return
+        # 先切回管理数据库再删，避免"正在使用"冲突
+        self._dbname = self._original_dbname
+        self._uri = self._build_uri()
+        uri_admin = f"postgresql://postgres@localhost:{self._port}/postgres"
+        import asyncpg
+        conn = await asyncpg.connect(uri_admin, timeout=5.0)
+        try:
+            exists = await conn.fetchval(
+                "SELECT 1 FROM pg_database WHERE datname = $1", dbname
+            )
+            if exists:
+                await conn.execute(
+                    "SELECT pg_terminate_backend(pid) FROM pg_stat_activity "
+                    "WHERE datname = $1 AND pid <> pg_backend_pid()",
+                    dbname,
+                )
+                await conn.execute(f"DROP DATABASE IF EXISTS {dbname}")
+                logger.info(f"PgManager: 测试数据库 '{dbname}' 已删除")
+                type(self)._test_dbname = None
+        finally:
+            await conn.close()
 
 
 # ====================================================================
