@@ -17,7 +17,7 @@ from typing import Any, Optional
 
 from langgraph.graph.state import CompiledStateGraph as CompiledGraph
 
-from src.state.game_state import GameState, create_initial_state
+from src.state.game_state import GameState, create_initial_state, DIALOGUE_HISTORY_MAX
 from src.state.event_log import EventLog
 from src.state.snapshot import SnapshotManager
 from src.state.world_state import WorldManager
@@ -271,6 +271,22 @@ class GraphEngine:
         # 提取 narrative
         narrative = result.get("narrative", "")
 
+        # 追加本轮对话到 dialogue_history
+        player_input = result.get("player_input", "")
+        if player_input:
+            history = result.get("dialogue_history", [])
+            beat = result.get("beat_counter", len(history) + 1)
+            entry = {
+                "turn": beat,
+                "player": player_input,
+                "keeper": narrative or "",
+            }
+            history.append(entry)
+            # cap 最大轮次
+            if len(history) > DIALOGUE_HISTORY_MAX:
+                history = history[-DIALOGUE_HISTORY_MAX:]
+            result["dialogue_history"] = history
+
         # 记录事件（如果 event_log 可用）
         if self._event_log:
             await self._record_graph_event(result, ctx)
@@ -358,6 +374,21 @@ class GraphEngine:
         if safety_counter >= MAX_STEPS:
             logger.warning(f"Engine: 达到最大执行步数 {MAX_STEPS}")
             self._add_error(state, f"达到最大执行步数 {MAX_STEPS}")
+
+        # 追加本轮对话到 dialogue_history
+        player_input = state.get("player_input", "")
+        if player_input:
+            history = state.get("dialogue_history", [])
+            beat = state.get("beat_counter", len(history) + 1)
+            entry = {
+                "turn": beat,
+                "player": player_input,
+                "keeper": narrative or "",
+            }
+            history.append(entry)
+            if len(history) > DIALOGUE_HISTORY_MAX:
+                history = history[-DIALOGUE_HISTORY_MAX:]
+            state["dialogue_history"] = history
 
         return narrative, state
 
@@ -640,6 +671,39 @@ class GraphEngine:
             return state
         except Exception as e:
             logger.error(f"Engine.replay_to_state: 失败 {e}")
+            return None
+
+    async def rollback_session(
+        self,
+        session_id: str,
+        target_version: int,
+    ) -> Optional[GameState]:
+        """回滚到指定事件版本，返回重建后的 GameState
+
+        需要 event_log 已配置。
+        target_version 超出范围时返回 None。
+        """
+        if not self._event_log:
+            logger.warning("Engine.rollback_session: event_log 未配置")
+            return None
+        try:
+            state = await self._event_log.rollback_to_version(
+                session_id, target_version,
+            )
+            if state is None:
+                logger.warning(
+                    f"Engine.rollback_session: 版本 {target_version} 越界 "
+                    f"session={session_id[:8]}"
+                )
+                return None
+            logger.info(
+                f"Engine.rollback_session: session={session_id[:8]} "
+                f"target_version={target_version} "
+                f"state_keys={list(state.keys())}"
+            )
+            return state
+        except Exception as e:
+            logger.error(f"Engine.rollback_session: 失败 {e}")
             return None
 
     # ── 工厂方法 ──

@@ -11,7 +11,7 @@ Node 签名:
 from __future__ import annotations
 
 from typing import Optional
-from src.state.game_state import GameState
+from src.state.game_state import GameState, format_dialogue_history
 from src.tools import get_logger, get_settings
 
 logger = get_logger(__name__)
@@ -246,6 +246,7 @@ async def _call_llm_for_narrative(
     npc_dialogue: str = "",
     clue_discovery: str = "",
     intent_type: str = "",
+    dialogue_history_str: str = "",
 ) -> LLMResult:
     """调用 LLM 生成叙事文本
 
@@ -294,7 +295,11 @@ async def _call_llm_for_narrative(
         if clue_discovery:
             context_parts.append(f"\n<clue_discovery>\n{clue_discovery}\n</clue_discovery>")
 
-        context_parts.append(f"叙事历史: {narrative_history[-300:] if narrative_history else '无'}")
+        # 用结构化对话历史替换原来的截断叙事历史
+        if dialogue_history_str:
+            context_parts.append(f"\n【近5轮对话历史】\n{dialogue_history_str}")
+        else:
+            context_parts.append(f"叙事历史: {narrative_history[-300:] if narrative_history else '无'}")
         context = "\n".join(context_parts)
         messages.append({"role": "user", "content": context})
 
@@ -340,6 +345,7 @@ async def _call_llm_for_narrative_chain(
     rag_context: str = "",
     narrative_history: str = "",
     player_input: str = "",
+    dialogue_history_str: str = "",
 ) -> LLMResult:
     """调用 LLM 基于 executed_actions 链生成叙事文本"""
     try:
@@ -355,7 +361,10 @@ async def _call_llm_for_narrative_chain(
             context_parts.append(rag_context)
         if player_input:
             context_parts.append(f"<player_input>\n{player_input}\n</player_input>")
-        context_parts.append(f"叙事历史: {narrative_history[-300:] if narrative_history else '无'}")
+        if dialogue_history_str:
+            context_parts.append(f"\n【近5轮对话历史】\n{dialogue_history_str}")
+        else:
+            context_parts.append(f"叙事历史: {narrative_history[-300:] if narrative_history else '无'}")
         messages.append({"role": "user", "content": "\n".join(context_parts)})
         return await _call_llm("standard", messages)
     except Exception as e:
@@ -380,6 +389,10 @@ async def narrate_node(state: GameState) -> dict:
     narrative_history = state.get("narrative", "")
     session_id = state.get("session_id", "")
 
+    # 从 dialogue_history 取近5轮作为对话历史上下文
+    dialogue_history = state.get("dialogue_history", [])
+    dialogue_history_str = format_dialogue_history(dialogue_history, recent_n=5)
+
     # ── 获取玩家已发现的知识（防剧透） ──
     known_knowledge: list[str] = []
     if session_id:
@@ -401,6 +414,7 @@ async def narrate_node(state: GameState) -> dict:
             rag_context=rag_context,
             narrative_history=narrative_history,
             player_input=player_input,
+            dialogue_history_str=dialogue_history_str,
         )
         if result.is_ok:
             narrative = result.text
@@ -432,6 +446,7 @@ async def narrate_node(state: GameState) -> dict:
         npc_dialogue=npc_dialogue,
         clue_discovery=clue_discovery,
         intent_type=intent_type,
+        dialogue_history_str=dialogue_history_str,
     )
 
     if result.is_ok:

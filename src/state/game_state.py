@@ -103,6 +103,9 @@ class GameState(TypedDict):
     pending_tier1_events: list[dict]    # state_extractor 提取的 Tier 1 待处理事件
     pending_tier2_facts: list[str]      # state_extractor 提取的 Tier 2 待写入事实
 
+    # ── 对话历史（跨轮累积，cap 20 轮） ──
+    dialogue_history: list[dict]        # [{"turn":N, "player":"...", "keeper":"..."}, ...]
+
     # ── 运行时元数据 ──
     errors: list[str]                   # 执行过程中的错误记录
     node_trace: list[dict]              # 节点执行追踪日志
@@ -165,9 +168,37 @@ def create_initial_state(
         "attention_focus": None,
         "pending_tier1_events": [],
         "pending_tier2_facts": [],
+        "dialogue_history": [],
         "errors": [],
         "node_trace": [],
     }
+
+
+DIALOGUE_HISTORY_MAX = 20
+"""dialogue_history 最大保留轮次"""
+
+
+def format_dialogue_history(
+    history: list[dict],
+    recent_n: int = 5,
+) -> str:
+    """将 dialogue_history 格式化为 LLM 友好的多轮对话文本
+
+    从历史中取最近 recent_n 轮，按时间正序排列。
+    每轮格式： 第N轮 玩家: xxx 守密人: xxx
+    """
+    if not history:
+        return ""
+    recent = history[-recent_n:]
+    lines: list[str] = []
+    for entry in recent:
+        turn = entry.get("turn", "?")
+        player = entry.get("player", "")
+        keeper = entry.get("keeper", "")
+        lines.append(f"第{turn}轮")
+        lines.append(f"  玩家: {player}")
+        lines.append(f"  守密人: {keeper}")
+    return "\n".join(lines)
 
 
 def create_state_view(state: GameState, view_keys: list[str]) -> dict:

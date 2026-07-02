@@ -15,7 +15,7 @@ from __future__ import annotations
 import json
 import re
 from typing import Any, Optional
-from src.state.game_state import GameState
+from src.state.game_state import GameState, format_dialogue_history
 from src.tools import get_logger, get_settings
 
 logger = get_logger(__name__)
@@ -377,6 +377,10 @@ async def intent_node(state: GameState) -> dict:
     game_phase = state.get("game_phase", "exploration")
     narrative = state.get("narrative", "")
 
+    # 从 dialogue_history 取近5轮作为对话历史上下文
+    dialogue_history = state.get("dialogue_history", [])
+    dialogue_history_str = format_dialogue_history(dialogue_history, recent_n=5)
+
     if not player_input:
         logger.warning("intent_node: 无玩家输入")
         return {
@@ -409,7 +413,12 @@ async def intent_node(state: GameState) -> dict:
                 logger.debug(f"intent_node: 场景查询失败（非阻塞）: {e}")
 
     # ── 尝试 LLM ──
-    context_text = f"阶段={game_phase}, 最近叙事: {narrative[-200:]}" if narrative else f"阶段={game_phase}"
+    context_parts = [f"阶段={game_phase}"]
+    if narrative:
+        context_parts.append(f"最近叙事: {narrative[-200:]}")
+    if dialogue_history_str:
+        context_parts.append(f"对话历史:\n{dialogue_history_str}")
+    context_text = " | ".join(context_parts)
     result = await _call_llm_for_intent(player_input, context_text, scene_targets=scene_targets)
 
     if result.is_ok:
