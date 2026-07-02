@@ -391,9 +391,9 @@ async def npc_dialogue_node(state: GameState) -> dict:
         f"new_tags={new_tags}"
     )
 
+    # npc_dialogue 供 narrate_node 读取并包装成最终叙事文本。
     return {
-        "narrative": npc_reply,
-        "npc_dialogue": npc_reply,  # 供 narrate_node 读取，保留 NPC 发言原文
+        "npc_dialogue": npc_reply,
         "resolution": {
             "success": True,
             "npc_name": npc_name,
