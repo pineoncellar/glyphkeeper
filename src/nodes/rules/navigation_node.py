@@ -161,7 +161,7 @@ async def _build_location_physical_reality(
 
     # 查目标地点的物品
     interactable_rows = await conn.fetch(
-        """SELECT i.key, i.name, i.tags FROM interactables i
+        """SELECT i.key, i.name, i.tags, i.state FROM interactables i
            JOIN locations l ON i.location_id = l.id
            WHERE l.key = $1""",
         location_key,
@@ -193,8 +193,15 @@ async def _build_location_physical_reality(
 
     # 物品
     if interactable_rows:
-        item_names = ";".join(r["name"] for r in interactable_rows)
-        xml_parts.append(f'  <items>{item_names}</items>')
+        xml_parts.append("  <items>")
+        for item in interactable_rows:
+            attrs = f'id="{item["key"]}"'
+            if item.get("state"):
+                attrs += f' state="{item["state"]}"'
+            if item.get("tags"):
+                attrs += f' tags={json.dumps(item["tags"], ensure_ascii=False)}'
+            xml_parts.append(f'    <item {attrs}>{item["name"]}</item>')
+        xml_parts.append("  </items>")
 
     # 邻接场景
     xml_parts.append("  <adjacent_locations>")

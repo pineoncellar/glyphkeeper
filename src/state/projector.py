@@ -132,6 +132,7 @@ class StateProjector:
                     "name": item_data.get("name", ""),
                     "location_id": location_id,
                     "tags": item_data.get("tags", []),
+                    "state": item_data.get("state", ""),
                 })
 
                 # 物品的 clues 字段含 required_check 和 target_knowledge

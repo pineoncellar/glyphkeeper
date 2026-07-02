@@ -79,6 +79,7 @@ class StaticReadStore:
                 name TEXT NOT NULL,
                 location_id UUID REFERENCES locations(id),
                 tags TEXT[] DEFAULT '{}',
+                state TEXT DEFAULT '',
                 world_id TEXT NOT NULL DEFAULT ''
             )
         """)
@@ -220,12 +221,13 @@ class StaticReadStore:
             iid = item.get("id", str(uuid.uuid4()))
             try:
                 await conn.execute(
-                    """INSERT INTO interactables (id, key, name, location_id, tags, world_id)
-                       VALUES ($1,$2,$3,$4,$5::text[],$6)
+                    """INSERT INTO interactables (id, key, name, location_id, tags, state, world_id)
+                       VALUES ($1,$2,$3,$4,$5::text[],$6,$7)
                        ON CONFLICT (key) DO NOTHING""",
                     iid, item["key"], item["name"],
                     item.get("location_id"),
                     item.get("tags", []),
+                    item.get("state", ""),
                     wid,
                 )
                 count += 1
