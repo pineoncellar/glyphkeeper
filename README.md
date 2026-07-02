@@ -156,7 +156,7 @@ graph TB
 
 <table>
 <tr>
-    <th rowspan="13" style="text-align:center; vertical-align:middle; width:48px;">系统框架</th>
+    <th rowspan="17" style="text-align:center; vertical-align:middle; width:48px;">系统框架</th>
     <th style="width:48px; text-align:center;">状态</th>
     <th colspan="2" style="text-align:center;">模块与说明</th>
 </tr>
@@ -171,21 +171,26 @@ graph TB
 <tr><td style="text-align:center;">✅</td><td colspan="2">LightRAG 接入</td></tr>
 <tr><td style="text-align:center;">✅</td><td colspan="2">双脑记忆系统</td></tr>
 <tr><td style="text-align:center;">✅</td><td colspan="2">对象名称消岐系统</td></tr>
+<tr><td style="text-align:center;">🔄</td><td colspan="2">状态同步模块</td></tr>
+<tr><td style="text-align:center;">⬜</td><td colspan="2" style="padding-left:2em;">├ known_knowledge未随存档存读而修改</td></tr>
+<tr><td style="text-align:center;">⬜</td><td colspan="2" style="padding-left:2em;">├ 增加历史消息数</td></tr>
 <tr><td style="text-align:center;">🔄</td><td colspan="2">Worker 后台任务</td></tr>
 <tr><td style="text-align:center;">⬜</td><td colspan="2">多世界并行与管理</td></tr>
 <tr>
-    <th rowspan="12" style="text-align:center; vertical-align:middle; width:48px; border-top:2px solid #d0d7de;">游戏系统</th>
+    <th rowspan="14" style="text-align:center; vertical-align:middle; width:48px; border-top:2px solid #d0d7de;">游戏系统</th>
 </tr>
 <tr><td style="text-align:center;">🔄</td><td colspan="2">角色卡系统，职业选择、属性骰点、技能与背景</td>
 <tr><td style="text-align:center;">🔄</td><td colspan="2">调查与线索系统</td></tr>
 <tr><td style="text-align:center;">⬜</td><td colspan="2" style="padding-left:2em;">├ 重复检定请求</td></tr>
-<tr><td style="text-align:center;">⬜</td><td colspan="2" style="padding-left:2em;">├ 无线索时的幻觉问题</td></tr>
+<tr><td style="text-align:center;">✅</td><td colspan="2" style="padding-left:2em;">├ 无线索时的幻觉问题</td></tr>
+<tr><td style="text-align:center;">✅</td><td colspan="2" style="padding-left:2em;">├ 日记等线索的递进问题</td></tr>
 <tr><td style="text-align:center;">🔄</td><td colspan="2">NPC 对话系统</td></tr>
+<tr><td style="text-align:center;">⬜</td><td colspan="2" style="padding-left:2em;">├ 场景幻觉问题</td></tr>
 <tr><td style="text-align:center;">✅</td><td colspan="2">CoC 7版技能检定</td></tr>
 <tr><td style="text-align:center;">⬜</td><td colspan="2">战斗轮与体力系统</td></tr>
 <tr><td style="text-align:center;">⬜</td><td colspan="2">理智与疯狂</td></tr>
-<tr><td style="text-align:center;">🔄</td><td colspan="2">场景切换与 location 更新</td></tr>
-<tr><td style="text-align:center;">⬜</td><td colspan="2" style="padding-left:2em;">├ 场景切换后的新场景描述</td></tr>
+<tr><td style="text-align:center;">✅</td><td colspan="2">场景切换与 location 更新</td></tr>
+<tr><td style="text-align:center;">✅</td><td colspan="2" style="padding-left:2em;">├ 场景切换后的新场景描述</td></tr>
 <tr><td style="text-align:center;">⬜</td><td colspan="2">物品背包系统</td></tr>
 </table>
 
