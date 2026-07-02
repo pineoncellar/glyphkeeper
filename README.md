@@ -8,22 +8,13 @@
 
 ### 基于 LangGraph 图编排与事件溯源的 AI COC7版规则跑团守密人系统
 
-> **核心理念**：解决 LLM 在长程叙事中的灾难性遗忘与角色悖论问题，创造绝对中立阵营的ai守密人，能遵守COC7版规则与模组大纲，提供原汁原味（？）的COC跑团体验。
-
 ## 📖 项目简介
 
 **GlyphKeeper** 是一个为《克苏鲁的呼唤》桌面角色扮演游戏设计的智能守密人（Keeper）系统。它采用 **LangGraph StateGraph 图编排架构**和**双脑式记忆系统**，通过将 AI 守密人的职责拆解为多个专业化 Node，实现了高质量的长程叙事和规则裁决能力。
 
-传统的"单体 LLM + 提示词工程"方案存在根本性矛盾：同一个模型既要发挥创造性进行叙事，又要严格维护游戏状态和规则，这导致了记忆混乱和逻辑冲突。本项目受 **Google DeepMind Concordia** 框架与 **ChatRPG v2** 论文启发，通过**关注点分离** 原则，将守密人的能力分解为协同工作的多个专业 Node，并基于**事件溯源（Event Sourcing）** 构建单一事实来源。
+本项目受 [**Google DeepMind Concordia**](https://github.com/google-deepmind/concordia) 框架与 [**ChatRPG v2**](https://arxiv.org/abs/2210.03620) 论文启发，通过**关注点分离** 原则，将守密人的能力分解为协同工作的多个专业 Node，并基于**事件溯源（Event Sourcing）** 构建单一事实来源。
 
-## 🎯 核心痛点与解决方案
-
-| 痛点 | 传统 LLM 方案的问题 | GlyphKeeper 解决方案 |
-| --- | --- | --- |
-| **记忆遗忘** | 依赖有限的 Context Window，随对话变长必然遗忘 | **双脑式记忆架构**：结构化数据存储在 PostgreSQL（CQRS 读模型），非结构化叙事存储在基于 LightRAG 的向量/图数据库 |
-| **角色冲突** | 单个模型既要"创造性叙事"又要"严格维护状态" | **Node 分工**：LLM Nodes 负责创作，Rule Nodes 负责裁决，Reducer 唯一修改状态 |
-| **逻辑不一致** | LLM 凭空编造或记忆错乱（如：搜索过的房间重复刷新物品） | **事件溯源**：所有状态变更为不可变 Event，Engine → Reducer 维护一致性，LLM 只读不写 |
-| **规则混淆** | LLM 虚构或混淆 CoC 规则（如：错误的孤注一掷判定） | **确定性规则内核**：`domain/` 层 100% 无 LLM 逻辑；`nodes/rules/` 纯 Python 裁决 |
+> **核心理念**：解决 LLM 在长程叙事中的灾难性遗忘与角色悖论问题，创造绝对中立阵营的ai守密人，能遵守COC7版规则与模组大纲，提供原汁原味（？）的COC跑团体验。
 
 ---
 
@@ -165,7 +156,7 @@ graph TB
 
 <table>
 <tr>
-    <th rowspan="17" style="text-align:center; vertical-align:middle; width:48px;">系统框架</th>
+    <th rowspan="18" style="text-align:center; vertical-align:middle; width:48px;">系统框架</th>
     <th style="width:48px; text-align:center;">状态</th>
     <th colspan="2" style="text-align:center;">模块与说明</th>
 </tr>
@@ -174,6 +165,7 @@ graph TB
 <tr><td style="text-align:center;">✅</td><td colspan="2">统一执行协议</td></tr>
 <tr><td style="text-align:center;">✅</td><td colspan="2">LangGraph引擎，管理图调用与会话生命周期</td></tr>
 <tr><td style="text-align:center;">✅</td><td colspan="2">StateGraph 图编排，条件路由分流意图，子图处理战斗与调查</td></tr>
+<tr><td style="text-align:center;">⬜</td><td colspan="2" style="padding-left:2em;">├ 多意图处理</td></tr>
 <tr><td style="text-align:center;">✅</td><td colspan="2">GameState&amp;WorldManager世界状态管理</td></tr>
 <tr><td style="text-align:center;">✅</td><td colspan="2">大语言模型云提供方适配</td></tr>
 <tr><td style="text-align:center;">✅</td><td colspan="2">CQRS 读模型表与写入管线</td></tr>
@@ -192,7 +184,7 @@ graph TB
 <tr><td style="text-align:center;">✅</td><td colspan="2">调查与线索系统（Archivist + clue_discoveries 线索映射表）</td></tr>
 <tr><td style="text-align:center;">⬜</td><td colspan="2" style="padding-left:2em;">├ 重复检定请求</td></tr>
 <tr><td style="text-align:center;">✅</td><td colspan="2" style="padding-left:2em;">├ 无线索时的幻觉问题</td></tr>
-<tr><td style="text-align:center;">✅</td><td colspan="2" style="padding-left:2em;">├ 日记等线索的递进问题</td></tr>
+<tr><td style="text-align:center;">⬜</td><td colspan="2" style="padding-left:2em;">├ 日记等线索的递进问题</td></tr>
 <tr><td style="text-align:center;">✅</td><td colspan="2">NPC 对话系统（npc_dialogue_node + 关系追踪）</td></tr>
 <tr><td style="text-align:center;">⬜</td><td colspan="2" style="padding-left:2em;">├ 场景幻觉问题</td></tr>
 <tr><td style="text-align:center;">✅</td><td colspan="2">CoC 7版技能检定</td></tr>
