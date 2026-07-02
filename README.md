@@ -29,7 +29,7 @@
 
 ## 🏗️ 系统架构
 
-GlyphKeeper 采用 **4 层架构**，是一个 **LangGraph StateGraph 驱动**的事件驱动系统。
+GlyphKeeper 采用 **8 层架构**，是一个 **LangGraph StateGraph 驱动**的事件驱动系统。
 
 > **核心范式**：`langgraph stategraph + reducer pattern + deterministic game engine + LLM node system`
 
@@ -58,16 +58,17 @@ graph TB
 
     subgraph "🧩 Nodes"
         LLMN["🤖 LLM Nodes<br/>intent / narrate / adjudicate / npc_dialogue"]
-        RuleN["📐 Rule Nodes<br/>combat / sanity / skill"]
-        ToolN["🔧 Tool Nodes<br/>dice / db_lookup / rag_lookup / roll / archivist"]
+        RuleN["📐 Rule Nodes<br/>combat / sanity / skill / navigation"]
+        ToolN["🔧 Tool Nodes<br/>dice / db_lookup / rag_lookup / roll /<br/>archivist / disambiguation / state_extractor"]
     end
 
     subgraph "🗄️ State & Memory"
         State["📦 GameState<br/>(LangGraph TypedDict)"]
         Reducer["🔄 Reducer<br/>唯一修改 State 的入口"]
+        Validator["✅ StateValidator<br/>Tier 1 事件校验"]
         PG[("PostgreSQL(pgembed)<br/>结构化数据")]
         RAG[("LightRAG<br/>向量/图存储")]
-        Workers["⚙️ Workers<br/>记忆固化 / 摘要"]
+        Workers["⚙️ Workers<br/>记忆固化 / 摘要 / 备份"]
         CQRS["📖 CQRS Read Models<br/>StaticReadStore"]
     end
 
@@ -86,10 +87,12 @@ graph TB
     Router --> LLMN
 
     Engine --> Reducer
+    Engine --> Validator
     LLMN --> Reducer
     RuleN --> Reducer
     ToolN --> Reducer
     Reducer --> State
+    Validator --> State
 
     State --> PG
     State -.-> RAG
@@ -99,17 +102,18 @@ graph TB
     RuleN --> Domain
 ```
 
-### 四层详解
+### 八层架构详解
 
 | 层级 | 目录 | 职责 |
 |------|------|------|
 | **🔌 Adapter 层** | `src/adapter/` | 统一接入层，定义 `InboundMessage`/`OutboundMessage` 协议 |
-| **🧠 Runtime 层** | `src/runtime/` | 封装 LangGraph CompiledGraph、多会话调度、执行追踪 |
+| **🧠 Runtime 层** | `src/runtime/` | Graph 执行引擎、多会话调度、执行追踪 |
 | **🔁 Graph 层** | `src/graph/` | LangGraph StateGraph 拓扑定义，含条件路由与子图 |
 | **🧩 Node 层** | `src/nodes/` | 所有可执行能力单元（LLM 节点 / 规则节点 / 工具节点） |
 | **🗄️ 数据层** | `src/state/` + `src/memory/` | Event Sourcing + CQRS + 双脑记忆架构 |
 | **🎲 域层** | `src/domain/` | 100% 确定性 CoC 规则内核 |
 | **🔧 工具层** | `src/tools/` | 外部工具（骰子 / LLM 客户端 / PG 管理 / 配置） |
+| **⚙️ Worker 层** | `src/workers/` | 后台记忆固化、世界摘要、健康检查与备份 |
 
 ### 执行流程：双脑路由拓扑
 
@@ -126,19 +130,24 @@ graph TB
     │       ↓
     ├── db_lookup_node (始终执行 — 查 PG 读模型 → <physical_reality> XML)
     │       ↓
+    ├── disambiguation_node (三级降级实体消歧)
+    │       ↓
     ├── route_by_intent (条件边决定下一跳)
     │   ├──→ combat_subgraph (战斗循环: dice_roll → resolve_combat)
     │   ├──→ investigate_subgraph (技能检定: resolve_skill → archivist)
+    │   ├──→ navigation_node (纯逻辑验证出口 + 更新位置)
     │   ├──→ npc_dialogue_node (NPC 对话生成)
     │   └──→ → rag_lookup_node (按需查 LightRAG → <semantic_knowledge>)
     │               ↓
-    └── narrate_node (LLM 叙事生成)
+    ├── narrate_node (LLM 叙事生成)
+    │       ↓
+    └── state_extractor_node (状态同步)
     ↓
 [Reducer] reduce_state(state_patch → new_state)
     ↓
-[EventLog] 事件溯源记录
+[EventLog] 事件溯源记录 → [StateValidator] 校验 Tier1 → [EventStore]
     ↓
-[Workers] 后台固化记忆
+[Workers] 后台固化记忆 (Tier2 → LightRAG)
 ```
 
 ### 执行模式
@@ -166,29 +175,29 @@ graph TB
 <tr><td style="text-align:center;">✅</td><td colspan="2">LangGraph引擎，管理图调用与会话生命周期</td></tr>
 <tr><td style="text-align:center;">✅</td><td colspan="2">StateGraph 图编排，条件路由分流意图，子图处理战斗与调查</td></tr>
 <tr><td style="text-align:center;">✅</td><td colspan="2">GameState&amp;WorldManager世界状态管理</td></tr>
-<tr><td style="text-align:center;">🔄</td><td colspan="2">大语言模型云提供方适配</td></tr>
+<tr><td style="text-align:center;">✅</td><td colspan="2">大语言模型云提供方适配</td></tr>
 <tr><td style="text-align:center;">✅</td><td colspan="2">CQRS 读模型表与写入管线</td></tr>
 <tr><td style="text-align:center;">✅</td><td colspan="2">LightRAG 接入</td></tr>
 <tr><td style="text-align:center;">✅</td><td colspan="2">双脑记忆系统</td></tr>
 <tr><td style="text-align:center;">✅</td><td colspan="2">对象名称消岐系统</td></tr>
 <tr><td style="text-align:center;">🔄</td><td colspan="2">状态同步模块</td></tr>
-<tr><td style="text-align:center;">⬜</td><td colspan="2" style="padding-left:2em;">├ known_knowledge未随存档存读而修改</td></tr>
 <tr><td style="text-align:center;">⬜</td><td colspan="2" style="padding-left:2em;">├ 增加历史消息数</td></tr>
-<tr><td style="text-align:center;">🔄</td><td colspan="2">Worker 后台任务</td></tr>
+<tr><td style="text-align:center;">✅</td><td colspan="2">Worker 后台任务（记忆固化 / 世界摘要 / 健康检查备份）</td></tr>
 <tr><td style="text-align:center;">⬜</td><td colspan="2">多世界并行与管理</td></tr>
+<tr><td style="text-align:center;">⬜</td><td colspan="2" style="padding-left:2em;">├ known_knowledge未随存档存读而修改</td></tr>
 <tr>
     <th rowspan="14" style="text-align:center; vertical-align:middle; width:48px; border-top:2px solid #d0d7de;">游戏系统</th>
 </tr>
-<tr><td style="text-align:center;">🔄</td><td colspan="2">角色卡系统，职业选择、属性骰点、技能与背景</td>
-<tr><td style="text-align:center;">🔄</td><td colspan="2">调查与线索系统</td></tr>
+<tr><td style="text-align:center;">✅</td><td colspan="2">角色卡系统（职业选择、属性骰点、技能与背景，CLI 向导已集成）</td>
+<tr><td style="text-align:center;">✅</td><td colspan="2">调查与线索系统（Archivist + clue_discoveries 线索映射表）</td></tr>
 <tr><td style="text-align:center;">⬜</td><td colspan="2" style="padding-left:2em;">├ 重复检定请求</td></tr>
 <tr><td style="text-align:center;">✅</td><td colspan="2" style="padding-left:2em;">├ 无线索时的幻觉问题</td></tr>
 <tr><td style="text-align:center;">✅</td><td colspan="2" style="padding-left:2em;">├ 日记等线索的递进问题</td></tr>
-<tr><td style="text-align:center;">🔄</td><td colspan="2">NPC 对话系统</td></tr>
+<tr><td style="text-align:center;">✅</td><td colspan="2">NPC 对话系统（npc_dialogue_node + 关系追踪）</td></tr>
 <tr><td style="text-align:center;">⬜</td><td colspan="2" style="padding-left:2em;">├ 场景幻觉问题</td></tr>
 <tr><td style="text-align:center;">✅</td><td colspan="2">CoC 7版技能检定</td></tr>
 <tr><td style="text-align:center;">⬜</td><td colspan="2">战斗轮与体力系统</td></tr>
-<tr><td style="text-align:center;">⬜</td><td colspan="2">理智与疯狂</td></tr>
+<tr><td style="text-align:center;">✅</td><td colspan="2">理智与疯狂（sanity_node + sanity_rules 完整实现）</td></tr>
 <tr><td style="text-align:center;">✅</td><td colspan="2">场景切换与 location 更新</td></tr>
 <tr><td style="text-align:center;">✅</td><td colspan="2" style="padding-left:2em;">├ 场景切换后的新场景描述</td></tr>
 <tr><td style="text-align:center;">⬜</td><td colspan="2">物品背包系统</td></tr>
@@ -338,13 +347,20 @@ GlyphKeeper/
 │   └── pg_data/             # pgembed 嵌入式 PostgreSQL 数据
 │
 ├── logs/                    # 日志目录
-│   └── llm_usage.jsonl      # LLM Token 使用统计
+│   ├── *.log                # 运行时日志（按日期轮转）
 │
-├── scripts/                 # 工具脚本
-│   ├── init_db.py           # 初始化数据库
+├── scripts/                 # 乱七八糟的工具脚本
+│   ├── init_db.py           # 数据库初始化
 │   ├── manage_worlds.py     # 世界管理
-│   ├── ingest_module.py     # 导入模组
+│   ├── ingest_module.py     # 模组摄入
+│   ├── ingest_rules.py      # 规则摄入
+│   ├── ingest_investigator.py # 调查员摄入
 │   ├── inspect_graph.py     # 检查 RAG 图谱
+│   ├── check_schema.py      # 模组 JSON schema 校验
+│   ├── verify_db.py         # 数据库完整性验证
+│   ├── verify_ingestion.py  # 摄入结果验证
+│   ├── verify_read_models.py # 读模型验证
+│   ├── reset_all_data.py    # 重置所有数据
 │   ├── smoke_test.py        # 冒烟测试
 │   └── run_all_tests.py     # 全量测试运行器
 │
@@ -374,7 +390,8 @@ GlyphKeeper/
 │   │   ├── module_loader.py # ModuleLoader — 模组载入
 │   │   ├── read_models.py   # StaticReadStore — CQRS 读模型表
 │   │   ├── projector.py     # StateProjector — 事件→读模型投影
-│   │   └── session_state.py # SessionKnowledgeState — 知识发现追踪
+│   │   ├── session_state.py # SessionKnowledgeState — 知识发现追踪
+│   │   └── state_validator.py # StateValidator — Tier 1 事件确定性校验
 │   │
 │   ├── graph/               # 🔁 LangGraph StateGraph 定义
 │   │   ├── keeper_graph.py       # 守密人主 Graph（双脑路由拓扑）
@@ -397,7 +414,9 @@ GlyphKeeper/
 │   │       ├── dice_node.py         # 掷骰执行
 │   │       ├── db_lookup_node.py    # PG 读模型查询 → <physical_reality>
 │   │       ├── rag_lookup_node.py   # LightRAG 检索 → <semantic_knowledge>
-│   │       └── roll_node.py         # 自动化检定
+│   │       ├── roll_node.py         # 自动化检定
+│   │       ├── disambiguation_node.py # 实体消歧
+│   │       └── state_extractor_node.py # 状态同步
 │   │
 │   ├── tools/               # 🔧 外部工具层
 │   │   ├── config.py        # 配置管理（config.yaml + providers.ini）
@@ -416,7 +435,8 @@ GlyphKeeper/
 │   │   ├── coc_rules.py     # 核心规则（成功等级/难度）
 │   │   ├── sanity_rules.py  # 理智规则（SAN 损失/疯狂）
 │   │   ├── combat_rules.py  # 战斗规则（伤害/护甲/武器）
-│   │   └── checks.py        # 检定逻辑
+│   │   ├── checks.py        # 检定逻辑
+│   │   └── navigation.py    # 导航验证
 │   │
 │   ├── memory/              # 🧠 长期记忆系统
 │   │   ├── event_store.py   # 事件溯源存储（PG/SQLite）
@@ -478,23 +498,31 @@ GlyphKeeper/
    → 查 interactables 表获取场景物品（书桌、床等）
    → 拼 <physical_reality> XML
 
-3. route_by_intent
+3. disambiguation_node (三级降级匹配)
+   → "书桌" → 匹配到 interactables.书桌 → resolved_targets
+
+4. route_by_intent
    → PHYSICAL_INTERACT → investigate_subgraph
 
-4. investigate_subgraph
+5. investigate_subgraph
    → resolve_skill: skill_node → 侦查检定
    → archivist_node: 解析目标 key + 查线索
 
-5. Archivist.inspect_target(session_id, resolved_key, ...)
+6. Archivist.inspect_target(session_id, resolved_key, ...)
    → 查 clue_discoveries 表关联线索
    → 发现"书桌→日记"的线索关联
 
-6. rag_lookup_node
+7. rag_lookup_node
    → needs_rag=false → 跳过
 
-7. narrate_node (LLM)
+8. narrate_node (LLM)
    → 叙事输出: "你拉开书桌的第三个抽屉，在一堆陈旧的账本后面，
      发现了一本皮质封面的日记。泛黄的纸页散发出霉味。"
+
+9. state_extractor_node (fast LLM)
+   → 提取 Tier 1: 无(纯叙事，无规则变更)
+   → 提取 Tier 2: "书桌抽屉里有一本皮质封面日记"
+   → 后台 _async_state_catchup 写入 LightRAG
 ```
 
 ### 场景 2：规则裁决
@@ -509,23 +537,30 @@ GlyphKeeper/
    → 意图类型: COMBAT_ACTION
    → skill_name: "斗殴"
 
-2. db_lookup_node
+2. db_lookup_node (SQL)
    → 查当前场景（确认是否有"邪教徒"目标）
 
-3. route_by_intent
+3. disambiguation_node
+   → "邪教徒" → 匹配 entities → resolved_targets
+
+4. route_by_intent
    → COMBAT_ACTION → combat_subgraph
 
-4. combat_subgraph
+5. combat_subgraph
    → dice_roll: 执行斗殴检定
    → resolve_combat: combat_node
       → domain/combat_rules.py (100% 确定性)
       → 计算命中/闪避/伤害
 
-5. rag_lookup_node
+6. rag_lookup_node
    → 条件触发（needs_rag 标记）
 
-6. narrate_node (standard LLM)
+7. narrate_node (standard LLM)
    → 叙事输出: "你握紧拳头，猛地向邪教徒挥去..."
+
+8. state_extractor_node (fast LLM)
+   → 提取 Tier 1 事件: combat 相关状态变更
+   → 后台 _async_state_catchup → StateValidator → EventStore
 ```
 
 ---
@@ -536,52 +571,51 @@ GlyphKeeper/
 
 ```yaml
 project:
-  name: "GlyphKeeper"
-  active_world: "my_campaign"          # 当前激活的世界
-  debug: false                         # 调试模式
+  name: GlyphKeeper
+  debug: true                          # 调试模式
+  active_world: test                   # 当前激活的世界
   model_cost_tracking: false           # 是否开启模型成本追踪
-  model_usage_logging: true            # 启用 Token 统计
-  model_usage_log_path: "logs/llm_usage.jsonl"
 
-database:
-  host: "localhost"
-  port: "5432"
-  username: "postgres"
-  password: "your_password"
-  project_name: "GlyphKeeper"
-
-# 三级模型配置
 model_tiers:
-  fast: "gpt-4o-mini"       # 快速响应（意图分析等）
-  standard: "gpt-4o"        # 常规叙事
-  smart: "gpt-4o"           # 复杂推理
-
-# 模型详细配置（成本追踪可选）
-models:
-  gpt-4o-mini:
-    provider: "openai"
-    model_name: "gpt-4o-mini"
+  fast:                                # 快速响应（意图分析）
+    provider: SILKFLOW
+    model_name: deepseek-ai/DeepSeek-V3
+    temperature: 0.3
+    max_tokens: 512
+    input_cost: 2
+    output_cost: 3
+  standard:                            # 标准（规则解释）
+    provider: SILKFLOW
+    model_name: deepseek-ai/DeepSeek-V3.2
     temperature: 0.7
-    max_tokens: 2000
-
-  gpt-4o:
-    provider: "openai"
-    model_name: "gpt-4o"
+    max_tokens: 2048
+    input_cost: 2
+    output_cost: 3
+  smart:                               # 智能（叙事生成）
+    provider: SILKFLOW
+    model_name: deepseek-ai/DeepSeek-V4-Flash
     temperature: 0.8
-    max_tokens: 4000
+    max_tokens: 4096
+    input_cost: 2
+    output_cost: 3
 
-# LangSmith 可观测性（可选）
+vector_store:
+  provider: LOCAL
+  embedding_model_name: Alibaba-NLP/gte-modernbert-base
+  chunk_size: 500
+  chunk_overlap: 50
+  embedding_dim: 768
+  input_cost: 0
+  output_cost: 0
+
+lightrag:
+  default_query_mode: hybrid           # local / global / hybrid / naive
+  default_top_k: 60
+
 langsmith:
-  tracing_enabled: false
-  api_key: ""
-  project: "glyphkeeper"
-  endpoint: "https://api.smith.langchain.com"
-
-# LightRAG 检索配置
-rag_settings:
-  top_k: 60
-  mode: "hybrid"             # local / global / hybrid / mix
-  enable_llm: false          # 关闭 gleaning 减少 API 调用
+  tracing_enabled: true
+  project: glyphkeeper
+  endpoint: https://api.smith.langchain.com
 ```
 
 ---
