@@ -151,6 +151,54 @@ class EventLog:
         """获取会话的事件总数"""
         return await self._store.get_event_count(session_id)
 
+    async def rollback_to_version(
+        self,
+        session_id: str,
+        target_version: int,
+        base_state: Optional[GameState] = None,
+    ) -> Optional[GameState]:
+        """回滚到指定事件版本，返回重建后的 GameState
+
+        优先使用 NarrativeOutput 事件中保存的完整状态快照（state_snapshot）。
+        若快照不可用，降级到从空状态逐事件回放。
+
+        参数:
+          session_id:     会话 ID
+          target_version: 目标版本号（含）
+          base_state:     起始状态（None 则不使用）
+
+        返回:
+          重建后的 GameState，或 None（版本越界）
+        """
+        latest = await self._store.get_latest_version(session_id)
+        if target_version > latest or target_version < 0:
+            return None
+
+        events = await self._store.get_events(
+            session_id, since_version=0,
+        )
+        # 只取 target_version 之前的事件
+        events = [e for e in events if e.get("version", 0) <= target_version]
+
+        # 从后往前找最近的完整状态快照
+        for evt in reversed(events):
+            data = evt.get("data", {})
+            snapshot = data.get("state_snapshot") if isinstance(data, dict) else None
+            if snapshot:
+                # 把快照的运行时字段补齐为默认值（保持状态一致）
+                snapshot["player_input"] = ""
+                snapshot["intent"] = None
+                snapshot["resolution"] = None
+                snapshot["intent_queue"] = []
+                snapshot["current_intent_idx"] = 0
+                snapshot["executed_actions"] = []
+                return snapshot
+
+        # 没有快照 → 降级到从空状态逐事件回放
+        if base_state is None:
+            base_state = create_initial_state(session_id)
+        return apply_events_to_state(base_state, events)
+
     # ── 订阅机制 ──
 
     def subscribe(self, event_type: str, callback: EventCallback):

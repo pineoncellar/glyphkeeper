@@ -337,11 +337,14 @@ class CliAdapter(AbstractAdapter):
                 break
 
             # 处理 /roll 或 /r — 专业掷骰处理器
-            if msg.type == MessageType.SYSTEM_CMD and msg.text.strip().lower().startswith(("/roll", "/r ")):
-                out = await self._handle_roll_cmd(msg.text.strip(), self.session_id)
-                await self.send(out)
-                print()
-                continue
+            if msg.type == MessageType.SYSTEM_CMD:
+                lower_cmd = msg.text.strip().lower()
+                is_roll = lower_cmd == "/roll" or lower_cmd.startswith("/roll ") or lower_cmd.startswith("/r ")
+                if is_roll:
+                    out = await self._handle_roll_cmd(msg.text.strip(), self.session_id)
+                    await self.send(out)
+                    print()
+                    continue
 
             # 处理 /sheet
             if msg.type == MessageType.SYSTEM_CMD and msg.text.strip().lower() in ("/sheet", "/s"):
@@ -399,6 +402,13 @@ class CliAdapter(AbstractAdapter):
             # 处理 /ingest（不是游戏回合）
             if msg.type == MessageType.SYSTEM_CMD and msg.text.strip().lower().startswith("/ingest"):
                 out = await self.handle(msg)
+                await self.send(out)
+                print()
+                continue
+
+            # 处理 /rollback — 回滚到指定事件版本
+            if msg.type == MessageType.SYSTEM_CMD and msg.text.strip().lower().startswith("/rollback"):
+                out = await self._handle_rollback_cmd(msg.text.strip(), self.session_id)
                 await self.send(out)
                 print()
                 continue
@@ -736,6 +746,112 @@ class CliAdapter(AbstractAdapter):
             print(_color(f"掷骰结果提交失败: {e}", _RED))
 
         print()
+
+    async def _handle_rollback_cmd(self, cmd: str, session_id: str) -> OutboundMessage:
+        """处理 /rollback 命令 — 回滚到指定事件版本
+
+        用法:
+          /rollback                — 列出最近事件，引导交互
+          /rollback <version>      — 直接回滚到指定版本
+
+        流程：从 EventStore 读取事件列表 → 确认回滚目标 →
+        通过 Scheduler.rollback_session 替换会话状态。
+        """
+        if self._scheduler is None or self._scheduler.engine is None:
+            return OutboundMessage.system_msg("引擎不可用", level="error", session_id=session_id)
+
+        engine = self._scheduler.engine
+        event_log = engine.event_log
+        if event_log is None:
+            return OutboundMessage.system_msg(
+                "EventLog 未启用，无法回滚", level="error", session_id=session_id,
+            )
+
+        parts = cmd.split(maxsplit=1)
+        target_version = int(parts[1].strip()) if len(parts) > 1 else None
+
+        # 获取当前版本信息
+        latest_ver = await event_log.get_latest_version(session_id)
+        if latest_ver == 0:
+            return OutboundMessage.system_msg(
+                "当前会话无事件记录，无法回滚", level="warn", session_id=session_id,
+            )
+
+        # 未指定版本 → 列出最近事件供选择
+        if target_version is None:
+            events = await event_log.get_events(session_id, since_version=0)
+            total = len(events)
+            show = events[-10:]  # 最多显示最近 10 条
+            # 过滤掉 PlayerInput（回滚无意义）
+            show = [e for e in show if e.get("type") != "PlayerInput"]
+            lines = [
+                f"当前最新版本: {latest_ver}（共 {total} 条事件）",
+                "最近事件如下：",
+            ]
+            for evt in show:
+                v = evt.get("version", "?")
+                t = evt.get("type", "?")
+                ts = (evt.get("timestamp") or "")[11:19]
+                # 从 data 中取简短的描述文本
+                data = evt.get("data", {})
+                snippet = ""
+                if isinstance(data, dict):
+                    # NarrativeOutput → 优先取 patch.narrative
+                    if t in ("NarrativeOutput",):
+                        patch = data.get("patch", {})
+                        narrative = patch.get("narrative", "")
+                        if narrative:
+                            snippet = narrative[:60]
+                    # PlayerInput → 取 text
+                    elif t in ("PlayerInput",):
+                        text = data.get("text", "")
+                        if text:
+                            snippet = text[:40]
+                    # WorldInitialized → 显示模块名
+                    elif t in ("WorldInitialized",):
+                        module = data.get("module_name", "")
+                        if module:
+                            snippet = module[:40]
+                snippet_str = f"  {snippet}" if snippet else ""
+                lines.append(f"  #{v} [{t}] {ts}{snippet_str}")
+            lines.append("")
+            lines.append("使用 /rollback <版本号> 回滚到指定版本。")
+            return OutboundMessage.system_msg("\n".join(lines), session_id=session_id)
+
+        # 执行回滚
+        if target_version < 0 or target_version > latest_ver:
+            return OutboundMessage.system_msg(
+                f"版本 {target_version} 越界（当前范围 0-{latest_ver}）",
+                level="error", session_id=session_id,
+            )
+
+        # 如果目标是 PlayerInput 事件，自动跳到下一版（指向其后紧随的 NarrativeOutput）
+        events_at_target = await event_log.get_events(session_id, since_version=target_version - 1)
+        if events_at_target and events_at_target[0].get("type") == "PlayerInput":
+            adjusted = target_version + 1
+            if adjusted <= latest_ver:
+                logger.info(
+                    f"rollback: 跳过 PlayerInput #{target_version}，使用 #{adjusted}"
+                )
+                target_version = adjusted
+
+        success = await self._scheduler.rollback_session(session_id, target_version)
+        if not success:
+            return OutboundMessage.system_msg(
+                f"回滚到版本 {target_version} 失败", level="error", session_id=session_id,
+            )
+
+        # 获取回滚后的 state 信息
+        new_state = self._scheduler.get_session_state(session_id)
+        location = new_state.get("current_location", "") if new_state else ""
+        phase = new_state.get("game_phase", "") if new_state else ""
+        info = f"  当前位置: {location}" if location else ""
+        if phase:
+            info += f"  阶段: {phase}"
+        return OutboundMessage.system_msg(
+            f"已回滚到版本 {target_version}（最新 {latest_ver}）\n{info}",
+            level="info", session_id=session_id,
+        )
 
     # ================================================================
     # 存档系统

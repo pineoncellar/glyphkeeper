@@ -317,6 +317,37 @@ class InputScheduler:
             slot.last_active = time.time()
             slot.ctx = ExecutionContext(session_id=session_id)
 
+    async def rollback_session(
+        self,
+        session_id: str,
+        target_version: int,
+    ) -> bool:
+        """回滚到指定事件版本，替换当前会话的状态
+
+        依赖 engine.event_log 做状态重建。
+
+        返回:
+            True 回滚成功，False 失败（版本越界 / 无 event_log）
+        """
+        slot = self.get_session(session_id)
+        if slot is None:
+            logger.warning(f"Scheduler.rollback: 会话不存在 session={session_id[:8]}")
+            return False
+
+        rebuilt = await self.engine.rollback_session(session_id, target_version)
+        if rebuilt is None:
+            return False
+
+        async with slot.lock:
+            slot.state = rebuilt
+            slot.last_active = time.time()
+            slot.ctx = ExecutionContext(session_id=session_id)
+            logger.info(
+                f"Scheduler.rollback: session={session_id[:8]} "
+                f"target_version={target_version} 成功"
+            )
+        return True
+
     async def remove_session(self, session_id: str) -> bool:
         """删除一个会话及其状态"""
         key = self._key_for_session(session_id)

@@ -489,11 +489,13 @@ class GraphEngine:
             player_input = result.get("player_input", "")
             session_id = result.get("session_id", "")
 
-            # 1. 始终记录 PlayerInput 事件
+            # 始终记录 PlayerInput 事件
             await self._event_log.record_and_apply(
                 current=result,
                 patch={
                     "beat_counter": result.get("beat_counter", 0),
+                    "current_location": result.get("current_location", ""),
+                    "game_phase": result.get("game_phase", "exploration"),
                 },
                 event_type="PlayerInput",
                 source_node="engine",
@@ -504,7 +506,7 @@ class GraphEngine:
                 },
             )
 
-            # 2. 根据 resolution 内容判定事件子类型
+            # 根据 resolution 内容判定事件子类型
             check_type = resolution.get("check_type", "")
             success_label = resolution.get("success_label", "")
 
@@ -539,9 +541,23 @@ class GraphEngine:
                     },
                 )
 
-            # 3. narrative 更新事件（兜底 / 非战斗非检定轮）
+            # 始终记录 narrative 事件（只要有叙事文本）
             narrative = result.get("narrative", "")
-            if narrative and not success_label and intent_type != "COMBAT_ACTION":
+            if narrative:
+                # 构建完整持久状态快照（排除运行时字段，供回档重建）
+                runtime_keys = {
+                    "intent", "resolution", "intent_queue", "current_intent_idx",
+                    "executed_actions", "npc_dialogue_results", "npc_dialogue",
+                    "world_context", "physical_reality", "rag_context",
+                    "archivist_result", "entity_name_map", "_llm_trace",
+                    "narrative_output", "pending_tier1_events", "pending_tier2_facts",
+                    "player_input", "errors", "node_trace",
+                }
+                state_snapshot = {
+                    k: v for k, v in result.items()
+                    if k not in runtime_keys
+                }
+
                 await self._event_log.record_and_apply(
                     current=result,
                     patch={"narrative": narrative},
@@ -551,6 +567,7 @@ class GraphEngine:
                     extra_data={
                         "intent_type": intent_type,
                         "player_input": player_input[:60],
+                        "state_snapshot": state_snapshot,
                     },
                 )
 

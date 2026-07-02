@@ -25,6 +25,7 @@ APPEND_FIELDS = {
     "active_tags", "errors", "node_trace", "combatants",
     "pending_tier1_events", "pending_tier2_facts",
     "executed_actions", "npc_dialogue_results",
+    "dialogue_history",
 }
 """需要追加而非替换的 list 字段"""
 

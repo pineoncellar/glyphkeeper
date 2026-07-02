@@ -180,6 +180,26 @@ class EventStore:
             )
         return [self._row_to_event(row) for row in rows]
 
+    async def get_events_range(
+        self, session_id: str, up_to_version: int, world_id: str = "",
+    ) -> list[dict]:
+        """获取指定会话在 target_version 之前（含）的事件
+
+        用于回档重建状态。
+        """
+        conn = await self._get_conn()
+        if world_id:
+            rows = await conn.fetch(
+                "SELECT * FROM events WHERE session_id = $1 AND version <= $2 AND world_id = $3 ORDER BY version ASC",
+                session_id, up_to_version, world_id,
+            )
+        else:
+            rows = await conn.fetch(
+                "SELECT * FROM events WHERE session_id = $1 AND version <= $2 ORDER BY version ASC",
+                session_id, up_to_version,
+            )
+        return [self._row_to_event(row) for row in rows]
+
     async def replay(self, session_id: str, world_id: str = "") -> AsyncGenerator[dict, None]:
         """按 version 顺序回放事件（异步生成器）"""
         conn = await self._get_conn()

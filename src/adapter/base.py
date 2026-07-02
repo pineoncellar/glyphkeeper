@@ -73,7 +73,7 @@ class AbstractAdapter(ABC):
 
     async def run(self):
         """启动适配器（模板方法）"""
-        self._ensure_engine()
+        await self._ensure_engine()
 
         try:
             await self.run_impl()
@@ -99,7 +99,7 @@ class AbstractAdapter(ABC):
           DICE_RESULT  → 掷骰结果提交
           PLAYER_INPUT → 引擎执行
         """
-        self._ensure_engine()
+        await self._ensure_engine()
 
         # 确保 session_id 传递
         if not msg.session_id:
@@ -160,6 +160,7 @@ class AbstractAdapter(ABC):
                 "  /load [存档名]     - 读取存档\n"
                 "  /list /saves       - 列出所有存档\n"
                 "======= 调试 =======\n"
+                "  /rollback [版本]   - 回滚到指定事件版本\n"
                 "  /rag [模式] <内容>   - RAG 语义搜索调试\n"
                 "  /scene /sc         - 查看当前场景实体/物品/出口\n"
                 "  /debug /d          - 显示原始游戏状态\n"
@@ -370,7 +371,7 @@ class AbstractAdapter(ABC):
             )
 
         # 将会话状态注入 scheduler
-        self._ensure_engine()
+        await self._ensure_engine()
         from src.runtime.scheduler import SessionSlot
         from src.runtime.context import ExecutionContext as ECtx
 
@@ -409,10 +410,15 @@ class AbstractAdapter(ABC):
 
     # ── 工具方法 ──
 
-    def _ensure_engine(self):
-        """确保 engine 和 scheduler 已初始化（懒加载）"""
+    async def _ensure_engine(self):
+        """确保 engine 和 scheduler 已初始化（懒加载，带 EventLog 支持）"""
         if self._engine is None:
-            self._engine = GraphEngine(keeper_graph, mode=ENGINE_MODE_LANGGRAPH)
+            self._engine = await GraphEngine.create(
+                keeper_graph,
+                mode=ENGINE_MODE_LANGGRAPH,
+                enable_event_log=True,
+                enable_snapshot=False,
+            )
         if self._scheduler is None:
             self._scheduler = InputScheduler(self._engine)
 
