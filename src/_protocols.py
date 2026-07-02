@@ -9,7 +9,7 @@ from typing import TypedDict, Any, Optional
 from dataclasses import dataclass, field
 
 
-# ------- 1. Node 统一接口 -------
+# ------- Node 统一接口 -------
 
 class NodeInput(TypedDict):
     """Node 执行时的输入
@@ -43,7 +43,7 @@ class NodeOutput(TypedDict):
     # "END_TURN"   — 本轮结束，等下次玩家输入
 
 
-# ------- 2. State Mutation 协议 -------
+# ------- State Mutation 协议 -------
 
 # 所有 state 修改必须通过：
 #    Node 返回 state_patch → Engine 调用 Reducer → Reducer 生成新 State
@@ -73,7 +73,7 @@ class StatePatch:
     deletes: list[str] = field(default_factory=list)            # 要删除的字段
 
 
-# ------- 3. Reducer Contract（关键缺失补全） -------
+# ------- Reducer Contract（关键缺失补全） -------
 
 # Reducer 是唯一允许修改 State 的地方。以下定义其输入输出契约。
 
@@ -90,7 +90,7 @@ class ReducerOutput(TypedDict):
     applied_events: list[dict]  # 已应用的 events（已写入 EventStore）
 
 
-# ------- 4. Node 函数签名约束 -------
+# ------- Node 函数签名约束 -------
 
 # 每个 Node 必须是以下形式的异步函数：
 #   async def node_name(input: NodeInput) -> NodeOutput:
@@ -100,6 +100,6 @@ class ReducerOutput(TypedDict):
 # 注意：参数不再是 GameState，而是 NodeInput（含裁剪视图 + 记忆）
 #
 # 禁止的形式：
-#   ❌ async def node_name(input_str: str, config: dict) -> str:
-#   ❌ 直接修改 state 的某个字段
-#   ❌ 直接操作数据库或调用 LLM 而不通过工具
+#   async def node_name(input_str: str, config: dict) -> str:
+#   直接修改 state 的某个字段
+#   直接操作数据库或调用 LLM 而不通过工具
