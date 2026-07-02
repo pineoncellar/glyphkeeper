@@ -47,10 +47,29 @@ INTENT_SYSTEM_PROMPT = """你是 CoC (克苏鲁的呼唤) 守密人助手 — �
 - 前置的 RP 修辞（如"假装系鞋带蹲下身"）不作为独立意图，而是打包为该意图的 flavor_context
 - 如果一句话只表达了一个核心动作，即使有多步修辞描述，也只输出一个原子意图
 
+【场景截断与进位原则——MOVE 具有前置拦截权】
+- 如果玩家的意图包含"去某处并干某事"（如"进屋看看""去书房搜查"），
+  MOVE 具有绝对的前置拦截权。不要拆成"在当前房间搜" + "去那个房间"。
+  应该直接判定为一个 MOVE 意图，将"搜查"作为 data.detail 备注进去，
+  等移动成功换了场景后，由后续玩家输入或系统循环来处理搜查动作。
+- 关键——只有"改变当前所处场景/房间/地图"（如进屋、离开、下楼、推门进去）
+  才分类为 MOVE。在原场景内部为了接近目标产生的位移（如走向书桌、上前敲门、
+  挪到窗边），一律归入该物理交互的 flavor_context，绝不独立拆出 MOVE 意图。
+
 【排序规则】
-- 社交意图（暗示、对话）→ 物理交互（摸枪、开门、搜索）→ 战斗行动（攻击）→ 移动（去别处）
+- 社交意图（暗示、对话）→ 物理交互（摸枪、搜索）→ 战斗行动（攻击）→ 移动（去别处）
 - MOVE 意图强制排在队列末尾
 - 同类型意图保持原始输入中的出现顺序
+
+【TRPG 检定边界——严控 check_type 门槛】
+check_type 的取值只有以下三种情况：
+- "none": 默认值。日常动作、普通对话、打招呼、敲门、观察、问路等
+  无成功/失败机械后果的行为，一律锁死为"none"。不需要掷骰子。
+- "skill": 仅当玩家显式使用了特定技能（如"我潜行过去""我翻找书架"），
+  或者该动作具有明确的对抗性/功利性成功失败后果时才使用。
+- "stat": 纯力量/敏捷等属性对抗（如"我把门撞开"）。
+
+设置为"skill"时必须有充分理由：如果改成"none"对游戏体验毫无影响，就改成"none"。
 
 可选的意图类型 (type):
 - PHYSICAL_INTERACT: 物理交互（搜索、使用物品、开门、潜行拿东西等）
@@ -74,8 +93,8 @@ INTENT_SYSTEM_PROMPT = """你是 CoC (克苏鲁的呼唤) 守密人助手 — �
         "flavor_context": "玩家的 RP 修辞文本（没有则填空字符串）",
         "data": {
             "target": "作用对象（可选）",
-            "skill_name": "可能需要的技能名（可选）",
-            "check_type": "skill / stat / opposed / none（可选，默认 none）",
+            "skill_name": "可能需要的技能名（可选，check_type=none 时填空字符串）",
+            "check_type": "skill / stat / none（可选，默认 none）",
             "difficulty": "REGULAR / HARD / EXTREME（可选，默认 REGULAR）",
             "detail": "其他补充信息（可选）"
         }
@@ -83,17 +102,11 @@ INTENT_SYSTEM_PROMPT = """你是 CoC (克苏鲁的呼唤) 守密人助手 — �
 ]
 ```
 
-示例:
-输入: "我用眼神暗示旁边的队友，同时右手悄悄摸向腰间的转轮手枪，如果邪教徒动一下我就开枪"
+场景截断示例:
+输入: "您先别着急，我们先看看现场。#进屋看看"
 输出: [
-    {"type": "SOCIAL_INTERACT", "confidence": 0.9, "needs_rag": false, "core_action": "暗示队友", "flavor_context": "用眼神示意", "data": {"target": "队友", "skill_name": "心理学", "check_type": "skill", "difficulty": "REGULAR", "detail": "暗示队友准备行动"}},
-    {"type": "PHYSICAL_INTERACT", "confidence": 0.95, "needs_rag": false, "core_action": "拔出手枪", "flavor_context": "右手悄悄摸向腰间", "data": {"target": "转轮手枪", "skill_name": "潜行", "check_type": "skill", "difficulty": "HARD", "detail": "偷偷拔出转轮手枪不被发现"}},
-    {"type": "COMBAT_ACTION", "confidence": 0.9, "needs_rag": false, "core_action": "准备射击", "flavor_context": "如果邪教徒动一下就开枪", "data": {"target": "邪教徒", "skill_name": "手枪", "check_type": "skill", "difficulty": "REGULAR", "detail": "瞄准邪教徒准备随时开火"}}
-]
-
-输入: "我假装系鞋带蹲下身，趁邪教徒转头时把纸条塞进队友手心"
-输出: [
-    {"type": "SOCIAL_INTERACT", "confidence": 0.95, "needs_rag": false, "core_action": "传递纸条给队友", "flavor_context": "假装系鞋带蹲下身，趁邪教徒转头时", "data": {"target": "队友", "skill_name": "潜行", "check_type": "skill", "difficulty": "HARD", "detail": "偷偷将纸条塞给队友"}}
+    {"type": "SOCIAL_INTERACT", "confidence": 0.85, "needs_rag": false, "core_action": "安抚托马斯", "flavor_context": "您先别着急，先生", "data": {"target": "托马斯", "skill_name": "心理学", "check_type": "skill", "difficulty": "REGULAR", "detail": "安抚金博尔府管家托马斯的情绪"}},
+    {"type": "MOVE", "confidence": 0.95, "needs_rag": false, "core_action": "进入屋内", "flavor_context": "", "data": {"target": "书房", "skill_name": "", "check_type": "none", "difficulty": "REGULAR", "detail": "进屋去案发现场查看情况"}}
 ]
 
 输入: "我仔细检查书桌的抽屉"
@@ -104,6 +117,28 @@ INTENT_SYSTEM_PROMPT = """你是 CoC (克苏鲁的呼唤) 守密人助手 — �
 输入: "你好，你是谁"
 输出: [
     {"type": "SOCIAL_INTERACT", "confidence": 0.9, "needs_rag": false, "core_action": "打招呼", "flavor_context": "", "data": {"target": "", "skill_name": "", "check_type": "none", "difficulty": "REGULAR", "detail": "玩家打招呼"}}
+]
+
+输入: "金博尔先生在么？"
+输出: [
+    {"type": "SOCIAL_INTERACT", "confidence": 0.9, "needs_rag": false, "core_action": "喊话问候", "flavor_context": "", "data": {"target": "金博尔", "skill_name": "", "check_type": "none", "difficulty": "REGULAR", "detail": "站在门前喊话询问金博尔先生在不在"}}
+]
+
+输入: "#上前敲敲门"
+输出: [
+    {"type": "PHYSICAL_INTERACT", "confidence": 0.95, "needs_rag": false, "core_action": "敲门", "flavor_context": "上前", "data": {"target": "门", "skill_name": "", "check_type": "none", "difficulty": "REGULAR", "detail": "上前敲敲门引起注意"}}
+]
+
+输入: "我用眼神暗示旁边的队友，同时右手悄悄摸向腰间的转轮手枪，如果邪教徒动一下我就开枪"
+输出: [
+    {"type": "SOCIAL_INTERACT", "confidence": 0.9, "needs_rag": false, "core_action": "暗示队友", "flavor_context": "用眼神示意", "data": {"target": "队友", "skill_name": "心理学", "check_type": "skill", "difficulty": "REGULAR", "detail": "暗示队友准备行动"}},
+    {"type": "PHYSICAL_INTERACT", "confidence": 0.95, "needs_rag": false, "core_action": "拔出手枪", "flavor_context": "右手悄悄摸向腰间", "data": {"target": "转轮手枪", "skill_name": "潜行", "check_type": "skill", "difficulty": "HARD", "detail": "偷偷拔出转轮手枪不被发现"}},
+    {"type": "COMBAT_ACTION", "confidence": 0.9, "needs_rag": false, "core_action": "准备射击", "flavor_context": "如果邪教徒动一下就开枪", "data": {"target": "邪教徒", "skill_name": "手枪", "check_type": "skill", "difficulty": "REGULAR", "detail": "瞄准邪教徒准备随时开火"}}
+]
+
+输入: "我假装系鞋带蹲下身，趁邪教徒转头时把纸条塞进队友手心"
+输出: [
+    {"type": "SOCIAL_INTERACT", "confidence": 0.95, "needs_rag": false, "core_action": "传递纸条给队友", "flavor_context": "假装系鞋带蹲下身，趁邪教徒转头时", "data": {"target": "队友", "skill_name": "潜行", "check_type": "skill", "difficulty": "HARD", "detail": "偷偷将纸条塞给队友"}}
 ]
 
 如果无法识别意图，输出: [

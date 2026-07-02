@@ -61,11 +61,25 @@ async def skill_node(state: GameState) -> dict:
     penalty_dice = intent_data.get("penalty_dice", 0)
 
     if not skill_name:
+        # check_type=none 表示无需检定（如敲门、打招呼等日常动作），直接返回空成功
+        check_type = intent_data.get("check_type", "none")
+        if check_type == "none":
+            logger.debug(f"skill_node: 无需检定 (intent_{idx}, {current_intent.get('core_action', '')})")
+            return {
+                "executed_actions": [{
+                    "intent_id": f"intent_{idx}",
+                    "intent_type": current_intent.get("type", "PHYSICAL_INTERACT"),
+                    "rule_context": {"success": True, "check_type": "none", "description": "日常动作，无需检定"},
+                    "deterministic_changes": {},
+                    "raw_fixed_text": "",
+                    "flavor_context": current_intent.get("flavor_context", ""),
+                }],
+            }
         logger.warning("skill_node: 缺少 skill_name")
         return {
             "executed_actions": [{
                 "intent_id": f"intent_{idx}",
-                "intent_type": "PHYSICAL_INTERACT",
+                "intent_type": current_intent.get("type", "PHYSICAL_INTERACT"),
                 "rule_context": {"success": False, "error": "缺少技能名称", "skill_name": ""},
                 "deterministic_changes": {},
                 "raw_fixed_text": "",

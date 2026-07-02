@@ -314,6 +314,10 @@ def _build_chain_context(actions: list[dict], npc_results: list[dict]) -> str:
     for i, action in enumerate(actions):
         parts.append(f"  <action index='{i}'>")
         parts.append(f"    <intent_type>{action.get('intent_type', '')}</intent_type>")
+        if action.get("core_action"):
+            parts.append(f"    <core_action>{action['core_action']}</core_action>")
+        if action.get("detail"):
+            parts.append(f"    <detail>{action['detail']}</detail>")
         parts.append(f"    <rule_context>{json.dumps(action.get('rule_context', {}), ensure_ascii=False)}</rule_context>")
         if action.get("flavor_context"):
             parts.append(f"    <flavor_context>{action['flavor_context']}</flavor_context>")
@@ -335,6 +339,7 @@ async def _call_llm_for_narrative_chain(
     physical_reality: str = "",
     rag_context: str = "",
     narrative_history: str = "",
+    player_input: str = "",
 ) -> LLMResult:
     """调用 LLM 基于 executed_actions 链生成叙事文本"""
     try:
@@ -348,6 +353,8 @@ async def _call_llm_for_narrative_chain(
             context_parts.append(physical_reality)
         if rag_context:
             context_parts.append(rag_context)
+        if player_input:
+            context_parts.append(f"<player_input>\n{player_input}\n</player_input>")
         context_parts.append(f"叙事历史: {narrative_history[-300:] if narrative_history else '无'}")
         messages.append({"role": "user", "content": "\n".join(context_parts)})
         return await _call_llm("standard", messages)
@@ -383,6 +390,8 @@ async def narrate_node(state: GameState) -> dict:
         except Exception as e:
             logger.debug(f"narrator_node: 无法获取已发现知识: {e}")
 
+    player_input = state.get("player_input", "")
+
     # ── 路径 A: 有 executed_actions 链 → 链消费 ──
     if actions:
         result = await _call_llm_for_narrative_chain(
@@ -391,6 +400,7 @@ async def narrate_node(state: GameState) -> dict:
             physical_reality=physical_reality,
             rag_context=rag_context,
             narrative_history=narrative_history,
+            player_input=player_input,
         )
         if result.is_ok:
             narrative = result.text

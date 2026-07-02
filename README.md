@@ -37,20 +37,26 @@ graph TB
     subgraph "🧠 Runtime Layer"
         Engine["⚙️ GraphEngine<br/>(封装 CompiledGraph)"]
         Scheduler["📋 InputScheduler<br/>多会话调度"]
+        Dispatcher["🔁 NodeDispatcher<br/>重试 / 超时 / 容错"]
         Ctx["📦 ExecutionContext<br/>执行追踪"]
     end
 
-    subgraph "🔁 LangGraph StateGraph"
-        Keeper["👤 Keeper Graph<br/>(StateGraph<GameState>)"]
-        Router["🔄 route_by_intent<br/>(条件边)"]
-        Combat["⚔️ Combat Subgraph<br/>战斗循环"]
-        Investigate["🔍 Investigation Subgraph<br/>技能检定 → 线索查询"]
+    subgraph "🔁 LangGraph StateGraph — 四阶段串行循环管线"
+        Intent["① 意图裂变<br/>intent_node"]
+        LoopGuard["② 循环守卫<br/>loop_guard_node"]
+        DB["db_lookup_node"]
+        Disambig["disambiguation_node"]
+        Dispatch["dispatch_node<br/>COMBAT / MOVE / PHYSICAL / SOCIAL"]
+        ReduceIter["reduce_iter_node<br/>即时回写"]
+        Narrate["③ 叙事总装<br/>narrate_node"]
+        StateExt["④ 状态固化<br/>state_extractor_node"]
     end
 
-    subgraph "🧩 Nodes"
-        LLMN["🤖 LLM Nodes<br/>intent / narrate / adjudicate / npc_dialogue"]
-        RuleN["📐 Rule Nodes<br/>combat / sanity / skill / navigation"]
-        ToolN["🔧 Tool Nodes<br/>dice / db_lookup / rag_lookup / roll /<br/>archivist / disambiguation / state_extractor"]
+    subgraph "🧩 Rule Nodes（dispatch_node 内联调用）"
+        CombatN["combat_node"]
+        SkillN["skill_node + archivist_node"]
+        NavN["navigation_node"]
+        NPCN["npc_dialogue_node"]
     end
 
     subgraph "🗄️ State & Memory"
@@ -70,27 +76,36 @@ graph TB
     Player --> Adapter
     Adapter --> Scheduler
     Scheduler --> Engine
-    Engine --> Keeper
+    Engine --> Intent
 
-    Keeper --> Router
-    Router --> Combat
-    Router --> Investigate
-    Router --> LLMN
+    Intent --> LoopGuard
 
-    Engine --> Reducer
-    Engine --> Validator
-    LLMN --> Reducer
-    RuleN --> Reducer
-    ToolN --> Reducer
+    LoopGuard -->|"continue"| DB
+    DB --> Disambig
+    Disambig --> Dispatch
+    Dispatch --> CombatN
+    Dispatch --> SkillN
+    Dispatch --> NavN
+    Dispatch --> NPCN
+    CombatN --> ReduceIter
+    SkillN --> ReduceIter
+    NavN --> ReduceIter
+    NPCN --> ReduceIter
+    ReduceIter --> LoopGuard
+
+    LoopGuard -->|"narrate"| Narrate
+    Narrate --> StateExt
+    StateExt -->|END| Reducer
+
     Reducer --> State
     Validator --> State
-
     State --> PG
     State -.-> RAG
-    RAG -.-> LLMN
     Workers -.-> RAG
-    CQRS -.-> ToolN
-    RuleN --> Domain
+    CQRS -.-> DB
+    CombatN --> Domain
+    SkillN --> Domain
+    NavN --> Domain
 ```
 
 ### 八层架构详解
@@ -106,7 +121,7 @@ graph TB
 | **🔧 工具层** | `src/tools/` | 外部工具（骰子 / LLM 客户端 / PG 管理 / 配置） |
 | **⚙️ Worker 层** | `src/workers/` | 后台记忆固化、世界摘要、健康检查与备份 |
 
-### 执行流程：双脑路由拓扑
+### 执行流程：四阶段串行循环管线
 
 ```
 玩家输入
@@ -117,26 +132,44 @@ graph TB
     ↓
 [LangGraph] Keeper Graph (StateGraph.ainvoke)
     │
-    ├── intent_node (LLM 意图分析 + needs_rag 标记)
+    │  ╔═══ ① 意图裂变 ═══╗
+    │  ║ intent_node       ║  ← LLM 将自然语言拆解为多意图队列
+    │  ╚═══════════════════╝  ← 单意图时队列长度=1，无 LLM 时规则兜底
     │       ↓
-    ├── db_lookup_node (始终执行 — 查 PG 读模型 → <physical_reality> XML)
+    │  ╔═══ ② 隔离裁决循环 ═══════════════════════════════════╗
+    │  ║ loop_guard_node (条件边)                             ║
+    │  ║   ├── continue → db_lookup_node                      ║
+    │  ║   │     └── 查 PG 读模型 → <physical_reality> XML   ║
+    │  ║   │         ↓                                        ║
+    │  ║   │     disambiguation_node (三级降级实体消歧)        ║
+    │  ║   │         ↓                                        ║
+    │  ║   │     dispatch_node (内联意图分发)                  ║
+    │  ║   │       ├── COMBAT_ACTION    → combat_node         ║
+    │  ║   │       ├── PHYSICAL_INTERACT → skill_node         ║
+    │  ║   │       │   └── archivist_node (线索查询)          ║
+    │  ║   │       ├── MOVE            → navigation_node      ║
+    │  ║   │       └── SOCIAL_INTERACT → npc_dialogue_node    ║
+    │  ║   │         ↓                                        ║
+    │  ║   │     reduce_iter_node (即时回写 deterministic)     ║
+    │  ║   │         ↓                                        ║
+    │  ║   │     └──→ 回到 loop_guard_node                    ║
+    │  ║   └── narrate → (跳出循环，进入叙事)                   ║
+    │  ╚═══════════════════════════════════════════════════════╝
     │       ↓
-    ├── disambiguation_node (三级降级实体消歧)
+    │  ╔═══ ③ 叙事总装 ═══╗
+    │  ║ narrate_node     ║  ← LLM 消费 executed_actions 链
+    │  ╚═══════════════════╝    生成最终叙事文本
     │       ↓
-    ├── route_by_intent (条件边决定下一跳)
-    │   ├──→ combat_subgraph (战斗循环: dice_roll → resolve_combat)
-    │   ├──→ investigate_subgraph (技能检定: resolve_skill → archivist)
-    │   ├──→ navigation_node (纯逻辑验证出口 + 更新位置)
-    │   ├──→ npc_dialogue_node (NPC 对话生成)
-    │   └──→ → rag_lookup_node (按需查 LightRAG → <semantic_knowledge>)
-    │               ↓
-    ├── narrate_node (LLM 叙事生成)
+    │  ╔═══ ④ 状态固化 ═══╗
+    │  ║ state_extractor  ║  ← 提取 Tier1 事件 + Tier2 事实
+    │  ╚═══════════════════╝
     │       ↓
-    └── state_extractor_node (状态同步)
+    └──→ END
     ↓
-[Reducer] reduce_state(state_patch → new_state)
-    ↓
-[EventLog] 事件溯源记录 → [StateValidator] 校验 Tier1 → [EventStore]
+[Engine] EventLog.record_and_apply()
+    ├── Reducer.reduce_state(patch → new_state)
+    ├── EventStore.append() — 不可变事件流
+    └── StateValidator — Tier 1 确定性校验
     ↓
 [Workers] 后台固化记忆 (Tier2 → LightRAG)
 ```
@@ -149,6 +182,18 @@ graph TB
 |------|------|
 | **langgraph（默认）** | 委托给 `CompiledGraph.ainvoke()`，LangGraph 管理全部流程 |
 | **full** | Engine 逐节点手动调度，支持 suspend/resume/retry 控制语义 |
+
+### 关键路由表（dispatch_node 内联分发）
+
+| Intent 类型 | 目标节点 | 说明 |
+|---|---|---|
+| `COMBAT_ACTION` | `combat_node` | 战斗裁决（调用 domain/combat_rules.py） |
+| `PHYSICAL_INTERACT` | `skill_node` → `archivist_node` | 技能检定 + 线索查询 |
+| `MOVE` | `navigation_node` | 移动作（确定性验证 + 位置更新） |
+| `SOCIAL_INTERACT` | `npc_dialogue_node` | NPC 对话生成 |
+| `META` / 未知 | 跳过（空操作） | 仅递增指针，不执行规则 |
+
+> **注意**：旧版 `route_by_intent` 条件边、`CombatSubgraph`、`InvestigationSubgraph` 仍保留在代码中但已不再被主图使用，由 `dispatch_node` 内联调用对应的规则函数替代。
 
 ---
 
@@ -164,15 +209,15 @@ graph TB
 <tr><td style="text-align:center;">⬜</td><td colspan="2">Onebot 适配器</td></tr>
 <tr><td style="text-align:center;">✅</td><td colspan="2">统一执行协议</td></tr>
 <tr><td style="text-align:center;">✅</td><td colspan="2">LangGraph引擎，管理图调用与会话生命周期</td></tr>
-<tr><td style="text-align:center;">✅</td><td colspan="2">StateGraph 图编排，条件路由分流意图，子图处理战斗与调查</td></tr>
-<tr><td style="text-align:center;">⬜</td><td colspan="2" style="padding-left:2em;">├ 多意图处理</td></tr>
+<tr><td style="text-align:center;">✅</td><td colspan="2">StateGraph 图编排 — 四阶段串行循环管线（loop_guard + dispatch + reduce_iter）</td></tr>
+<tr><td style="text-align:center;">✅</td><td colspan="2" style="padding-left:2em;">├ 多意图串行循环（intent_queue + executed_actions 链）</td></tr>
 <tr><td style="text-align:center;">✅</td><td colspan="2">GameState&amp;WorldManager世界状态管理</td></tr>
 <tr><td style="text-align:center;">✅</td><td colspan="2">大语言模型云提供方适配</td></tr>
 <tr><td style="text-align:center;">✅</td><td colspan="2">CQRS 读模型表与写入管线</td></tr>
 <tr><td style="text-align:center;">✅</td><td colspan="2">LightRAG 接入</td></tr>
 <tr><td style="text-align:center;">✅</td><td colspan="2">双脑记忆系统</td></tr>
 <tr><td style="text-align:center;">✅</td><td colspan="2">对象名称消岐系统</td></tr>
-<tr><td style="text-align:center;">🔄</td><td colspan="2">状态同步模块</td></tr>
+<tr><td style="text-align:center;">✅</td><td colspan="2">状态同步模块（state_extractor_node + Tier1/Tier2 提取管线）</td></tr>
 <tr><td style="text-align:center;">⬜</td><td colspan="2" style="padding-left:2em;">├ 增加历史消息数</td></tr>
 <tr><td style="text-align:center;">✅</td><td colspan="2">Worker 后台任务（记忆固化 / 世界摘要 / 健康检查备份）</td></tr>
 <tr><td style="text-align:center;">⬜</td><td colspan="2">多世界并行与管理</td></tr>
@@ -187,6 +232,7 @@ graph TB
 <tr><td style="text-align:center;">⬜</td><td colspan="2" style="padding-left:2em;">├ 日记等线索的递进问题</td></tr>
 <tr><td style="text-align:center;">✅</td><td colspan="2">NPC 对话系统（npc_dialogue_node + 关系追踪）</td></tr>
 <tr><td style="text-align:center;">⬜</td><td colspan="2" style="padding-left:2em;">├ 场景幻觉问题</td></tr>
+<tr><td style="text-align:center;">⬜</td><td colspan="2" style="padding-left:2em;">├ 人设缓存</td></tr>
 <tr><td style="text-align:center;">✅</td><td colspan="2">CoC 7版技能检定</td></tr>
 <tr><td style="text-align:center;">⬜</td><td colspan="2">战斗轮与体力系统</td></tr>
 <tr><td style="text-align:center;">✅</td><td colspan="2">理智与疯狂（sanity_node + sanity_rules 完整实现）</td></tr>
@@ -386,15 +432,15 @@ GlyphKeeper/
 │   │   └── state_validator.py # StateValidator — Tier 1 事件确定性校验
 │   │
 │   ├── graph/               # 🔁 LangGraph StateGraph 定义
-│   │   ├── keeper_graph.py       # 守密人主 Graph（双脑路由拓扑）
-│   │   ├── combat_graph.py       # 战斗子 Graph（循环拓扑）
-│   │   ├── investigation_graph.py # 调查子 Graph（技能检定 + 线索查询）
-│   │   └── router_graph.py       # route_by_intent 条件边函数
+│   │   ├── keeper_graph.py       # 守密人主 Graph — 四阶段串行循环管线
+│   │   ├── combat_graph.py       # 战斗子 Graph（遗留，已由 dispatch_node 内联代替）
+│   │   ├── investigation_graph.py # 调查子 Graph（遗留，已由 dispatch_node 内联代替）
+│   │   └── router_graph.py       # route_by_intent 条件边函数（遗留，已由 dispatch_node 代替）
 │   │
 │   ├── nodes/               # 🧩 执行节点
 │   │   ├── llm/             # 🤖 LLM 驱动节点
-│   │   │   ├── intent_node.py       # 意图分析（LLM + 规则兜底）
-│   │   │   ├── narrator_node.py     # 叙事生成（LLM + 模板兜底）
+│   │   │   ├── intent_node.py       # 意图分析（LLM + 规则兜底，输出多意图队列）
+│   │   │   ├── narrator_node.py     # 叙事生成（LLM + 模板兜底，消费 executed_actions）
 │   │   │   ├── adjudicator_node.py  # 即兴裁决（LLM + 规则兜底）
 │   │   │   └── npc_dialogue_node.py # NPC 对话生成
 │   │   ├── rules/           # 📐 确定性规则节点
@@ -402,13 +448,16 @@ GlyphKeeper/
 │   │   │   ├── sanity_node.py       # 理智检定与疯狂判定
 │   │   │   └── skill_node.py        # 技能检定
 │   │   └── tools/           # 🔧 工具节点
+│   │       ├── loop_guard_node.py   # 循环守卫 — 检查意图队列指针
+│   │       ├── dispatch_node.py     # 意图分发 — COMBAT/MOVE/PHYSICAL/SOCIAL 内联路由
+│   │       ├── reduce_iter_node.py  # 循环内即时 Reducer — 回写 deterministic_changes
 │   │       ├── archivist_node.py    # 线索查询（目标解析 + PG 查线索）
 │   │       ├── dice_node.py         # 掷骰执行
 │   │       ├── db_lookup_node.py    # PG 读模型查询 → <physical_reality>
 │   │       ├── rag_lookup_node.py   # LightRAG 检索 → <semantic_knowledge>
 │   │       ├── roll_node.py         # 自动化检定
 │   │       ├── disambiguation_node.py # 实体消歧
-│   │       └── state_extractor_node.py # 状态同步
+│   │       └── state_extractor_node.py # 状态同步（Tier1/Tier2 提取）
 │   │
 │   ├── tools/               # 🔧 外部工具层
 │   │   ├── config.py        # 配置管理（config.yaml + providers.ini）
@@ -480,41 +529,43 @@ GlyphKeeper/
 ```
 玩家输入: "我仔细翻找书桌的抽屉。"
 
-[Graph 执行流程]
-1. intent_node (LLM)
-   → 意图类型: PHYSICAL_INTERACT
-   → needs_rag: false
+[Graph 执行流程 — 四阶段串行循环管线]
 
-2. db_lookup_node (SQL)
+① 意图裂变
+1. intent_node (LLM)
+   → 意图队列: [{type: PHYSICAL_INTERACT, data: {target: "书桌", skill_name: "侦查"}}]
+   → 队列长度=1 (单意图)
+       ↓
+
+② 隔离裁决循环（仅 1 次迭代）
+2. loop_guard_node → current_intent_idx(0) < len(queue)(1) → continue
+3. db_lookup_node (SQL)
    → 查 locations 表获取当前场景
    → 查 interactables 表获取场景物品（书桌、床等）
    → 拼 <physical_reality> XML
-
-3. disambiguation_node (三级降级匹配)
+4. disambiguation_node (三级降级匹配)
    → "书桌" → 匹配到 interactables.书桌 → resolved_targets
+5. dispatch_node → PHYSICAL_INTERACT → skill_node
+   → skill_node: 侦查检定 → 成功
+   → archivist_node: 解析目标 key + 查 clue_discoveries
+     → 发现"书桌→日记"的线索关联
+   → 输出 ActionExecutionResult 追加到 executed_actions
+6. reduce_iter_node → 将 deterministic_changes 即时回写 State
+7. loop_guard_node → current_intent_idx(1) >= len(queue)(1) → narrate
+       ↓
 
-4. route_by_intent
-   → PHYSICAL_INTERACT → investigate_subgraph
-
-5. investigate_subgraph
-   → resolve_skill: skill_node → 侦查检定
-   → archivist_node: 解析目标 key + 查线索
-
-6. Archivist.inspect_target(session_id, resolved_key, ...)
-   → 查 clue_discoveries 表关联线索
-   → 发现"书桌→日记"的线索关联
-
-7. rag_lookup_node
-   → needs_rag=false → 跳过
-
+③ 叙事总装
 8. narrate_node (LLM)
+   → 消费 executed_actions[0] 中的 rule_context + raw_fixed_text + flavor_context
    → 叙事输出: "你拉开书桌的第三个抽屉，在一堆陈旧的账本后面，
      发现了一本皮质封面的日记。泛黄的纸页散发出霉味。"
+       ↓
 
+④ 状态固化
 9. state_extractor_node (fast LLM)
-   → 提取 Tier 1: 无(纯叙事，无规则变更)
-   → 提取 Tier 2: "书桌抽屉里有一本皮质封面日记"
-   → 后台 _async_state_catchup 写入 LightRAG
+   → 提取 Tier 1 事件: 无（纯叙事，无规则变更）
+   → 提取 Tier 2 事实: "书桌抽屉里有一本皮质封面日记"
+   → pending_tier1_events / pending_tier2_facts 输出
 ```
 
 ### 场景 2：规则裁决
@@ -525,34 +576,85 @@ GlyphKeeper/
 玩家输入: "我要用斗殴攻击邪教徒！"
 
 [Graph 执行流程]
+
+① 意图裂变
 1. intent_node (fast LLM)
-   → 意图类型: COMBAT_ACTION
-   → skill_name: "斗殴"
+   → 意图队列: [{type: COMBAT_ACTION, data: {action: "attack", skill_name: "斗殴"}}]
+       ↓
 
-2. db_lookup_node (SQL)
-   → 查当前场景（确认是否有"邪教徒"目标）
+② 隔离裁决循环
+2. loop_guard → continue
+3. db_lookup_node (SQL) → 查当前场景
+4. disambiguation_node → "邪教徒" → 匹配 entities → resolved_targets
+5. dispatch_node → COMBAT_ACTION → combat_node
+   → domain/combat_rules.py (100% 确定性)
+   → 计算命中/闪避/伤害
+   → 输出 ActionExecutionResult
+6. reduce_iter_node → 回写 HP 等变更
+7. loop_guard → narrate
+       ↓
 
-3. disambiguation_node
-   → "邪教徒" → 匹配 entities → resolved_targets
-
-4. route_by_intent
-   → COMBAT_ACTION → combat_subgraph
-
-5. combat_subgraph
-   → dice_roll: 执行斗殴检定
-   → resolve_combat: combat_node
-      → domain/combat_rules.py (100% 确定性)
-      → 计算命中/闪避/伤害
-
-6. rag_lookup_node
-   → 条件触发（needs_rag 标记）
-
-7. narrate_node (standard LLM)
+③ 叙事总装
+8. narrate_node (standard LLM)
    → 叙事输出: "你握紧拳头，猛地向邪教徒挥去..."
+       ↓
 
-8. state_extractor_node (fast LLM)
-   → 提取 Tier 1 事件: combat 相关状态变更
-   → 后台 _async_state_catchup → StateValidator → EventStore
+④ 状态固化
+9. state_extractor_node
+   → 提取 Tier 1: combat 相关状态变更
+```
+
+### 场景 3：多意图混合输入（串行循环核心优势）
+
+**背景**：玩家在一句话中表达了多个动作，旧架构只能处理第一个，新架构串行处理全部。
+
+```
+玩家输入: "我先安抚一下受惊的图书馆员，然后去翻阅桌上的古籍。"
+
+[Graph 执行流程]
+
+① 意图裂变
+1. intent_node (LLM)
+   → 意图队列: [
+       {type: SOCIAL_INTERACT, data: {target: "图书馆员", ...}},
+       {type: PHYSICAL_INTERACT, data: {target: "古籍", skill_name: "图书馆使用", ...}},
+     ]
+   → 队列长度=2（双意图）
+       ↓
+
+② 隔离裁决循环 — 第 1 轮 (idx=0)
+2. loop_guard → 0 < 2 → continue
+3. db_lookup_node → 查当前场景
+4. disambiguation_node → "图书馆员" → 匹配 entities
+5. dispatch_node → SOCIAL_INTERACT → npc_dialogue_node
+   → NPC 对话生成
+   → 追加 ActionExecutionResult 到 executed_actions
+6. reduce_iter_node → 回写对话状态
+       ↓
+
+② 隔离裁决循环 — 第 2 轮 (idx=1)
+7. loop_guard → 1 < 2 → continue
+8. db_lookup_node → 查当前场景（可能已因 NPC 对话而变化）
+9. disambiguation_node → "古籍" → 匹配 interactables
+10. dispatch_node → PHYSICAL_INTERACT → skill_node
+    → 图书馆使用检定 → archivist 查线索
+    → 追加 ActionExecutionResult
+11. reduce_iter_node → 回写变更
+        ↓
+
+12. loop_guard → 2 >= 2 → narrate
+        ↓
+
+③ 叙事总装
+13. narrate_node (LLM)
+    → 消费 executed_actions 全部两条记录
+    → 叙事输出: "你温和地向图书馆员点点头，示意她不必惊慌...
+       然后转身走向书桌，翻开那本泛黄的古籍..."
+        ↓
+
+④ 状态固化
+14. state_extractor_node
+    → 提取 Tier1 + Tier2
 ```
 
 ---

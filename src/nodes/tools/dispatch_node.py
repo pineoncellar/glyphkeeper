@@ -49,11 +49,15 @@ async def dispatch_node(state: GameState) -> dict:
 
     result = await node_fn(state)
 
-    # 注入 flavor_context（规则节点不感知 flavor，dispatch 负责注入）
+    # 注入 flavor_context 和 core_action（规则节点不感知意图层字段，dispatch 负责注入）
     if result.get("executed_actions"):
         for action in result["executed_actions"]:
             if not action.get("flavor_context"):
                 action["flavor_context"] = current.get("flavor_context", "")
+            if not action.get("core_action"):
+                action["core_action"] = current.get("core_action", "")
+            if not action.get("detail"):
+                action["detail"] = current.get("data", {}).get("detail", "")
 
     # 递增指针
     result["current_intent_idx"] = idx + 1

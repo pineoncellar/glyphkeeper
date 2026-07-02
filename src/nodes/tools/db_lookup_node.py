@@ -131,12 +131,13 @@ async def db_lookup_node(state: GameState) -> dict:
         ]
 
         # 构建 scene_npcs 和 entity_name_map（供 disambiguation_node 消歧）
+        # 取当前场景 + 所有邻接场景的实体，确保玩家站在大街也能提到屋内 NPC 的名字
         scene_npcs: list[str] = []
         entity_name_map: dict[str, str] = {}
-        current_loc_id = str(loc_row["id"])
-        for ent in entities_by_loc.get(current_loc_id, []):
-            entity_name_map[ent["key"]] = ent["name"]
-            scene_npcs.append(ent["key"])
+        for loc_id, entities in entities_by_loc.items():
+            for ent in entities:
+                entity_name_map[ent["key"]] = ent["name"]
+                scene_npcs.append(ent["key"])
         # 物品也加入 entity_name_map，便于后续消歧使用
         for item in scene_items:
             entity_name_map[item["key"]] = item["name"]

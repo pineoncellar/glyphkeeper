@@ -125,6 +125,6 @@ async def state_extractor_node(state: GameState) -> dict[str, Any]:
         )
 
     return {
-        "pending_tier1_events": tier1,
+        "pending_tier1_events": tier1_from_actions,
         "pending_tier2_facts": tier2,
     }
