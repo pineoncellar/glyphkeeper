@@ -41,28 +41,31 @@ NARRATOR_SYSTEM_PROMPT = """你是克苏鲁的呼唤 TRPG 的守密人 (Keeper) 
    - 检查实体标签。如公墓里包含带有 ["night_only"] 标签的食尸鬼，但当前 <session_state> 中的 <current_time> 为 AFTERNOON（下午），时空不匹配，你必须在叙事中完全忽略该生物，严禁提及它的任何异动或痕迹。
    - 如果玩家当前动作与该场景完全无关（如玩家在敲金博尔宅的门，而食尸鬼静态配置存在于相邻的公墓），该公墓实体在此轮属于无用信息，严禁将其引入当前叙事中。
 9. 【严格基于事实边界】: 严禁凭空添加、编造任何物理现实 XML（<physical_reality>）中未包含的第三方 NPC、灵异异响、未知黏液或怪物踪迹。在玩家未解锁神话线索的日常探索期，必须将超自然异象的节奏控制权完整交还给规则内核。
+10. 【物品可见性规则】: <items> 中的 item 是在场景中肉眼可见的物品。
+    - state 属性表示该物品当前可观察到的物理状态（如 "broken_latch"、"messy"），大多可以直接用于环境描写。
+    - tags 属性描述物品的属性标签，其中部分标签（如 "wooden"、"heavy"、"dusty"）代表直观外观可直接用于描写；部分标签（如 "entrance"等）代表需要玩家互动或检定才能发现的隐含信息，禁止在叙事中直接点破。
+    - 两者中的数据没有绝对可见性，必须结合场景和玩家行为判断哪些信息可以直接描写，哪些需要保留。
 
 输出纯文本，不要包含角色名或引号外的格式标记。"""
 
-NPC_NARRATOR_SYSTEM_PROMPT = """你是克苏鲁的呼唤 TRPG 的守密人 (Keeper) — 沉浸式叙事者。
+NPC_NARRATOR_SUPPLEMENT = """[场景附加指令 — NPC 对话]
+当前玩家正在与一位 NPC 对话。NPC 的发言原文在 <NPC_DIALOGUE> 标记中。
 
-当前玩家正在与一位 NPC 对话。NPC 的发言原文已在下方以 <NPC_DIALOGUE> 标记给出。
+在 NPC 发言前加入简短的情景描写和 NPC 神态动作，使对话自然融入场景。
 
-要求:
-1. 使用中文，第二人称叙述。
-2. 营造克苏鲁特有的氛围：压抑、神秘、内敛。
-3. 保持简洁（2-4 句话）。
-4. 在 NPC 发言前加入简短的情景描述和 NPC 的神态动作描写，使对话自然融入场景。
+【★★★★★ 最高优先级规则】
+NPC_DIALOGUE 中引号内的部分必须逐字保留，绝对不得改写、删减或概括。"""
 
-【守密人核心执行铁律】
-5. 【严格基于事实边界与时空过滤】: 
-   - 严禁凭空编造、添加任何物理现实 XML（<physical_reality>）之外的环境事实、怪异声响。
-   - 必须过滤与当前对话场景无关的邻接场景实体。严禁让当前对话的 NPC 表现出未卜先知、或提及任何目前时空不符（如白天提及 night_only 生物）、或玩家尚未发现的周边神话秘密。
-6. 【★★★★★ 最高优先级规则 ★★★★★】
-   NPC_DIALOGUE 中【引号内的部分】必须逐字保留，绝对不得改写、删减、替换或重述。以下行为绝对禁止：
-     - 改写 NPC 的措辞、语气或句式；删减 NPC 说的任何词语；用同义替换代替 NPC 的原话；概括或总结 NPC 说了什么。
+MOVEMENT_NARRATOR_SUPPLEMENT = """[场景附加指令 — 移动]
+当前玩家正在从一个场景移动到另一个场景。
 
-输出格式：你的情景描述 + NPC 完整原话（引号括起）。"""
+根据 <physical_reality> 中的场景信息，基于以下原则描写环境过渡：
+先基于当前 location 的 base_desc 渲染宏观氛围（光线、气味、空间感）。
+再将 <items> 中的所有物品自然编织进背景描写中——作为该场景中"在那里"的可见物件提及，让玩家知道它们的存在和大致外观。
+如果目标位置有 <present_entities>，自然提及他们的存在。
+如果来源地与目标地通过某个方向（<direction>）相连，在叙事中体现移动方向。
+
+【重要】叙事历史中的前情应保持连贯，不要否定或忽略之前发生的事。"""
 
 
 # ====================================================================
@@ -228,6 +231,7 @@ async def _call_llm_for_narrative(
     known_knowledge: list[str] | None = None,
     npc_dialogue: str = "",
     clue_discovery: str = "",
+    intent_type: str = "",
 ) -> LLMResult:
     """调用 LLM 生成叙事文本
 
@@ -235,6 +239,7 @@ async def _call_llm_for_narrative(
     rag_context:      来自 RAG Lookup Node 的 <semantic_knowledge> 或空
     npc_dialogue:     来自 NPC Dialogue Node 的 NPC 发言原文（若有）
     clue_discovery:   来自 Archivist 的技能检定线索原文（若有）
+    intent_type:      意图类型，用于选择专用 prompt（如 MOVE 用导航 prompt）
     """
     try:
         # 构建防剧透约束
@@ -246,10 +251,20 @@ async def _call_llm_for_narrative(
                 + "\n未在上述列表中的信息，玩家角色目前不知道，不应在叙事中作为已知事实提及。"
             )
 
-        # 选择 prompt：NPC 对话场景 vs 普通叙事
+        # 构建消息列表：基础 prompt → 场景附加指令 → 用户上下文
         is_npc_scene = bool(npc_dialogue)
-        base_prompt = NPC_NARRATOR_SYSTEM_PROMPT if is_npc_scene else NARRATOR_SYSTEM_PROMPT
-        system_prompt = base_prompt + spoiler_constraint
+        is_movement = intent_type == "MOVE"
+        supplementary = ""
+        if is_npc_scene:
+            supplementary = NPC_NARRATOR_SUPPLEMENT
+        elif is_movement:
+            supplementary = MOVEMENT_NARRATOR_SUPPLEMENT
+
+        messages = [
+            {"role": "system", "content": NARRATOR_SYSTEM_PROMPT + spoiler_constraint},
+        ]
+        if supplementary:
+            messages.append({"role": "system", "content": supplementary})
 
         # 组装上下文
         context_parts = [f"游戏阶段: {game_phase}"]
@@ -267,11 +282,8 @@ async def _call_llm_for_narrative(
 
         context_parts.append(f"叙事历史: {narrative_history[-300:] if narrative_history else '无'}")
         context = "\n".join(context_parts)
+        messages.append({"role": "user", "content": context})
 
-        messages = [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": context},
-        ]
         return await _call_llm("standard", messages)
 
     except Exception as e:
@@ -325,6 +337,7 @@ async def narrate_node(state: GameState) -> dict:
             logger.debug(f"narrator_node: 无法获取已发现知识: {e}")
 
     # ── 尝试 LLM ──
+    intent_type = intent.get("type", "")
     result = await _call_llm_for_narrative(
         intent, resolution, game_phase, narrative_history,
         physical_reality=physical_reality,
@@ -332,6 +345,7 @@ async def narrate_node(state: GameState) -> dict:
         known_knowledge=known_knowledge,
         npc_dialogue=npc_dialogue,
         clue_discovery=clue_discovery,
+        intent_type=intent_type,
     )
 
     if result.is_ok:
