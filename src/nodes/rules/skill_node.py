@@ -47,17 +47,13 @@ async def skill_node(state: GameState) -> dict:
     """
     技能检定节点。
 
-    从 state["intent"] 中读取检定参数，执行技能检定。
-
-    intent.data 期望字段:
-        skill_name: str        — 技能名称（如 "侦查", "图书馆利用"）
-        skill_value: int       — 技能值（可选，默认从角色数据读取）
-        difficulty: str        — 难度等级（REGULAR/HARD/EXTREME）
-        bonus_dice: int        — 奖励骰（默认 0）
-        penalty_dice: int      — 惩罚骰（默认 0）
+    从 intent_queue 读取当前意图的检定参数，执行技能检定。
+    结果以 ActionExecutionResult 形式追加到 executed_actions。
     """
-    intent = state.get("intent") or {}
-    intent_data = intent.get("data") or {}
+    idx = state.get("current_intent_idx", 0)
+    queue = state.get("intent_queue", [])
+    current_intent = queue[idx] if idx < len(queue) else {}
+    intent_data = current_intent.get("data", {})
 
     skill_name = intent_data.get("skill_name", "")
     difficulty = _parse_difficulty(intent_data.get("difficulty", "REGULAR"))
@@ -67,23 +63,24 @@ async def skill_node(state: GameState) -> dict:
     if not skill_name:
         logger.warning("skill_node: 缺少 skill_name")
         return {
-            "resolution": {
-                "success": False,
-                "error": "缺少技能名称",
-                "skill_name": "",
-            },
+            "executed_actions": [{
+                "intent_id": f"intent_{idx}",
+                "intent_type": "PHYSICAL_INTERACT",
+                "rule_context": {"success": False, "error": "缺少技能名称", "skill_name": ""},
+                "deterministic_changes": {},
+                "raw_fixed_text": "",
+                "flavor_context": current_intent.get("flavor_context", ""),
+            }],
         }
 
     # ── 获取技能值 ──
     skill_value = intent_data.get("skill_value")
     if skill_value is None:
-        # 尝试从角色数据读取
         character_data = state.get("character")
         if character_data:
             skills = character_data.get("skills") or {}
             skill_value = skills.get(skill_name)
             if skill_value is None:
-                # 尝试模糊匹配
                 for k, v in skills.items():
                     if skill_name in k or k in skill_name:
                         skill_value = v
@@ -99,36 +96,46 @@ async def skill_node(state: GameState) -> dict:
     except Exception as e:
         logger.error(f"skill_node: 检定失败: {e}")
         return {
-            "resolution": {
-                "success": False,
-                "error": str(e),
-                "skill_name": skill_name,
-            },
+            "executed_actions": [{
+                "intent_id": f"intent_{idx}",
+                "intent_type": "PHYSICAL_INTERACT",
+                "rule_context": {"success": False, "error": str(e), "skill_name": skill_name},
+                "deterministic_changes": {},
+                "raw_fixed_text": "",
+                "flavor_context": current_intent.get("flavor_context", ""),
+            }],
         }
 
     # ── 构建结果 ──
-    resolution = {
-        "success": True,
-        "node_type": "skill_check",
-        "skill_name": skill_name,
-        "skill_value": skill_value,
-        "roll_value": result.roll_value,
-        "success_level": result.success_level.value,
-        "success_label": _success_label(result.success_level),
-        "is_success": result.is_success,
-        "is_failure": result.is_failure,
-        "difficulty": difficulty.value,
-        "bonus_dice": bonus_dice,
-        "penalty_dice": penalty_dice,
-        "is_push": result.is_push,
+    action_result = {
+        "intent_id": f"intent_{idx}",
+        "intent_type": current_intent.get("type", "PHYSICAL_INTERACT"),
+        "rule_context": {
+            "success": True,
+            "node_type": "skill_check",
+            "skill_name": skill_name,
+            "skill_value": skill_value,
+            "roll_value": result.roll_value,
+            "success_level": result.success_level.value,
+            "success_label": _success_label(result.success_level),
+            "is_success": result.is_success,
+            "is_failure": result.is_failure,
+            "difficulty": difficulty.value,
+            "bonus_dice": bonus_dice,
+            "penalty_dice": penalty_dice,
+            "is_push": result.is_push,
+        },
+        "deterministic_changes": {},
+        "raw_fixed_text": "",
+        "flavor_context": current_intent.get("flavor_context", ""),
     }
 
     logger.info(
         f"skill_node: {skill_name}({skill_value}) "
-        f"→ roll={result.roll_value} {resolution['success_label']}"
+        f"→ roll={result.roll_value} {action_result['rule_context']['success_label']}"
     )
 
-    return {"resolution": resolution}
+    return {"executed_actions": [action_result]}
 
 
 async def batch_skill_check(state: GameState) -> dict:

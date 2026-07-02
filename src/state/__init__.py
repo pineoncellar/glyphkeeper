@@ -12,8 +12,10 @@
 
 from src.state.game_state import (
     GameState,
+    ActionExecutionResult,
     create_initial_state,
     create_state_view,
+    is_loop_complete,
     INTENT_VIEW,
     RULE_VIEW,
     NARRATE_VIEW,
@@ -35,8 +37,10 @@ from src.state.projector import StateProjector
 __all__ = [
     # game_state
     "GameState",
+    "ActionExecutionResult",
     "create_initial_state",
     "create_state_view",
+    "is_loop_complete",
     "INTENT_VIEW",
     "RULE_VIEW",
     "NARRATE_VIEW",

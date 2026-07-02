@@ -41,30 +41,19 @@ async def combat_node(state: GameState) -> dict:
     """
     战斗裁决节点。
 
-    从 state["intent"] 中读取战斗行动参数，执行完整战斗轮裁决。
-
-    intent.data 期望字段:
-        action: str              — 行动类型: "attack" / "dodge" / "fight_back"
-        weapon_name: str         — 武器名称
-        skill_name: str          — 攻击技能名（如 "斗殴", "手枪"）
-        skill_value: int         — 攻击方技能值（可选）
-        target_name: str         — 目标名称
-        target_skill: str        — 防御方技能名
-        target_skill_value: int  — 防御方技能值（可选）
-        target_armor: int        — 目标护甲值（默认 0）
-        bonus_dice: int          — 攻击方奖励骰（默认 0）
-        target_bonus: int        — 防御方奖励骰（默认 0）
+    从 intent_queue 读取当前战斗意图，执行完整战斗轮裁决。
+    结果以 executed_actions 追加，同时更新 combat_active 战斗轮标记。
     """
-    intent = state.get("intent") or {}
-    intent_data = intent.get("data") or {}
+    idx = state.get("current_intent_idx", 0)
+    queue = state.get("intent_queue", [])
+    current_intent = queue[idx] if idx < len(queue) else {}
+    intent_data = current_intent.get("data", {})
     character_data = state.get("character")
 
-    # ── 提取参数 ──
     action = intent_data.get("action", "attack")
     weapon_name = intent_data.get("weapon_name", "拳头")
     skill_name = intent_data.get("skill_name", "斗殴")
 
-    # 获取角色名
     actor_name = intent_data.get("character_name", "")
     if not actor_name and character_data:
         actor_name = character_data.get("name", "调查员")
@@ -74,7 +63,6 @@ async def combat_node(state: GameState) -> dict:
     bonus_dice = intent_data.get("bonus_dice", 0)
     target_bonus = intent_data.get("target_bonus", 0)
 
-    # ── 获取技能值 ──
     actor_skill = intent_data.get("skill_value")
     if actor_skill is None and character_data:
         skills = character_data.get("skills") or {}
@@ -82,7 +70,6 @@ async def combat_node(state: GameState) -> dict:
 
     target_skill_name = intent_data.get("target_skill", "闪避")
     target_skill = intent_data.get("target_skill_value")
-    # 如果有 combatants 列表，尝试从里面找目标
     if target_skill is None:
         combatants = state.get("combatants", [])
         for c in combatants:
@@ -97,24 +84,18 @@ async def combat_node(state: GameState) -> dict:
     if target_skill is None:
         target_skill = 50
 
-    # ── 获取武器 ──
     weapon = _get_weapon(weapon_name)
     if weapon is None:
         logger.warning(f"combat_node: 未知武器 '{weapon_name}'，使用拳头")
         weapon = WEAPONS["拳头"]
 
-    # ── 获取伤害加值 ──
     db = intent_data.get("damage_bonus", "0")
     if db == "0" and character_data:
         db = character_data.get("damage_bonus", "0")
 
-    # ── 执行战术动作 ──
     resolution = None
-    combat_active = state.get("combat_active", False)
-
     try:
         if action == "dodge":
-            # 纯闪避 — 只进行防御检定
             from src.domain.checks import skill_check
             dodge_result = skill_check(actor_skill, bonus_dice=bonus_dice)
             resolution = {
@@ -131,7 +112,6 @@ async def combat_node(state: GameState) -> dict:
                 f"（骰出{dodge_result.roll_value}）",
             }
         else:
-            # 攻击 / 反击
             round_result: CombatRoundResult = resolve_combat_round(
                 actor_skill=actor_skill,
                 target_skill=target_skill,
@@ -142,7 +122,6 @@ async def combat_node(state: GameState) -> dict:
                 target_bonus=target_bonus,
             )
 
-            # 覆盖 domain 函数中的占位名称
             resolution = {
                 "success": True,
                 "node_type": "combat_attack",
@@ -160,7 +139,6 @@ async def combat_node(state: GameState) -> dict:
                 "db": db,
             }
 
-            # 描述文本
             if round_result.hit:
                 desc = (
                     f"{actor_name}使用{weapon.name}攻击"
@@ -176,7 +154,6 @@ async def combat_node(state: GameState) -> dict:
                     f"{actor_name}攻击{target_name}，被闪避"
                 )
 
-            # 如果有 combatants，更新目标状态
             if round_result.hit and round_result.net_damage > 0:
                 combatants = list(state.get("combatants", []))
                 for c in combatants:
@@ -192,7 +169,16 @@ async def combat_node(state: GameState) -> dict:
         )
 
         return {
-            "resolution": resolution,
+            "executed_actions": [{
+                "intent_id": f"intent_{idx}",
+                "intent_type": "COMBAT_ACTION",
+                "rule_context": resolution,
+                "deterministic_changes": {
+                    "combat_active": True,
+                },
+                "raw_fixed_text": "",
+                "flavor_context": current_intent.get("flavor_context", ""),
+            }],
             "combat_active": True,
             "combat_round": state.get("combat_round", 0) + 1,
         }

@@ -1,11 +1,13 @@
 """
 @File     :   intent_node.py
-@Desc     :   意图分析节点 — 将玩家自然语言输入转换为结构化 Intent
+@Desc     :   意图分析节点 — 将玩家自然语言输入裂变为多意图队列
 @Note     :   使用 fast 级别 LLM；无 LLM 时使用规则兜底
+              LLM 路径采用"核心谓词提取法"拆分复合意图，
+              规则兜底路径降级为单意图（保持向后兼容）。
 
 Node 签名:
     async def intent_node(state: GameState) -> dict:
-        读取 player_input + 上下文 → 调用 LLM → 返回结构化 intent
+        读取 player_input + 上下文 → 调用 LLM → 返回 intent_queue
 """
 
 from __future__ import annotations
@@ -29,66 +31,88 @@ True 时 intent_node 查询当前场景可交互物列表注入 prompt，
 False 时保持原有行为，靠 Archivist name 降级兜底。
 """
 
+INTENT_MAX_QUEUE_LENGTH = 5
+"""单轮最多裂变意图数，防止 LLM 输出过长队列。"""
+
 
 # ====================================================================
-# Prompt 模板
+# Prompt 模板 — 多意图裂变 + 核心谓词提取
 # ====================================================================
 
 INTENT_SYSTEM_PROMPT = """你是 CoC (克苏鲁的呼唤) 守密人助手 — 意图分析师。
-请将玩家的自然语言输入转换为结构化意图 JSON。
+请将玩家的自然语言输入裂解为 1 到 N 个独立的原子意图，并按 CoC 规则的逻辑顺序排列。
 
-你的输出必须是纯 JSON 对象，不要包含 markdown 代码块或其他格式。
+【核心谓词提取法】
+- 识别每个子句的"最终功利性目的"（Core Action），而非按动词切分
+- 前置的 RP 修辞（如"假装系鞋带蹲下身"）不作为独立意图，而是打包为该意图的 flavor_context
+- 如果一句话只表达了一个核心动作，即使有多步修辞描述，也只输出一个原子意图
+
+【排序规则】
+- 社交意图（暗示、对话）→ 物理交互（摸枪、开门、搜索）→ 战斗行动（攻击）→ 移动（去别处）
+- MOVE 意图强制排在队列末尾
+- 同类型意图保持原始输入中的出现顺序
 
 可选的意图类型 (type):
-- PHYSICAL_INTERACT: 物理交互（搜索、使用物品、开门等）
-- SOCIAL_INTERACT: 社交交互（对话、说服、恐吓等）
-- COMBAT_ACTION: 战斗行动（攻击、射击、闪避等）
+- PHYSICAL_INTERACT: 物理交互（搜索、使用物品、开门、潜行拿东西等）
+- SOCIAL_INTERACT: 社交交互（对话、说服、恐吓、暗示、眼神示意等）
+- COMBAT_ACTION: 战斗行动（攻击、射击、闪避、准备开火等）
 - MOVE: 移动（去某处、跟随、探索等）
 - META: 元操作（查看状态、保存、提问规则等）
 
 额外字段 `needs_rag`:
 - true:  需要从 LightRAG 检索世界知识（阅读/回忆/深度调查/查看 lore 时）
 - false: 不需要 RAG（常规移动/物理交互/简单对话等）
-- 判断依据: 玩家是否在询问背景 lore、回忆过去、或研究深层次信息
 
-输出 JSON 格式:
+输出格式（纯 JSON 数组，不要包含 markdown 代码块）:
 ```json
-{
-    "type": "意图类型",
-    "character_name": "涉及的PC名（可选）",
-    "confidence": 0.0-1.0,
-    "needs_rag": true/false,
-    "data": {
-        "action": "标准化的动作描述",
-        "target": "作用对象（可选）",
-        "target_key": "匹配到的系统 key（可选，仅当下方场景列表有时使用）",
-        "skill_name": "可能需要的技能（可选）",
-        "query": "需要检索的信息（可选）",
-        "check_type": "skill / stat / opposed / none（可选）",
-        "difficulty": "REGULAR / HARD / EXTREME（可选）",
-        "detail": "其他补充信息（可选）"
+[
+    {
+        "type": "意图类型",
+        "confidence": 0.0-1.0,
+        "needs_rag": true/false,
+        "core_action": "核心动作描述",
+        "flavor_context": "玩家的 RP 修辞文本（没有则填空字符串）",
+        "data": {
+            "target": "作用对象（可选）",
+            "skill_name": "可能需要的技能名（可选）",
+            "check_type": "skill / stat / opposed / none（可选，默认 none）",
+            "difficulty": "REGULAR / HARD / EXTREME（可选，默认 REGULAR）",
+            "detail": "其他补充信息（可选）"
+        }
     }
-}
+]
 ```
 
 示例:
+输入: "我用眼神暗示旁边的队友，同时右手悄悄摸向腰间的转轮手枪，如果邪教徒动一下我就开枪"
+输出: [
+    {"type": "SOCIAL_INTERACT", "confidence": 0.9, "needs_rag": false, "core_action": "暗示队友", "flavor_context": "用眼神示意", "data": {"target": "队友", "skill_name": "心理学", "check_type": "skill", "difficulty": "REGULAR", "detail": "暗示队友准备行动"}},
+    {"type": "PHYSICAL_INTERACT", "confidence": 0.95, "needs_rag": false, "core_action": "拔出手枪", "flavor_context": "右手悄悄摸向腰间", "data": {"target": "转轮手枪", "skill_name": "潜行", "check_type": "skill", "difficulty": "HARD", "detail": "偷偷拔出转轮手枪不被发现"}},
+    {"type": "COMBAT_ACTION", "confidence": 0.9, "needs_rag": false, "core_action": "准备射击", "flavor_context": "如果邪教徒动一下就开枪", "data": {"target": "邪教徒", "skill_name": "手枪", "check_type": "skill", "difficulty": "REGULAR", "detail": "瞄准邪教徒准备随时开火"}}
+]
+
+输入: "我假装系鞋带蹲下身，趁邪教徒转头时把纸条塞进队友手心"
+输出: [
+    {"type": "SOCIAL_INTERACT", "confidence": 0.95, "needs_rag": false, "core_action": "传递纸条给队友", "flavor_context": "假装系鞋带蹲下身，趁邪教徒转头时", "data": {"target": "队友", "skill_name": "潜行", "check_type": "skill", "difficulty": "HARD", "detail": "偷偷将纸条塞给队友"}}
+]
+
 输入: "我仔细检查书桌的抽屉"
-输出: {"type": "PHYSICAL_INTERACT", "character_name": "", "confidence": 0.95, "needs_rag": false, "data": {"action": "检查抽屉", "target": "书桌", "skill_name": "侦查", "check_type": "skill", "difficulty": "REGULAR", "detail": "仔细搜查书桌的所有抽屉"}}
-
-输入: "我要用斗殴揍那个邪教徒"
-输出: {"type": "COMBAT_ACTION", "character_name": "", "confidence": 0.98, "needs_rag": false, "data": {"action": "攻击", "target": "邪教徒", "skill_name": "斗殴", "check_type": "skill", "difficulty": "REGULAR", "detail": "用拳头攻击邪教徒"}}
-
-输入: "这墙上的符文我好像在哪见过……"
-输出: {"type": "PHYSICAL_INTERACT", "character_name": "", "confidence": 0.85, "needs_rag": true, "data": {"action": "研究符文", "target": "墙上符文", "skill_name": "神秘学", "query": "墙上的符文含义和背景", "check_type": "skill", "difficulty": "HARD", "detail": "玩家试图回忆符文的来历"}}
+输出: [
+    {"type": "PHYSICAL_INTERACT", "confidence": 0.95, "needs_rag": false, "core_action": "检查抽屉", "flavor_context": "", "data": {"target": "书桌", "skill_name": "侦查", "check_type": "skill", "difficulty": "REGULAR", "detail": "仔细搜查书桌的所有抽屉"}}
+]
 
 输入: "你好，你是谁"
-输出: {"type": "SOCIAL_INTERACT", "character_name": "", "confidence": 0.9, "needs_rag": false, "data": {"action": "打招呼", "target": "", "skill_name": "", "check_type": "none", "difficulty": "REGULAR", "detail": "玩家打招呼"}}
+输出: [
+    {"type": "SOCIAL_INTERACT", "confidence": 0.9, "needs_rag": false, "core_action": "打招呼", "flavor_context": "", "data": {"target": "", "skill_name": "", "check_type": "none", "difficulty": "REGULAR", "detail": "玩家打招呼"}}
+]
 
-如果无法识别意图，输出: {"type": "META", "character_name": "", "confidence": 0.1, "needs_rag": false, "data": {"action": "unknown", "target": "", "skill_name": "", "check_type": "none", "difficulty": "REGULAR", "detail": "无法识别的输入"}}"""
+如果无法识别意图，输出: [
+    {"type": "META", "confidence": 0.1, "needs_rag": false, "core_action": "unknown", "flavor_context": "", "data": {"target": "", "skill_name": "", "check_type": "none", "difficulty": "REGULAR", "detail": "无法识别的输入"}}
+]"""
 
 
 # ====================================================================
-# 规则兜底 — 关键词匹配（无 LLM 时使用）
+# 规则兜底 — 关键词匹配（无 LLM 时使用，降级为单意图）
 # ====================================================================
 
 # 动作 → 意图类型的映射
@@ -127,15 +151,17 @@ _ACTION_SKILL_MAP: dict[str, str] = {
 }
 
 
-def _rule_based_intent(player_input: str, game_phase: str) -> dict:
-    """基于关键词的规则兜底意图识别"""
+def _rule_based_intent(player_input: str, game_phase: str) -> list[dict]:
+    """基于关键词的规则兜底意图识别（降级为单意图列表）"""
     text = player_input.strip()
 
     if not text:
-        return {
+        return [{
             "type": "META",
-            "character_name": "",
             "confidence": 0.0,
+            "needs_rag": False,
+            "core_action": "empty",
+            "flavor_context": "",
             "data": {
                 "action": "empty",
                 "target": "",
@@ -145,7 +171,7 @@ def _rule_based_intent(player_input: str, game_phase: str) -> dict:
                 "difficulty": "REGULAR",
                 "detail": "",
             },
-        }
+        }]
 
     # 检测意图类型 — META 关键词优先匹配
     intent_type = "META"
@@ -181,7 +207,6 @@ def _rule_based_intent(player_input: str, game_phase: str) -> dict:
 
     # 战斗阶段特殊处理
     if game_phase == "combat" and intent_type != "COMBAT_ACTION":
-        # 战斗阶段大多数动作都是战斗行动
         if any(kw in text for kw in ["闪避", "躲", "防御"]):
             intent_type = "COMBAT_ACTION"
             action = "dodge"
@@ -198,8 +223,6 @@ def _rule_based_intent(player_input: str, game_phase: str) -> dict:
             check_type = "skill"
             break
 
-    # needs_rag 判定: 需要翻找知识/回忆/研究时标记为 true
-    # TODO: 优化为 NLP 语义分析，而非简单关键词匹配
     needs_rag = any(kw in text for kw in [
         "回忆", "回想", "记得", "记不", "想起",
         "研究", "调查", "查", "查阅", "翻找",
@@ -208,25 +231,24 @@ def _rule_based_intent(player_input: str, game_phase: str) -> dict:
         "这墙", "这地", "这房间", "这个地方",
     ])
 
-    return {
+    return [{
         "type": intent_type,
-        "character_name": "",
         "confidence": 0.6,
         "needs_rag": needs_rag,
+        "core_action": action,
+        "flavor_context": "",
         "data": {
-            "action": action,
             "target": target,
             "skill_name": skill_name,
-            "query": text if intent_type in ("META", "RECALL") else target,
             "check_type": check_type,
             "difficulty": difficulty,
             "detail": text,
         },
-    }
+    }]
 
 
-def _parse_llm_response(response_text: str) -> dict | None:
-    """解析 LLM 返回的 JSON 字符串"""
+def _parse_llm_response(response_text: str) -> list[dict] | None:
+    """解析 LLM 返回的 JSON 字符串（支持 list 和向后兼容单 dict）"""
     if not response_text:
         return None
 
@@ -238,18 +260,35 @@ def _parse_llm_response(response_text: str) -> dict | None:
 
     try:
         result = json.loads(text)
+        # 新格式：list[dict]
+        if isinstance(result, list):
+            # 过滤无效条目
+            valid = [item for item in result if isinstance(item, dict) and item.get("type")]
+            return valid if valid else None
+        # 向后兼容：单 dict → 包装为列表
         if isinstance(result, dict) and "type" in result:
-            return result
+            return [result]
     except json.JSONDecodeError:
         pass
 
-    # 尝试从文本中提取 JSON 对象
+    # 尝试从文本中提取 JSON
+    try:
+        start = text.index('[')
+        end = text.rindex(']') + 1
+        result = json.loads(text[start:end])
+        if isinstance(result, list):
+            valid = [item for item in result if isinstance(item, dict) and item.get("type")]
+            return valid if valid else None
+    except (ValueError, json.JSONDecodeError):
+        pass
+
+    # 兜底：尝试单 dict 提取
     try:
         start = text.index('{')
         end = text.rindex('}') + 1
         result = json.loads(text[start:end])
         if isinstance(result, dict) and "type" in result:
-            return result
+            return [result]
     except (ValueError, json.JSONDecodeError):
         pass
 
@@ -290,7 +329,8 @@ async def intent_node(state: GameState) -> dict:
     """
     意图分析节点。
 
-    接收玩家输入 → 尝试 LLM 分析 → 失败时规则兜底 → 返回结构化 Intent。
+    接收玩家输入 → 尝试 LLM 分析（多意图裂变）→ 失败时规则兜底（单意图）→
+    返回 intent_queue + 重置 current_intent_idx。
     同时返回 _llm_trace 供 LangSmith 追踪。
 
     从 state 中读取:
@@ -305,12 +345,15 @@ async def intent_node(state: GameState) -> dict:
     if not player_input:
         logger.warning("intent_node: 无玩家输入")
         return {
-            "intent": {
+            "intent_queue": [{
                 "type": "META",
-                "character_name": "",
                 "confidence": 0.0,
-                "data": {"action": "empty", "target": "", "detail": "空输入"},
-            },
+                "needs_rag": False,
+                "core_action": "empty",
+                "flavor_context": "",
+                "data": {"target": "", "skill_name": "", "check_type": "none", "difficulty": "REGULAR", "detail": "空输入"},
+            }],
+            "current_intent_idx": 0,
             "npc_dialogue": "",
             "_llm_trace": None,
         }
@@ -337,22 +380,32 @@ async def intent_node(state: GameState) -> dict:
     if result.is_ok:
         parsed = _parse_llm_response(result.text)
         if parsed:
-            intent = parsed
+            queue = parsed[:INTENT_MAX_QUEUE_LENGTH]
             logger.info(
-                f"intent_node[LLM]: type={intent['type']} "
-                f"action={intent.get('data', {}).get('action', '')} "
-                f"conf={intent.get('confidence', 0)}"
+                f"intent_node[LLM]: {len(queue)} intent(s), "
+                f"first={queue[0].get('type', '')} "
+                f"core={queue[0].get('core_action', '')}"
             )
-            return {"intent": intent, "npc_dialogue": "", "_llm_trace": result.to_trace()}
+            return {
+                "intent_queue": queue,
+                "current_intent_idx": 0,
+                "npc_dialogue": "",
+                "_llm_trace": result.to_trace(),
+            }
 
-    # ── 规则兜底 ──
-    intent = _rule_based_intent(player_input, game_phase)
+    # ── 规则兜底（降级为单意图列表） ──
+    queue = _rule_based_intent(player_input, game_phase)
     logger.info(
-        f"intent_node[RULE]: type={intent['type']} "
-        f"action={intent['data']['action']}"
+        f"intent_node[RULE]: type={queue[0].get('type', '')} "
+        f"core={queue[0].get('core_action', '')}"
     )
 
-    return {"intent": intent, "npc_dialogue": "", "_llm_trace": result.to_trace() if not result.is_ok else None}
+    return {
+        "intent_queue": queue,
+        "current_intent_idx": 0,
+        "npc_dialogue": "",
+        "_llm_trace": result.to_trace() if not result.is_ok else None,
+    }
 
 
 async def rule_only_intent_node(state: GameState) -> dict:
@@ -364,5 +417,8 @@ async def rule_only_intent_node(state: GameState) -> dict:
     player_input = state.get("player_input", "").strip()
     game_phase = state.get("game_phase", "exploration")
 
-    intent = _rule_based_intent(player_input, game_phase)
-    return {"intent": intent}
+    queue = _rule_based_intent(player_input, game_phase)
+    return {
+        "intent_queue": queue,
+        "current_intent_idx": 0,
+    }

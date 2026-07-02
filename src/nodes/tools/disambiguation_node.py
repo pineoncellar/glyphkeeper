@@ -382,7 +382,7 @@ async def disambiguation_node(state: GameState) -> dict:
     实体对齐节点 — 主入口。
 
     执行流：
-      从 intent 提取玩家目标称呼和意图类型
+      从 intent_queue[current_intent_idx] 提取当前意图的称呼和类型
       根据意图类型确定目标 ID 类型（item/npc/location/inventory_item）
       从 state 构建候选实体列表（按类型就近拉取）
       三级降级匹配找到系统唯一 ID
@@ -393,16 +393,17 @@ async def disambiguation_node(state: GameState) -> dict:
       - attention_focus: 更新后的焦点栈
       - scene_npcs: 透传 db_lookup 已有的场景 NPC 信息
     """
-    intent = state.get("intent") or {}
-    intent_data = intent.get("data") or {}
-    intent_type = intent.get("type", "")
+    idx = state.get("current_intent_idx", 0)
+    queue = state.get("intent_queue", [])
+    current = queue[idx] if idx < len(queue) else {}
+    intent_data = current.get("data", {})
+    intent_type = current.get("type", "")
 
-    # 提取原始称呼
     raw_target = intent_data.get("target", "")
     if not raw_target:
         raw_target = intent_data.get("detail", "")
     if not raw_target:
-        raw_target = intent_data.get("action", "")
+        raw_target = current.get("core_action", "")
 
     target_type = _resolve_target_type(intent_type)
 

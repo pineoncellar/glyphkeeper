@@ -183,11 +183,13 @@ async def adjudicate_node(state: GameState) -> dict:
 
     处理无硬编码规则对应的玩家即兴行为。
     将玩家的创意行动转化为规则参数（难度等级、技能、效果）。
-    同时返回 _llm_trace 供 LangSmith 追踪。
+    结果以 executed_actions 追加。
     """
-    intent = state.get("intent") or {}
-    intent_data = intent.get("data") or {}
-    action_desc = intent_data.get("detail") or intent_data.get("action", "")
+    idx = state.get("current_intent_idx", 0)
+    queue = state.get("intent_queue", [])
+    current_intent = queue[idx] if idx < len(queue) else {}
+    intent_data = current_intent.get("data", {})
+    action_desc = intent_data.get("detail") or intent_data.get("core_action", "")
     context = (
         f"游戏阶段: {state.get('game_phase', 'exploration')}, "
         f"玩家输入: {state.get('player_input', '')[:100]}"
@@ -196,35 +198,50 @@ async def adjudicate_node(state: GameState) -> dict:
     if not action_desc:
         logger.warning("adjudicator_node: 无行动描述")
         return {
-            "resolution": {
-                "success": False,
-                "error": "无行动描述",
-                "action": "",
-                "needs_check": False,
-                "check_type": "none",
-            },
+            "executed_actions": [{
+                "intent_id": f"intent_{idx}",
+                "intent_type": current_intent.get("type", "META"),
+                "rule_context": {"success": False, "error": "无行动描述"},
+                "deterministic_changes": {},
+                "raw_fixed_text": "",
+                "flavor_context": current_intent.get("flavor_context", ""),
+            }],
             "_llm_trace": None,
         }
 
-    # ── 尝试 LLM ──
     result = await _call_llm_for_adjudication(action_desc, context)
 
     if result.is_ok:
         parsed = _parse_llm_response(result.text)
         if parsed:
-            resolution = parsed
+            res = parsed
             logger.info(
-                f"adjudicator_node[LLM]: action={resolution.get('action', '')} "
-                f"skill={resolution.get('skill', '')} "
-                f"difficulty={resolution.get('difficulty', '')}"
+                f"adjudicator_node[LLM]: action={res.get('action', '')} "
+                f"skill={res.get('skill', '')} "
             )
-            return {"resolution": resolution, "_llm_trace": result.to_trace()}
+            return {
+                "executed_actions": [{
+                    "intent_id": f"intent_{idx}",
+                    "intent_type": current_intent.get("type", "META"),
+                    "rule_context": res,
+                    "deterministic_changes": {},
+                    "raw_fixed_text": "",
+                    "flavor_context": current_intent.get("flavor_context", ""),
+                }],
+                "_llm_trace": result.to_trace(),
+            }
 
-    # ── 规则兜底 ──
-    resolution = _rule_based_adjudication(intent_data)
-    logger.info(
-        f"adjudicator_node[RULE]: action={resolution['action']} "
-        f"check_type={resolution['check_type']}"
-    )
+    res = _rule_based_adjudication(intent_data)
+    logger.info(f"adjudicator_node[RULE]: action={res['action']} check_type={res['check_type']}")
 
-    return {"resolution": resolution, "_llm_trace": result.to_trace() if not result.is_ok else None}
+    return {
+        "executed_actions": [{
+            "intent_id": f"intent_{idx}",
+            "intent_type": current_intent.get("type", "META"),
+            "rule_context": res,
+            "deterministic_changes": {},
+            "raw_fixed_text": "",
+            "flavor_context": current_intent.get("flavor_context", ""),
+        }],
+        "_llm_trace": result.to_trace() if not result.is_ok else None,
+    }

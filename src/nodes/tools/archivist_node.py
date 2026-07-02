@@ -192,24 +192,30 @@ async def archivist_node(state: GameState) -> dict:
         logger.debug(f"archivist_node: 无法解析目标 '{target_name or target_key}'")
         return {"archivist_result": None}
 
-    # 调用 Archivist 查线索
-    try:
-        from src.tools.archivist import Archivist
-        archivist = Archivist()
-        clue_result = await archivist.inspect_target(
-            session_id=session_id,
-            target_key=resolved_key,
-            skill_name=skill_name,
-            roll_value=roll_value,
-            character_name=character_name,
+    from src.tools.archivist import Archivist
+    archivist = Archivist()
+    clue_result = await archivist.inspect_target(
+        session_id=session_id,
+        target_key=resolved_key,
+        skill_name=skill_name,
+        roll_value=roll_value,
+        character_name=character_name,
+    )
+    if clue_result:
+        logger.info(
+            f"archivist_node: 线索发现! "
+            f"knowledge={clue_result.get('knowledge_id')}"
         )
-        if clue_result:
-            logger.info(
-                f"archivist_node: 线索发现! "
-                f"knowledge={clue_result.get('knowledge_id')}"
-            )
-            return {"archivist_result": clue_result}
-    except Exception as e:
-        logger.warning(f"archivist_node: Archivist 调用失败: {e}")
 
-    return {"archivist_result": None}
+    raw_text = clue_result.get("flavor_text", "") if clue_result else ""
+    idx = state.get("current_intent_idx", 0)
+    return {
+        "executed_actions": [{
+            "intent_id": f"intent_{idx}",
+            "intent_type": "PHYSICAL_INTERACT",
+            "rule_context": clue_result or {},
+            "deterministic_changes": {},
+            "raw_fixed_text": raw_text,
+            "flavor_context": "",
+        }],
+    }

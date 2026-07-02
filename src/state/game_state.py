@@ -11,6 +11,19 @@ from typing import TypedDict, Optional, Any
 from src.tools.time import TimeSlot
 
 
+class ActionExecutionResult(TypedDict):
+    """单步行动的独立局部裁决账单
+
+    由每个规则节点在串行循环中产出，按执行顺序追加到 executed_actions 列表。
+    """
+    intent_id: str                      # 对应 intent_queue[idx] 的唯一标识
+    intent_type: str                    # "COMBAT_ACTION" | "PHYSICAL_INTERACT" | ...
+    rule_context: dict                  # 裁决结果: {roll_value, success_level, skill_name, ...}
+    deterministic_changes: dict         # 实体状态增量: {"character": {...}, "current_location": "..."}
+    raw_fixed_text: str                 # 模组预设的绝对线索文本（archivist 产出）
+    flavor_context: str                 # 玩家的 RP 修辞文本（透传至 narrate_node）
+
+
 class GameState(TypedDict):
     """游戏全局状态 — 所有 Node 的唯一数据源
 
@@ -41,9 +54,15 @@ class GameState(TypedDict):
     # ── 当前输入 ──
     player_input: str                   # 玩家的原始输入文本
 
-    # ── 当前处理结果 ──
-    intent: Optional[dict]              # IntentNode 的输出
-    resolution: Optional[dict]          # RuleNode 的输出
+    # ── 多意图串行循环控制流 ──
+    intent_queue: list[dict]            # 由 intent_node 裂变的结构化意图数组
+    current_intent_idx: int             # 当前循环指针（0 起始）
+    executed_actions: list[dict]        # 顺序追加的 ActionExecutionResult 账单链
+    npc_dialogue_results: list[dict]    # NPC 对话结果列表
+
+    # ── 当前处理结果（旧字段，逐步迁移到循环控制流） ──
+    intent: Optional[dict]              # IntentNode 的输出（即将废弃）
+    resolution: Optional[dict]          # RuleNode 的输出（即将废弃）
     physical_reality: str               # db_lookup_node 的物理现实 XML
     world_context: str                  # LookupNode 的世界知识上下文
     rag_context: str                    # rag_lookup_node 的语义知识 XML
@@ -115,6 +134,12 @@ def create_initial_state(
         "time_slot": time_slot,
         "beat_counter": 0,
         "player_input": "",
+        # 多意图串行循环控制流
+        "intent_queue": [],
+        "current_intent_idx": 0,
+        "executed_actions": [],
+        "npc_dialogue_results": [],
+        # 当前处理结果（旧字段，兼容保留）
         "intent": None,
         "resolution": None,
         "physical_reality": "",
@@ -148,6 +173,14 @@ def create_initial_state(
 def create_state_view(state: GameState, view_keys: list[str]) -> dict:
     """裁剪 state，只保留指定字段（用于 NodeInput.state_view）"""
     return {k: v for k, v in state.items() if k in view_keys}
+
+
+def is_loop_complete(state: GameState) -> bool:
+    """判断多意图串行循环是否已完成
+
+    当循环指针 >= 队列长度时，所有意图已处理完毕。
+    """
+    return state.get("current_intent_idx", 0) >= len(state.get("intent_queue", []))
 
 
 # 常用视图模板

@@ -28,21 +28,15 @@ async def sanity_node(state: GameState) -> dict:
     """
     理智检定节点。
 
-    从 state["intent"] 中读取理智检定参数，执行计算。
-
-    intent.data 期望字段:
-        source_type: str       — 损失来源类型（如 "seeing_mythos_creature"）
-        loss_range: list[int]  — 自定义损失范围 [min, max]（可选）
-        current_san: int       — 当前 SAN 值（可选，默认从角色数据读取）
-        max_san: int           — 最大 SAN 值（可选，默认从角色数据读取）
-        is_mythos: bool        — 是否神话相关（默认 False）
+    从 intent_queue 读取当前理智检定参数，执行计算。
+    结果以 executed_actions 追加，SAN 变更写入 deterministic_changes。
     """
-    intent = state.get("intent") or {}
-    intent_data = intent.get("data") or {}
+    idx = state.get("current_intent_idx", 0)
+    queue = state.get("intent_queue", [])
+    current_intent = queue[idx] if idx < len(queue) else {}
+    intent_data = current_intent.get("data", {})
 
     source_type = intent_data.get("source_type", "")
-
-    # ── 获取 SAN 值 ──
     character_data = state.get("character")
 
     current_san = intent_data.get("current_san")
@@ -58,7 +52,6 @@ async def sanity_node(state: GameState) -> dict:
     if max_san is None:
         max_san = intent_data.get("max_san", 60)
 
-    # ── 获取损失范围 ──
     loss_range_raw = intent_data.get("loss_range")
     if loss_range_raw and isinstance(loss_range_raw, (list, tuple)) and len(loss_range_raw) >= 2:
         loss_range = (int(loss_range_raw[0]), int(loss_range_raw[1]))
@@ -67,23 +60,24 @@ async def sanity_node(state: GameState) -> dict:
 
     is_mythos = intent_data.get("is_mythos", False)
 
-    # ── 执行计算 ──
     try:
-        # 先计算 SanityLoss（含 actual_loss）
         sanity_loss = calculate_sanity_loss(current_san, max_san, loss_range, is_mythos)
-        # 再获取 InsanityResult（含症状类型和持续时间）
         insanity_result = roll_full_insanity(current_san, max_san, loss_range, source_type)
     except Exception as e:
         logger.error(f"sanity_node: 理智计算失败: {e}")
         return {
-            "resolution": {
-                "success": False,
-                "error": str(e),
-                "source_type": source_type,
-            },
+            "executed_actions": [{
+                "intent_id": f"intent_{idx}",
+                "intent_type": current_intent.get("type", "META"),
+                "rule_context": {"success": False, "error": str(e), "source_type": source_type},
+                "deterministic_changes": {},
+                "raw_fixed_text": "",
+                "flavor_context": current_intent.get("flavor_context", ""),
+            }],
         }
 
-    # ── 构建结果 ──
+    new_san = max(0, current_san - sanity_loss.actual_loss)
+
     resolution = {
         "success": True,
         "node_type": "sanity_check",
@@ -98,11 +92,8 @@ async def sanity_node(state: GameState) -> dict:
         "insanity_type": insanity_result.insanity_type,
         "duration_hours": insanity_result.duration_hours,
         "symptom": insanity_result.symptom,
-        "remaining_san": current_san - sanity_loss.actual_loss,
+        "remaining_san": new_san,
     }
-
-    # 构建状态 patch
-    new_san = current_san - resolution["actual_loss"]
 
     log_msg = (
         f"sanity_node: {source_type} "
@@ -113,15 +104,20 @@ async def sanity_node(state: GameState) -> dict:
         log_msg += f" [{resolution['insanity_type']}] {resolution['symptom']}"
     logger.info(log_msg)
 
-    # 更新角色 SAN 值
-    patch = {"resolution": resolution}
+    changes = {}
     if character_data:
-        patch["character"] = {
-            **character_data,
-            "sanity": new_san,
-        }
+        changes["character"] = {**character_data, "sanity": new_san}
 
-    return patch
+    return {
+        "executed_actions": [{
+            "intent_id": f"intent_{idx}",
+            "intent_type": current_intent.get("type", "META"),
+            "rule_context": resolution,
+            "deterministic_changes": changes,
+            "raw_fixed_text": "",
+            "flavor_context": current_intent.get("flavor_context", ""),
+        }],
+    } | ({"character": changes.get("character")} if changes else {})
 
 
 async def simple_sanity_check(

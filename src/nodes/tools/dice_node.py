@@ -120,10 +120,16 @@ async def dice_node(state: GameState) -> dict:
         + (f" level={success_level}" if success_level else "")
     )
 
-    # 清除 pending_dice，写入 resolution
     return {
         "pending_dice": None,
-        "resolution": result,
+        "executed_actions": [{
+            "intent_id": "dice_auto",
+            "intent_type": "",
+            "rule_context": result,
+            "deterministic_changes": {},
+            "raw_fixed_text": "",
+            "flavor_context": "",
+        }],
     }
 
 

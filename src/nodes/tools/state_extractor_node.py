@@ -63,67 +63,64 @@ EXTRACTOR_SYSTEM_PROMPT = """你是一个严格的三级信息提取器。阅读
 
 
 async def state_extractor_node(state: GameState) -> dict[str, Any]:
-    """从叙事文本中提取 Tier 1 事件和 Tier 2 事实
+    """从 executed_actions 链 + 叙事文本中提取 Tier 1 事件和 Tier 2 事实
 
-    Node 签名:
-        async def state_extractor_node(state: GameState) -> dict
-
-    从 state.narrative_output 读取完整叙事文本，
-    结合 state.world_context 中的物理现实做对照，
-    返回 pending_tier1_events / pending_tier2_facts 供 Engine 后台追赶。
+    两条提取路径：
+      路径 A: 从 executed_actions 中获取 deterministic_changes 作为确定性 Tier 1 事件
+      路径 B: 从 narrative_output 中用 LLM 提取 Tier 2 事实
 
     返回:
         dict with keys:
-          - pending_tier1_events: list[dict] 提取的 Tier 1 事件
-          - pending_tier2_facts:   list[str]   提取的 Tier 2 事实
+          - pending_tier1_events: list[dict] 确定性事件
+          - pending_tier2_facts:   list[str]   LLM 提取的正典事实
     """
+    actions = state.get("executed_actions", [])
     narrative = state.get("narrative_output", "")
-    if not narrative:
-        return {"pending_tier1_events": [], "pending_tier2_facts": []}
 
-    # 构建物理现实上下文（给 LLM 做对照，裁剪长度防超 token）
-    world_context = state.get("world_context", "")
-    current_loc = state.get("current_location", "")
-    scene_npcs = state.get("scene_npcs", [])
+    # ── 路径 A: 从 executed_actions 提取确定性变更 ──
+    tier1_from_actions = []
+    for action in actions:
+        changes = action.get("deterministic_changes", {})
+        if changes:
+            tier1_from_actions.append({
+                "event_type": "STATE_CHANGE_BATCH",
+                "payload": changes,
+                "source_intent": action.get("intent_id", ""),
+            })
 
-    context_lines = ["【物理现实上下文】"]
-    context_lines.append(f"当前位置: {current_loc}")
-    context_lines.append(f"场景NPC: {scene_npcs}")
-    if world_context:
-        context_lines.append(f"世界知识: {world_context[:500]}")
-    context_lines.append("")
-    context_lines.append("【叙事文本】")
-    context_lines.append(narrative)
-    prompt = "\n".join(context_lines)
+    # ── 路径 B: 从叙事文本提取 Tier 2 事实 ──
+    tier2 = []
+    if narrative:
+        world_context = state.get("world_context", "")
+        current_loc = state.get("current_location", "")
+        scene_npcs = state.get("scene_npcs", [])
 
-    messages = [
-        {"role": "system", "content": EXTRACTOR_SYSTEM_PROMPT},
-        {"role": "user", "content": prompt},
-    ]
+        context_lines = ["【物理现实上下文】"]
+        context_lines.append(f"当前位置: {current_loc}")
+        context_lines.append(f"场景NPC: {scene_npcs}")
+        if world_context:
+            context_lines.append(f"世界知识: {world_context[:500]}")
+        context_lines.append("")
+        context_lines.append("【叙事文本】")
+        context_lines.append(narrative)
+        prompt = "\n".join(context_lines)
 
-    try:
-        result = await _call_llm("fast", messages)
-        if not result.is_ok:
-            logger.warning(f"state_extractor: LLM 调用失败: {result.error}")
-            return {"pending_tier1_events": [], "pending_tier2_facts": []}
+        messages = [
+            {"role": "system", "content": EXTRACTOR_SYSTEM_PROMPT},
+            {"role": "user", "content": prompt},
+        ]
 
-        if not result.text or not result.text.strip():
-            logger.debug("state_extractor: LLM 返回空，跳过提取")
-            return {"pending_tier1_events": [], "pending_tier2_facts": []}
-        data = json.loads(result.text)
-    except json.JSONDecodeError as e:
-        logger.warning(f"state_extractor: JSON 解析失败: {e}")
-        return {"pending_tier1_events": [], "pending_tier2_facts": []}
-    except Exception as e:
-        logger.warning(f"state_extractor: 提取异常: {e}")
-        return {"pending_tier1_events": [], "pending_tier2_facts": []}
+        try:
+            result = await _call_llm("fast", messages)
+            if result.is_ok and result.text and result.text.strip():
+                data = json.loads(result.text)
+                tier2 = data.get("tier2_new_facts", [])
+        except (json.JSONDecodeError, Exception) as e:
+            logger.debug(f"state_extractor: Tier 2 提取异常（非阻塞）: {e}")
 
-    tier1 = data.get("tier1_implied_events", [])
-    tier2 = data.get("tier2_new_facts", [])
-
-    if tier1 or tier2:
+    if tier1_from_actions or tier2:
         logger.info(
-            f"state_extractor: 提取到 {len(tier1)} 个 Tier 1 事件, "
+            f"state_extractor: {len(tier1_from_actions)} 个确定性事件, "
             f"{len(tier2)} 条 Tier 2 事实"
         )
 

@@ -394,12 +394,12 @@ async def npc_dialogue_node(state: GameState) -> dict:
     # npc_dialogue 供 narrate_node 读取并包装成最终叙事文本。
     return {
         "npc_dialogue": npc_reply,
-        "resolution": {
-            "success": True,
+        "npc_dialogue_results": [{
             "npc_name": npc_name,
-            "attitude": attitude,
-            "talk_count": rel["talk_count"],
-        },
+            "dialogue_text": npc_reply,
+            "attitude_change": "unchanged",
+            "clue_tags_unlocked": new_tags,
+        }],
         "npc_relations": updated_relations,
         "_llm_trace": llm_result.to_trace() if llm_result.is_ok else None,
         "active_tags": updated_tags,

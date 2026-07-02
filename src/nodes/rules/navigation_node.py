@@ -289,21 +289,31 @@ async def navigation_node(state: GameState) -> dict:
         current_location: str    — 新位置 key（成功时）
         resolution: dict         — 执行结果，含 success/error/from_location/to_location
     """
-    intent = state.get("intent") or {}
-    intent_data = intent.get("data") or {}
+    idx = state.get("current_intent_idx", 0)
+    queue = state.get("intent_queue", [])
+    current_intent = queue[idx] if idx < len(queue) else {}
+    intent_data = current_intent.get("data", {})
     target = intent_data.get("target", "")
     current_loc = state.get("current_location", "")
+    flavor = current_intent.get("flavor_context", "")
 
     if not target:
-        return {"resolution": {"success": False, "error": "你要去哪里？", "action": "move", "from_location": current_loc}}
+        return {
+            "executed_actions": [{"intent_id": f"intent_{idx}", "intent_type": "MOVE",
+                "rule_context": {"success": False, "error": "你要去哪里？"},
+                "deterministic_changes": {}, "raw_fixed_text": "", "flavor_context": flavor}],
+        }
     if not current_loc:
-        return {"resolution": {"success": False, "error": "你还不确定自己在哪里。", "action": "move", "from_location": ""}}
+        return {
+            "executed_actions": [{"intent_id": f"intent_{idx}", "intent_type": "MOVE",
+                "rule_context": {"success": False, "error": "你还不确定自己在哪里。"},
+                "deterministic_changes": {}, "raw_fixed_text": "", "flavor_context": flavor}],
+        }
 
     try:
         store = await _get_store()
         conn = await store._get_conn()
 
-        # 读当前场景出口 + 所有场景的 key/name
         exits = await _load_location_exits(conn, current_loc)
         all_rows = await conn.fetch("SELECT key, name, exits_json, tags FROM locations")
         all_keys = [r["key"] for r in all_rows]
@@ -312,24 +322,19 @@ async def navigation_node(state: GameState) -> dict:
         resolved_key: Optional[str] = None
         bfs_path = None
 
-        # 第一步: 方向性移动 → 只检查出口
         resolved_key = _match_exit_direction(target, exits or {})
 
-        # 第二步: 命名目的地 → 匹配任意已知场景，直接去
         if resolved_key is None:
             resolved_key = _match_any_location(target, all_keys, all_names)
 
-        # 第三步: 直连+BFS 寻路 → direction->key 的图路径搜索（非出口方向时不限制）
         if resolved_key is None:
-            # 尝试从 target 解析出目标 key
             target_key = _match_any_location(target, all_keys, all_names)
             if target_key and target_key != current_loc:
                 raw_locations = []
                 for r in all_rows:
                     raw = r["exits_json"]
                     raw_locations.append({
-                        "key": r["key"],
-                        "name": r["name"],
+                        "key": r["key"], "name": r["name"],
                         "exits": raw if isinstance(raw, dict) else {},
                         "tags": r["tags"] or [],
                     })
@@ -337,55 +342,47 @@ async def navigation_node(state: GameState) -> dict:
                 bfs_path = find_path(nav_graph, current_loc, target_key)
                 if bfs_path is not None:
                     resolved_key = bfs_path[-1]["key"]
-                    path_desc = " → ".join(f"{s['direction']}({s['key']})" for s in bfs_path)
-                    logger.info(f"navigation_node: BFS {current_loc} → {resolved_key} [{path_desc}]")
 
-        # 第四步: LLM 兜底 — 规则匹配不到时让 LLM 猜
         if resolved_key is None:
-            logger.debug(f"navigation_node: 规则匹配不到 '{target}'，尝试 LLM 解析")
             resolved_key = await _llm_resolve_target(target, all_names, all_keys)
 
-        # 全失败 → 返回当前可用的出口方向
         if resolved_key is None:
             exit_dirs = list(exits.keys()) if exits else []
-            exit_desc = "、".join(exit_dirs) if exit_dirs else "没有出口"
-            logger.debug(f"navigation_node: '{target}' 不可达, 当前出口: {exit_desc}")
             return {
-                "current_location": current_loc,
-                "resolution": {
-                    "success": False,
-                    "error": f"从这里无法前往「{target}」。当前可走的方向: {exit_desc}",
-                    "action": "move", "from_location": current_loc, "available_exits": exit_dirs,
-                },
+                "executed_actions": [{"intent_id": f"intent_{idx}", "intent_type": "MOVE",
+                    "rule_context": {"success": False, "error": f"从这里无法前往「{target}」。", "available_exits": exit_dirs},
+                    "deterministic_changes": {}, "raw_fixed_text": "", "flavor_context": flavor}],
             }
 
-        # 原地踏步检查
         if resolved_key == current_loc:
             return {
-                "current_location": current_loc,
-                "resolution": {"success": False, "error": "你已经在这里了。", "action": "move", "from_location": current_loc},
+                "executed_actions": [{"intent_id": f"intent_{idx}", "intent_type": "MOVE",
+                    "rule_context": {"success": False, "error": "你已经在这里了。"},
+                    "deterministic_changes": {}, "raw_fixed_text": "", "flavor_context": flavor}],
             }
 
-        # 移动成功后，为目标地点构建物理现实 XML，供 narrate_node 直接使用
         physical_xml = await _build_location_physical_reality(conn, resolved_key, state)
 
         logger.info(f"navigation_node: {current_loc} → {resolved_key} (target='{target}')")
-        result = {
+        return {
+            "executed_actions": [{
+                "intent_id": f"intent_{idx}",
+                "intent_type": "MOVE",
+                "rule_context": {"success": True, "from": current_loc, "to": resolved_key,
+                    "path": [{"direction": s["direction"], "key": s["key"]} for s in bfs_path] if bfs_path else []},
+                "deterministic_changes": {"current_location": resolved_key},
+                "raw_fixed_text": "",
+                "flavor_context": flavor,
+            }],
             "current_location": resolved_key,
             "physical_reality": physical_xml,
             "world_context": physical_xml,
-            "resolution": {
-                "success": True, "error": "", "action": "move",
-                "from_location": current_loc, "to_location": resolved_key, "target_label": target,
-            },
         }
-        if bfs_path is not None:
-            result["resolution"]["path"] = [{"direction": s["direction"], "key": s["key"]} for s in bfs_path]
-        return result
 
     except Exception as e:
         logger.error(f"navigation_node: 查询失败: {e}")
         return {
-            "current_location": current_loc,
-            "resolution": {"success": False, "error": f"导航查询异常: {e}", "action": "move", "from_location": current_loc},
+            "executed_actions": [{"intent_id": f"intent_{idx}", "intent_type": "MOVE",
+                "rule_context": {"success": False, "error": f"导航异常: {e}"},
+                "deterministic_changes": {}, "raw_fixed_text": "", "flavor_context": flavor}],
         }

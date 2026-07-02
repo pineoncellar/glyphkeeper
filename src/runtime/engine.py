@@ -49,8 +49,12 @@ ENGINE_MODE_LANGGRAPH = "langgraph"
 # ====================================================================
 
 _RUNTIME_FIELDS: dict[str, object] = {
-    "intent": None,               # intent_node 写
-    "resolution": None,           # skill_node / rule_node 写
+    "intent": None,               # intent_node 写（即将废弃）
+    "resolution": None,           # skill_node / rule_node 写（即将废弃）
+    "intent_queue": [],           # intent_node 写（多意图队列）
+    "current_intent_idx": 0,      # dispatch_node / intent_node 写
+    "executed_actions": [],       # 规则节点追加写
+    "npc_dialogue_results": [],   # npc_dialogue_node 追加写
     "npc_dialogue": "",           # npc_dialogue_node 写
     "world_context": "",          # db_lookup_node + engine 写
     "physical_reality": "",       # db_lookup_node 写

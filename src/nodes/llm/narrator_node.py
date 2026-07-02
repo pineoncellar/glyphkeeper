@@ -56,6 +56,20 @@ NPC_NARRATOR_SUPPLEMENT = """[场景附加指令 — NPC 对话]
 【★★★★★ 最高优先级规则】
 NPC_DIALOGUE 中引号内的部分必须逐字保留，绝对不得改写、删减或概括。"""
 
+NARRATOR_CHAIN_SUPPLEMENT = """[时序映射指令]
+以下是本回合的已执行行动链（executed_actions）。请按顺序逐段翻译。
+
+每个 action 包含：
+- rule_context: 规则裁决的绝对结果（掷骰点、成功等级等），叙事不得与之矛盾
+- flavor_context: 玩家的 RP 修辞文本，必须融入该段的描写中
+- raw_fixed_text: 模组预设的绝对文本，如果有，必须逐字保留
+
+分段规则：
+先按顺序处理每个 action，段与段之间用自然过渡句连接，使整段叙事流畅。
+不要添加 rule_context 中未提及的新规则事实。
+空间/标签/剧透等约束（见上文【守密人核心执行铁律】）仍然适用于整个叙事。"""
+
+
 MOVEMENT_NARRATOR_SUPPLEMENT = """[场景附加指令 — 移动]
 当前玩家正在从一个场景移动到另一个场景。
 
@@ -292,39 +306,72 @@ async def _call_llm_for_narrative(
                          messages=[], success=False, error=str(e))
 
 
+def _build_chain_context(actions: list[dict], npc_results: list[dict]) -> str:
+    """构建结果链的格式化上下文，消费 executed_actions + npc_dialogue_results"""
+    import json
+    parts = []
+    parts.append("<executed_actions>")
+    for i, action in enumerate(actions):
+        parts.append(f"  <action index='{i}'>")
+        parts.append(f"    <intent_type>{action.get('intent_type', '')}</intent_type>")
+        parts.append(f"    <rule_context>{json.dumps(action.get('rule_context', {}), ensure_ascii=False)}</rule_context>")
+        if action.get("flavor_context"):
+            parts.append(f"    <flavor_context>{action['flavor_context']}</flavor_context>")
+        if action.get("raw_fixed_text"):
+            parts.append(f"    <raw_fixed_text>{action['raw_fixed_text']}</raw_fixed_text>")
+        parts.append(f"  </action>")
+    parts.append("</executed_actions>")
+    if npc_results:
+        parts.append("<npc_dialogues>")
+        for nr in npc_results:
+            parts.append(f"  <dialogue npc='{nr['npc_name']}'>{nr['dialogue_text']}</dialogue>")
+        parts.append("</npc_dialogues>")
+    return "\n".join(parts)
+
+
+async def _call_llm_for_narrative_chain(
+    actions: list[dict],
+    npc_results: list[dict],
+    physical_reality: str = "",
+    rag_context: str = "",
+    narrative_history: str = "",
+) -> LLMResult:
+    """调用 LLM 基于 executed_actions 链生成叙事文本"""
+    try:
+        chain_text = _build_chain_context(actions, npc_results)
+        messages = [
+            {"role": "system", "content": NARRATOR_SYSTEM_PROMPT},
+            {"role": "system", "content": NARRATOR_CHAIN_SUPPLEMENT},
+        ]
+        context_parts = [chain_text]
+        if physical_reality:
+            context_parts.append(physical_reality)
+        if rag_context:
+            context_parts.append(rag_context)
+        context_parts.append(f"叙事历史: {narrative_history[-300:] if narrative_history else '无'}")
+        messages.append({"role": "user", "content": "\n".join(context_parts)})
+        return await _call_llm("standard", messages)
+    except Exception as e:
+        logger.warning(f"narrator_node[chain]: LLM 调用失败: {e}")
+        return LLMResult(text=None, tier="standard", model_name="",
+                         messages=[], success=False, error=str(e))
+
+
 async def narrate_node(state: GameState) -> dict:
     """
     叙事生成节点。
 
-    读取 intent + resolution + world_context → 调用 LLM → 失败用模板兜底 → 返回 narrative。
-    同时返回 _llm_trace 供 LangSmith 追踪。
+    优先消费 executed_actions 结果链（多意图串行循环产出），
+    回退到旧单 intent+resolution 路径（兼容存量图拓扑）。
 
-    physical_reality 由 db_lookup_node 从 PG 读模型表注入（物理事实），
-    rag_context 由 rag_lookup_node 从 LightRAG 按需注入（语义背景）。
-
-    防剧透机制：
-      在调用 LLM 前查询 session_knowledge_state 获取玩家已发现的知识列表，
-      注入到 system prompt 中约束 LLM 不提及未发现的信息。
+    返回 narrative + narrative_output + _llm_trace。
     """
-    intent = state.get("intent") or {}
-    resolution = state.get("resolution") or {}
+    actions = state.get("executed_actions", [])
+    npc_results = state.get("npc_dialogue_results", [])
     physical_reality = state.get("physical_reality", "")
     rag_context = state.get("rag_context", "")
-    game_phase = state.get("game_phase", "exploration")
     narrative_history = state.get("narrative", "")
     session_id = state.get("session_id", "")
-
-    # ── 检测 NPC 对话场景 ──
-    npc_dialogue = state.get("npc_dialogue", "")
-    is_npc_scene = bool(npc_dialogue)
-
-    # ── 读取技能检定发现的线索（由 skill_node 经 archivist 写入） ──
-    archivist_result = state.get("archivist_result")
-    clue_discovery = ""
-    if archivist_result:
-        flavor_text = archivist_result.get("flavor_text", "")
-        if flavor_text:
-            clue_discovery = flavor_text
 
     # ── 获取玩家已发现的知识（防剧透） ──
     known_knowledge: list[str] = []
@@ -336,10 +383,39 @@ async def narrate_node(state: GameState) -> dict:
         except Exception as e:
             logger.debug(f"narrator_node: 无法获取已发现知识: {e}")
 
-    # ── 尝试 LLM ──
+    # ── 路径 A: 有 executed_actions 链 → 链消费 ──
+    if actions:
+        result = await _call_llm_for_narrative_chain(
+            actions=actions,
+            npc_results=npc_results,
+            physical_reality=physical_reality,
+            rag_context=rag_context,
+            narrative_history=narrative_history,
+        )
+        if result.is_ok:
+            narrative = result.text
+            logger.info(f"narrator_node[chain]: {len(narrative)} chars, {len(actions)} actions")
+            return {
+                "narrative": narrative,
+                "narrative_output": narrative,
+                "_llm_trace": result.to_trace(),
+            }
+        logger.debug("narrator_node[chain]: LLM 失败，降级到模板")
+
+    # ── 路径 B: 旧单意图路径（兼容） ──
+    intent = state.get("intent") or {}
+    resolution = state.get("resolution") or {}
+    npc_dialogue = state.get("npc_dialogue", "")
+    is_npc_scene = bool(npc_dialogue)
+
+    archivist_result = state.get("archivist_result")
+    clue_discovery = ""
+    if archivist_result:
+        clue_discovery = archivist_result.get("flavor_text", "") or ""
+
     intent_type = intent.get("type", "")
     result = await _call_llm_for_narrative(
-        intent, resolution, game_phase, narrative_history,
+        intent, resolution, state.get("game_phase", "exploration"), narrative_history,
         physical_reality=physical_reality,
         rag_context=rag_context,
         known_knowledge=known_knowledge,
@@ -350,19 +426,16 @@ async def narrate_node(state: GameState) -> dict:
 
     if result.is_ok:
         narrative = result.text
-        # ── NPC 对话校验：提取引号内容比对原始 NPC_DIALOGUE ──
         if is_npc_scene and npc_dialogue:
             narrative = _validate_npc_dialogue(narrative, npc_dialogue)
-        logger.info(f"narrator_node[LLM]: {len(narrative)} chars")
+        logger.info(f"narrator_node[legacy]: {len(narrative)} chars")
     else:
-        # ── 模板兜底 ──
         if is_npc_scene:
-            # NPC 对话兜底：直接使用 NPC 发言，前面加简单场景描述
             npc_name = resolution.get("npc_name", "对方")
             narrative = f"{npc_name}说道：\"{npc_dialogue}\""
         else:
             narrative = _template_narrative(state)
-        logger.info(f"narrator_node[TEMPLATE]: {len(narrative)} chars")
+        logger.info(f"narrator_node[template]: {len(narrative)} chars")
 
     return {
         "narrative": narrative,
