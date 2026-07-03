@@ -212,33 +212,34 @@ graph TB
 <tr><td style="text-align:center;">✅</td><td colspan="2">StateGraph 图编排 — 四阶段串行循环管线（loop_guard + dispatch + reduce_iter）</td></tr>
 <tr><td style="text-align:center;">✅</td><td colspan="2" style="padding-left:2em;">├ 多意图串行循环（intent_queue + executed_actions 链）</td></tr>
 <tr><td style="text-align:center;">✅</td><td colspan="2">GameState&amp;WorldManager世界状态管理</td></tr>
-<tr><td style="text-align:center;">✅</td><td colspan="2">大语言模型云提供方适配</td></tr>
+<tr><td style="text-align:center;">⬜</td><td colspan="2">大语言模型云提供方适配</td></tr>
 <tr><td style="text-align:center;">✅</td><td colspan="2">CQRS 读模型表与写入管线</td></tr>
 <tr><td style="text-align:center;">✅</td><td colspan="2">LightRAG 接入</td></tr>
 <tr><td style="text-align:center;">✅</td><td colspan="2">双脑记忆系统</td></tr>
 <tr><td style="text-align:center;">✅</td><td colspan="2">对象名称消岐系统</td></tr>
-<tr><td style="text-align:center;">✅</td><td colspan="2">状态同步模块（state_extractor_node + Tier1/Tier2 提取管线）</td></tr>
-<tr><td style="text-align:center;">⬜</td><td colspan="2" style="padding-left:2em;">├ 增加历史消息数</td></tr>
-<tr><td style="text-align:center;">✅</td><td colspan="2">Worker 后台任务（记忆固化 / 世界摘要 / 健康检查备份）</td></tr>
+<tr><td style="text-align:center;">🔄</td><td colspan="2">状态同步模块（state_extractor_node + Tier1/Tier2 提取管线）</td></tr>
+<tr><td style="text-align:center;">✅</td><td colspan="2" style="padding-left:2em;">├ 增加历史消息数</td></tr>
+<tr><td style="text-align:center;">🔄</td><td colspan="2">Worker 后台任务（记忆固化 / 世界摘要 / 健康检查备份）</td></tr>
 <tr><td style="text-align:center;">⬜</td><td colspan="2">多世界并行与管理</td></tr>
-<tr><td style="text-align:center;">⬜</td><td colspan="2" style="padding-left:2em;">├ known_knowledge未随存档存读而修改</td></tr>
+<tr><td style="text-align:center;">✅</td><td colspan="2" style="padding-left:2em;">├ known_knowledge未随存档存读而修改</td></tr>
 <tr>
-    <th rowspan="14" style="text-align:center; vertical-align:middle; width:48px; border-top:2px solid #d0d7de;">游戏系统</th>
+    <th rowspan="100" style="text-align:center; vertical-align:middle; width:48px; border-top:2px solid #d0d7de;">游戏系统</th>
 </tr>
-<tr><td style="text-align:center;">✅</td><td colspan="2">角色卡系统（职业选择、属性骰点、技能与背景，CLI 向导已集成）</td>
-<tr><td style="text-align:center;">✅</td><td colspan="2">调查与线索系统（Archivist + clue_discoveries 线索映射表）</td></tr>
+<tr><td style="text-align:center;">⬜</td><td colspan="2">角色卡与物品背包系统</td>
+<tr><td style="text-align:center;">🔄</td><td colspan="2">调查与线索系统</td></tr>
 <tr><td style="text-align:center;">⬜</td><td colspan="2" style="padding-left:2em;">├ 重复检定请求</td></tr>
 <tr><td style="text-align:center;">✅</td><td colspan="2" style="padding-left:2em;">├ 无线索时的幻觉问题</td></tr>
 <tr><td style="text-align:center;">⬜</td><td colspan="2" style="padding-left:2em;">├ 日记等线索的递进问题</td></tr>
-<tr><td style="text-align:center;">✅</td><td colspan="2">NPC 对话系统（npc_dialogue_node + 关系追踪）</td></tr>
+<tr><td style="text-align:center;">⬜</td><td colspan="2" style="padding-left:2em;">├ 多意图框架跳过线索</td></tr>
+<tr><td style="text-align:center;">✅</td><td colspan="2">NPC 对话系统</td></tr>
 <tr><td style="text-align:center;">⬜</td><td colspan="2" style="padding-left:2em;">├ 场景幻觉问题</td></tr>
 <tr><td style="text-align:center;">⬜</td><td colspan="2" style="padding-left:2em;">├ 人设缓存</td></tr>
+<tr><td style="text-align:center;">⬜</td><td colspan="2" style="padding-left:2em;">├ 经npc节点的narrator prompt构造</td></tr>
 <tr><td style="text-align:center;">✅</td><td colspan="2">CoC 7版技能检定</td></tr>
 <tr><td style="text-align:center;">⬜</td><td colspan="2">战斗轮与体力系统</td></tr>
-<tr><td style="text-align:center;">✅</td><td colspan="2">理智与疯狂（sanity_node + sanity_rules 完整实现）</td></tr>
+<tr><td style="text-align:center;">✅</td><td colspan="2">理智与疯狂</td></tr>
 <tr><td style="text-align:center;">✅</td><td colspan="2">场景切换与 location 更新</td></tr>
 <tr><td style="text-align:center;">✅</td><td colspan="2" style="padding-left:2em;">├ 场景切换后的新场景描述</td></tr>
-<tr><td style="text-align:center;">⬜</td><td colspan="2">物品背包系统</td></tr>
 </table>
 
 > To be continue......
