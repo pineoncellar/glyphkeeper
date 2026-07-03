@@ -63,6 +63,14 @@ _BANNER = f"""
 """
 
 
+def _ensure_lightrag_backup_dir(snapshot_id: str) -> Path:
+    """获取快照对应的 LightRAG 备份目录路径（不存在则创建）"""
+    from src.tools import PROJECT_ROOT
+    backup_dir = PROJECT_ROOT / "data" / "backups" / "lightrag_snapshots" / snapshot_id
+    backup_dir.mkdir(parents=True, exist_ok=True)
+    return backup_dir
+
+
 class CliAdapter(AbstractAdapter):
     """CLI 适配器 — 终端交互式跑团界面"""
 
@@ -841,6 +849,23 @@ class CliAdapter(AbstractAdapter):
                 f"回滚到版本 {target_version} 失败", level="error", session_id=session_id,
             )
 
+        # 从事件流中重建 session_knowledge_state：提取 target_version 之前的 ClueDiscovered 事件
+        try:
+            all_events = await event_log.get_events(session_id, since_version=0)
+            clue_ids = []
+            for evt in all_events:
+                ver = evt.get("version", 0)
+                if ver <= target_version and evt.get("type") == "ClueDiscovered":
+                    kid = evt.get("data", {}).get("knowledge_id", "")
+                    if kid:
+                        clue_ids.append(kid)
+            from src.state.session_state import SessionKnowledgeState
+            sks = SessionKnowledgeState()
+            char_name = self._character.name if self._character else ""
+            await sks.restore_from_ids(session_id, clue_ids, character_name=char_name)
+        except Exception as e:
+            logger.warning(f"rollback: 重建知识状态失败: {e}")
+
         # 获取回滚后的 state 信息
         new_state = self._scheduler.get_session_state(session_id)
         location = new_state.get("current_location", "") if new_state else ""
@@ -876,6 +901,16 @@ class CliAdapter(AbstractAdapter):
 
         try:
             snap_id = await self._snapshot_mgr.create(state, label=snap_label)
+
+            # 全量备份 LightRAG 数据到快照关联目录
+            try:
+                from src.memory.vector_store import VectorStore
+                vs = await VectorStore.get_instance("world")
+                lightrag_dir = _ensure_lightrag_backup_dir(snap_id)
+                await vs.backup_to(lightrag_dir)
+            except Exception as e:
+                logger.warning(f"存档: LightRAG 备份失败（不影响存档）: {e}")
+
             return OutboundMessage.system_msg(
                 f"存档完成: [{snap_label}] (ID: {snap_id[:8]}...)",
                 session_id=session_id,
@@ -918,35 +953,59 @@ class CliAdapter(AbstractAdapter):
             if restored is None:
                 return OutboundMessage.system_msg("存档数据损坏，无法读取", level="error", session_id=session_id)
 
+            restored_state = restored.get("state", restored)
+            known_ids = restored.get("known_knowledge_ids", [])
+
             # 写入 scheduler 当前会话
             if self._scheduler:
                 # 若存档中无角色数据（旧存档），用当前角色兜底
-                if not restored.get("character") and self._character:
+                if not restored_state.get("character") and self._character:
                     from dataclasses import asdict
-                    restored["character"] = asdict(self._character)
+                    restored_state["character"] = asdict(self._character)
                 # 使用 msg 中的 routing 信息，确保 key 与玩家当前会话一致
                 platform = msg.platform if msg else "cli"
                 channel_id = msg.channel_id if msg else ""
                 world_id = msg.world_id if msg else ""
                 await self._scheduler.restore_session_state(
-                    session_id, restored,
+                    session_id, restored_state,
                     platform=platform,
                     channel_id=channel_id,
                     world_id=world_id,
                 )
                 # 恢复角色引用
-                char_data = restored.get("character")
+                char_data = restored_state.get("character")
                 if char_data and self._player_loader:
                     from src.state.player_state import _dict_to_character
                     loaded_char = _dict_to_character(char_data)
                     if loaded_char:
                         self._character = loaded_char
 
+            # 恢复 session_knowledge_state 至存档时的状态
+            try:
+                from src.state.session_state import SessionKnowledgeState
+                sks = SessionKnowledgeState()
+                char_name = self._character.name if self._character else ""
+                await sks.restore_from_ids(session_id, known_ids, character_name=char_name)
+            except Exception as e:
+                logger.warning(f"读档: 恢复知识状态失败: {e}")
+
+            # 恢复 LightRAG 数据
+            try:
+                from src.memory.vector_store import VectorStore
+                vs = await VectorStore.get_instance("world", force_reinit=False)
+                lightrag_dir = _ensure_lightrag_backup_dir(target_id)
+                if lightrag_dir.exists():
+                    await vs.restore_from(lightrag_dir)
+                    # 重新初始化 VectorStore（读档后首次使用会懒加载）
+                    await VectorStore.get_instance("world", force_reinit=True)
+            except Exception as e:
+                logger.warning(f"读档: LightRAG 恢复失败（可继续游戏）: {e}")
+
             self._game_started = True
 
             return OutboundMessage.system_msg(
                 f"读档完成: [{label or snapshots[0].get('label', 'latest')}] "
-                f"(轮次 {restored.get('beat_counter', 0)})",
+                f"(轮次 {restored_state.get('beat_counter', 0)})",
                 session_id=session_id,
             )
 

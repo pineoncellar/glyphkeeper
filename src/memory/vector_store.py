@@ -414,3 +414,182 @@ class VectorStore:
     @property
     def is_initialized(self) -> bool:
         return self._initialized
+
+    # ── 存档用：LightRAG 全量备份与恢复 ──
+
+    @property
+    def _workspace(self) -> str:
+        """获取当前实例的 workspace 名称"""
+        if self.domain == "rules":
+            return "rules"
+        settings = get_settings()
+        return self._world_id_override or settings.project.active_world
+
+    _BACKUP_TABLES = [
+        "LIGHTRAG_VDB_ENTITY", "LIGHTRAG_VDB_RELATION", "LIGHTRAG_VDB_CHUNKS",
+        "LIGHTRAG_LLM_CACHE", "LIGHTRAG_DOC_STATUS", "LIGHTRAG_DOC_FULL",
+        "LIGHTRAG_DOC_CHUNKS", "LIGHTRAG_FULL_ENTITIES", "LIGHTRAG_FULL_RELATIONS",
+        "LIGHTRAG_ENTITY_CHUNKS", "LIGHTRAG_RELATION_CHUNKS",
+    ]
+
+    async def backup_to(self, backup_dir: Path) -> bool:
+        """将当前 workspace 的 LightRAG 数据全量备份到指定目录
+
+        对每张表按 workspace 过滤导出为 JSON，同时拷贝 graphml 文件。
+        备份目录结构:
+          backup_dir/
+            lightrag/
+              LIGHTRAG_VDB_ENTITY.json
+              LIGHTRAG_VDB_RELATION.json
+              ... (每张表一个 JSON)
+              graph_chunk_entity_relation.graphml  (如有)
+        """
+        import json as _json
+
+        workspace = self._workspace
+        data_dir = backup_dir / "lightrag"
+        data_dir.mkdir(parents=True, exist_ok=True)
+
+        try:
+            from src.tools.pg_manager import PgManager
+            mgr = await PgManager.get_instance()
+            if not mgr.available:
+                await mgr.start()
+            import asyncpg
+            conn = await asyncpg.connect(mgr.uri)
+
+            for tbl in self._BACKUP_TABLES:
+                rows = await conn.fetch(
+                    f"SELECT * FROM {tbl} WHERE workspace=$1", workspace
+                )
+                if rows:
+                    records = [dict(r) for r in rows]
+                    # 向量字段需要特殊处理
+                    for rec in records:
+                        for k, v in rec.items():
+                            if isinstance(v, memoryview):
+                                rec[k] = list(bytes(v))
+                    (data_dir / f"{tbl}.json").write_text(
+                        _json.dumps(records, ensure_ascii=False, default=str),
+                        encoding="utf-8",
+                    )
+                    logger.debug(f"LightRAG 备份: {tbl} ({len(records)} 条)")
+
+            await conn.close()
+
+            # 拷贝 graphml 文件
+            if self.domain == "rules":
+                graphml_dir = PROJECT_ROOT / "data" / "rules"
+            else:
+                graphml_dir = PROJECT_ROOT / "data" / "worlds" / workspace
+            graphml_file = graphml_dir / "graph_chunk_entity_relation.graphml"
+            if graphml_file.exists():
+                import shutil
+                shutil.copy2(str(graphml_file), str(data_dir / graphml_file.name))
+                logger.debug(f"LightRAG 备份: graphml 文件已拷贝")
+
+            logger.info(f"LightRAG 备份完成: workspace={workspace}, dir={data_dir}")
+            return True
+
+        except Exception as e:
+            logger.error(f"LightRAG 备份失败: {e}")
+            return False
+
+    async def restore_from(self, backup_dir: Path) -> bool:
+        """从备份目录恢复 LightRAG 数据到当前 workspace
+
+        先清空当前 workspace 的所有 LightRAG 数据，再逐表恢复。
+        恢复后需重新初始化 VectorStore。
+        """
+        import json as _json
+
+        workspace = self._workspace
+        data_dir = backup_dir / "lightrag"
+        if not data_dir.exists():
+            logger.warning(f"LightRAG 备份目录不存在: {data_dir}")
+            return False
+
+        try:
+            from src.tools.pg_manager import PgManager
+            mgr = await PgManager.get_instance()
+            if not mgr.available:
+                await mgr.start()
+            import asyncpg
+            conn = await asyncpg.connect(mgr.uri)
+
+            # 先清空当前 workspace 的数据
+            for tbl in self._BACKUP_TABLES:
+                # 检查表是否存在
+                exists = await conn.fetchval(
+                    "SELECT 1 FROM information_schema.tables WHERE table_name=$1",
+                    tbl.lower(),
+                )
+                if exists:
+                    await conn.execute(
+                        f"DELETE FROM {tbl} WHERE workspace=$1", workspace
+                    )
+                    logger.debug(f"LightRAG 恢复: 清空 {tbl}")
+
+            # 逐表恢复
+            restored_count = 0
+            for tbl in self._BACKUP_TABLES:
+                json_file = data_dir / f"{tbl}.json"
+                if not json_file.exists():
+                    continue
+                records = _json.loads(json_file.read_text(encoding="utf-8"))
+                if not records:
+                    continue
+
+                # 取列名（排除向量字段的特殊处理）
+                columns = list(records[0].keys())
+                col_names = ", ".join(columns)
+                placeholders = ", ".join(f"${i+1}" for i in range(len(columns)))
+
+                for rec in records:
+                    values = []
+                    for col in columns:
+                        val = rec.get(col)
+                        # 向量字段：bytes → memoryview
+                        if isinstance(val, list) and col.endswith("_vector"):
+                            import struct
+                            val = memoryview(bytes(val))
+                        values.append(val)
+                    try:
+                        await conn.execute(
+                            f"INSERT INTO {tbl} ({col_names}) VALUES ({placeholders})"
+                            f" ON CONFLICT (workspace, id) DO NOTHING",
+                            *values,
+                        )
+                        restored_count += 1
+                    except Exception as e:
+                        logger.debug(f"LightRAG 恢复: 跳过 {tbl} 中一行 ({e})")
+
+                logger.debug(f"LightRAG 恢复: {tbl} ({len(records)} 条)")
+
+            await conn.close()
+
+            # 恢复 graphml 文件
+            backup_graphml = data_dir / "graph_chunk_entity_relation.graphml"
+            if backup_graphml.exists():
+                if self.domain == "rules":
+                    target_dir = PROJECT_ROOT / "data" / "rules"
+                else:
+                    target_dir = PROJECT_ROOT / "data" / "worlds" / workspace
+                target_dir.mkdir(parents=True, exist_ok=True)
+                import shutil
+                shutil.copy2(str(backup_graphml), str(target_dir / backup_graphml.name))
+                logger.debug(f"LightRAG 恢复: graphml 文件已恢复")
+
+            # 关闭当前实例并标记需重新初始化
+            await self.close()
+            self._initialized = False
+
+            logger.info(
+                f"LightRAG 恢复完成: workspace={workspace}, "
+                f"总恢复行数={restored_count}"
+            )
+            return True
+
+        except Exception as e:
+            logger.error(f"LightRAG 恢复失败: {e}")
+            return False

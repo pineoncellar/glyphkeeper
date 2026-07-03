@@ -419,9 +419,10 @@ class TestSnapshotManager:
 
         restored = await snapshot_mgr.restore(snap_id)
         assert restored is not None
-        assert restored["session_id"] == "session-snap"
-        assert restored["narrative"] == "测试快照"
-        assert restored["game_phase"] == "combat"
+        assert restored["state"]["session_id"] == "session-snap"
+        assert restored["state"]["narrative"] == "测试快照"
+        assert restored["state"]["game_phase"] == "combat"
+        assert restored["known_knowledge_ids"] == []
 
     @pytest.mark.asyncio
     async def test_list_snapshots(self, snapshot_mgr):
@@ -538,10 +539,11 @@ class TestEventLogSnapshotIntegration:
         # 从快照恢复
         restored = await snapshot_mgr.restore(snap_id)
         assert restored is not None
+        restored_state = restored["state"]
         # 快照 + 增量事件回放
-        assert "锁着的门" in restored["narrative"]
-        assert "dark" in restored["active_tags"]
-        assert restored["beat_counter"] == 1
+        assert "锁着的门" in restored_state["narrative"]
+        assert "dark" in restored_state["active_tags"]
+        assert restored_state["beat_counter"] == 1
 
 
 class TestReducerEdgeCases:

@@ -168,6 +168,42 @@ class SessionKnowledgeState:
         )
         logger.info(f"已清除会话 {session_id} 的所有知识记录")
 
+    async def restore_from_ids(
+        self,
+        session_id: str,
+        knowledge_ids: list[str],
+        character_name: str = "",
+    ) -> int:
+        """清除会话现有记录后批量恢复知识 ID，供读档和回滚重建使用
+
+        读档场景中 knowledge_ids 来自快照存储的 known_knowledge_ids，
+        回滚场景中来自事件流中提取的 ClueDiscovered 事件。
+        返回成功恢复的记录数。
+        """
+        await self.clear_session(session_id)
+        if not knowledge_ids:
+            return 0
+        conn = await self._get_conn()
+        now = datetime.now(timezone.utc)
+        count = 0
+        for kid in knowledge_ids:
+            try:
+                await conn.execute(
+                    """INSERT INTO session_knowledge_state
+                       (id, session_id, character_name, knowledge_id, source, discovered_at)
+                       VALUES ($1,$2,$3,$4,$5,$6::timestamptz)""",
+                    str(uuid.uuid4()), session_id, character_name,
+                    kid, "archive", now,
+                )
+                count += 1
+            except Exception as e:
+                logger.warning(f"批量恢复知识跳过 (kid={kid}): {e}")
+        logger.info(
+            f"知识恢复: session={session_id[:8]} "
+            f"count={count}/{len(knowledge_ids)}"
+        )
+        return count
+
     async def clear_all(self):
         """清空所有记录"""
         conn = await self._get_conn()

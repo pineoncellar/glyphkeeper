@@ -18,6 +18,7 @@ from typing import Optional
 from src.state.game_state import GameState
 from src.state.reducer import apply_events_to_state
 from src.memory.event_store import EventStore
+from src.state.session_state import SessionKnowledgeState
 from src.tools import get_logger
 
 logger = get_logger(__name__)
@@ -66,9 +67,21 @@ class SnapshotManager:
                 id UUID PRIMARY KEY, session_id TEXT NOT NULL,
                 version INTEGER NOT NULL, state_json JSONB NOT NULL,
                 event_version INTEGER NOT NULL,
-                created_at TIMESTAMPTZ NOT NULL, label TEXT DEFAULT ''
+                created_at TIMESTAMPTZ NOT NULL, label TEXT DEFAULT '',
+                known_knowledge_ids JSONB DEFAULT '[]'::jsonb
             )
         """)
+
+        # 迁移旧版表（无 known_knowledge_ids 列时追加）
+        kcol = await conn.fetchval("""
+            SELECT data_type FROM information_schema.columns
+            WHERE table_name='snapshots' AND column_name='known_knowledge_ids'
+        """)
+        if not kcol:
+            await conn.execute(
+                "ALTER TABLE snapshots ADD COLUMN known_knowledge_ids JSONB DEFAULT '[]'::jsonb"
+            )
+            logger.info("snapshot: 追加 known_knowledge_ids 列")
         await conn.execute("""
             CREATE INDEX IF NOT EXISTS idx_snapshots_session
             ON snapshots(session_id, version DESC)
@@ -85,12 +98,23 @@ class SnapshotManager:
         snapshot_id = str(uuid.uuid4())
         next_version = (await self._get_next_version(session_id))
         event_version = (await self._event_store.get_latest_version(session_id)) if self._event_store else 0
+
+        # 记录当前会话的已知知识 ID，供读档恢复防剧透状态
+        known_ids: list[str] = []
+        try:
+            sks = SessionKnowledgeState()
+            known_ids = await sks.get_discovered_knowledge_ids(session_id)
+        except Exception as e:
+            logger.debug(f"snapshot: 获取 known_knowledge_ids 失败: {e}")
+
         state_json = json.dumps(state, ensure_ascii=False, default=str)
+        known_ids_json = json.dumps(known_ids, ensure_ascii=False)
         await conn.execute(
-            "INSERT INTO snapshots (id,session_id,version,state_json,event_version,created_at,label) "
-            "VALUES ($1::uuid,$2,$3,$4::jsonb,$5,$6::timestamptz,$7)",
+            "INSERT INTO snapshots "
+            "(id,session_id,version,state_json,event_version,created_at,label,known_knowledge_ids) "
+            "VALUES ($1::uuid,$2,$3,$4::jsonb,$5,$6::timestamptz,$7,$8::jsonb)",
             snapshot_id, session_id, next_version, state_json,
-            event_version, datetime.now(timezone.utc), label,
+            event_version, datetime.now(timezone.utc), label, known_ids_json,
         )
         await self._enforce_retention(session_id)
         return snapshot_id
@@ -108,7 +132,20 @@ class SnapshotManager:
             new_events = await self._event_store.get_events(str(row["session_id"]), since_version=row["event_version"])
             if new_events:
                 state = apply_events_to_state(state, new_events)
-        return state
+
+        # 解析 known_knowledge_ids（兼容旧存档无此列的情况）
+        known_ids_raw = row.get("known_knowledge_ids")
+        known_ids: list[str] = []
+        if known_ids_raw:
+            if isinstance(known_ids_raw, str):
+                known_ids = json.loads(known_ids_raw)
+            elif isinstance(known_ids_raw, (list, tuple)):
+                known_ids = list(known_ids_raw)
+
+        return {
+            "state": state,
+            "known_knowledge_ids": known_ids,
+        }
 
     async def list_snapshots(self, session_id, limit=10):
         conn = await self._get_conn()
