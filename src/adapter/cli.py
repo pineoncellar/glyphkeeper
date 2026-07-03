@@ -328,7 +328,7 @@ class CliAdapter(AbstractAdapter):
                     "/quit", "/q", "/help", "/h",
                     "/start", "/load", "/list", "/saves", "/save",
                     "/modules", "/ingest", "/debug", "/d",
-                    "/scene", "/sc",
+                    "/scene", "/sc", "/worlds",
                 )
                 if msg.type == MessageType.PLAYER_INPUT or not any(
                     lower.startswith(a) for a in allowed
@@ -421,6 +421,13 @@ class CliAdapter(AbstractAdapter):
                 print()
                 continue
 
+            # 处理 /worlds — 列出所有世界（不是游戏回合）
+            if msg.type == MessageType.SYSTEM_CMD and msg.text.strip().lower() in ("/worlds",):
+                out = await self._handle_worlds_cmd(self.session_id)
+                await self.send(out)
+                print()
+                continue
+
             # 处理 /start /modules（不是游戏回合）
             lower = msg.text.strip().lower()
             if msg.type == MessageType.SYSTEM_CMD and (
@@ -503,6 +510,31 @@ class CliAdapter(AbstractAdapter):
 
         self._game_started = True
         return result
+
+    # ================================================================
+    # 世界管理命令
+    # ================================================================
+
+    async def _handle_worlds_cmd(self, session_id: str) -> OutboundMessage:
+        """处理 /worlds — 列出所有世界和当前活跃世界"""
+        from src.tools.world_manager import list_worlds
+        from src.tools import get_settings
+
+        worlds = list_worlds()
+        if not worlds:
+            return OutboundMessage.system_msg(
+                "没有找到任何世界。使用 /start <模组名> 创建新世界。",
+                session_id=session_id,
+            )
+
+        active = get_settings().project.active_world
+        lines = [f"可用世界 ({len(worlds)} 个):"]
+        for w in worlds:
+            mark = _color("→", _GREEN) if w == active else " "
+            lines.append(f"  {mark} {w}")
+        lines.append(f"\n当前世界: {_color(active, _CYAN)}")
+        lines.append("每局 /start 自动创建新世界，数据完全隔离。")
+        return OutboundMessage.system_msg("\n".join(lines), session_id=session_id)
 
     # ================================================================
     # 增强型掷骰系统

@@ -166,7 +166,8 @@ class AbstractAdapter(ABC):
                 "  /debug /d          - 显示原始游戏状态\n"
                 "======= 系统 =======\n"
                 "  /modules           - 列出已摄入的模组\n"
-                "  /start [模组名]    - 开始新游戏（加载模组）\n"
+                "  /start [模组名]    - 开始新游戏（自动创建独立世界）\n"
+                "  /worlds            - 列出所有世界与当前活跃世界\n"
                 "  /ingest ...        - 摄入模组数据\n"
                 "  /reset             - 重置当前会话\n"
                 "  /help /h           - 显示此帮助\n"
@@ -335,7 +336,11 @@ class AbstractAdapter(ABC):
     # ── 开始游戏命令 ──
 
     async def _handle_start_cmd(self, cmd: str, session_id: str, msg: Optional[InboundMessage] = None) -> OutboundMessage:
-        """处理 /start [模组名] — 加载模组并开始游戏"""
+        """处理 /start [模组名] — 加载模组并开始游戏
+
+        自动生成新 world_id 实现多世界数据隔离：
+        先创建独立世界 → 播种模组基线知识到 LightRAG → 再加载游戏状态。
+        """
         parts = cmd.split(maxsplit=1)
         module_name = parts[1].strip() if len(parts) > 1 else ""
 
@@ -361,6 +366,25 @@ class AbstractAdapter(ABC):
                     session_id=session_id,
                 )
 
+        # ── 为新游戏创建独立世界 ──
+        from src.tools.world_manager import (
+            generate_world_id, create_world, set_active_world, seed_world_lightrag,
+        )
+        world_id = generate_world_id(module_name)
+        dir_ok = await create_world(world_id)
+        if not dir_ok:
+            return OutboundMessage.system_msg(
+                f"世界目录创建失败: {world_id}",
+                level="error", session_id=session_id,
+            )
+        # 先播种 LightRAG（模组基线知识），再切 active_world
+        seed_ok = await seed_world_lightrag(world_id, module_name)
+        set_active_world(world_id)
+
+        # 更新 msg 中的 world_id，使后续 SessionKey 和 GameState 使用新世界的隔离键
+        if msg:
+            msg.world_id = world_id
+
         # 加载模组
         state = await loader.load(session_id, module_name)
         if state is None:
@@ -369,6 +393,9 @@ class AbstractAdapter(ABC):
                 level="error",
                 session_id=session_id,
             )
+
+        # 覆盖 GameState 中的 world_id
+        state["world_id"] = world_id
 
         # 将会话状态注入 scheduler
         await self._ensure_engine()
@@ -383,7 +410,6 @@ class AbstractAdapter(ABC):
         platform = msg.platform if msg else ""
         channel_id = msg.channel_id if msg else ""
         user_id = msg.user_id if msg else ""
-        world_id = msg.world_id if msg else ""
         key: SessionKey = (platform, channel_id, world_id, session_id)
         slot = SessionSlot(
             session_id=session_id,
@@ -396,6 +422,15 @@ class AbstractAdapter(ABC):
         )
         self._scheduler._sessions[key] = slot
 
+        # 通知玩家世界信息
+        seed_note = "" if seed_ok else "（LightRAG 基线知识播种失败）"
+        logger.info(
+            f"新世界已创建: {world_id} "
+            f"模组={module_name} "
+            f"LightRAG播种={'OK' if seed_ok else 'FAIL'} "
+            f"种子世界目录={'OK' if dir_ok else 'FAIL'}"
+        )
+
         narrative = state.get("narrative", "")
         if narrative:
             return OutboundMessage.narrative(
@@ -404,7 +439,8 @@ class AbstractAdapter(ABC):
                 game_phase="exploration",
             )
         return OutboundMessage.system_msg(
-            f"模组 '{module_name}' 已加载，开始你的调查吧。",
+            f"模组 '{module_name}' 已加载，开始你的调查吧。\n"
+            f"  世界: {world_id} {seed_note}",
             session_id=session_id,
         )
 
