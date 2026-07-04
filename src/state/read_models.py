@@ -118,11 +118,17 @@ class StaticReadStore:
                 knowledge_id UUID REFERENCES knowledge_registry(id),
                 required_check JSONB DEFAULT '{}'::jsonb,
                 flavor_text TEXT NOT NULL DEFAULT '',
+                loot_items TEXT[] DEFAULT '{}',
                 world_id TEXT NOT NULL DEFAULT ''
             )
         """)
 
         # 为已有表追加 world_id 列（幂等迁移）
+        # 再追加 loot_items 列（幂等，已存在时不报错）
+        await conn.execute("""
+            ALTER TABLE clue_discoveries
+            ADD COLUMN IF NOT EXISTS loot_items TEXT[] DEFAULT '{}'
+        """)
         for tbl in ("locations", "interactables", "entities", "knowledge_registry", "clue_discoveries"):
             col = await conn.fetchval(f"""
                 SELECT data_type FROM information_schema.columns
@@ -294,12 +300,13 @@ class StaticReadStore:
             try:
                 await conn.execute(
                     """INSERT INTO clue_discoveries
-                       (id, interactable_id, entity_key, knowledge_id, required_check, flavor_text, world_id)
-                       VALUES ($1,$2,$3,$4,$5::jsonb,$6,$7)""",
+                       (id, interactable_id, entity_key, knowledge_id, required_check, flavor_text, loot_items, world_id)
+                       VALUES ($1,$2,$3,$4,$5::jsonb,$6,$7::text[],$8)""",
                     cid, c.get("interactable_id"), c.get("entity_key"),
                     c.get("knowledge_id"),
                     json.dumps(c.get("required_check", {}), ensure_ascii=False),
                     c.get("flavor_text", ""),
+                    c.get("loot_items", []),
                     wid,
                 )
                 count += 1

@@ -150,6 +150,7 @@ class StateProjector:
                         "knowledge_id": knowledge_id,
                         "required_check": clue.get("required_check", {}),
                         "flavor_text": clue.get("flavor_text", ""),
+                        "loot_items": clue.get("loot_items", []),
                     })
 
             # NPC 的 dialogue_clues 字段同理
@@ -167,6 +168,7 @@ class StateProjector:
                         "knowledge_id": knowledge_id,
                         "required_check": clue.get("required_check", {}),
                         "flavor_text": clue.get("flavor_text", ""),
+                        "loot_items": clue.get("loot_items", []),
                     })
 
         if all_interactables:

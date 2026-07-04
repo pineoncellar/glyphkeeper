@@ -167,13 +167,27 @@ class TestSpatialPhysicsNode:
 
     @pytest.mark.asyncio
     async def test_spatial_out_of_reach(self):
-        """空间不可达：目标不在当前场景中 → OUT_OF_REACH"""
+        """空间不可达：目标不在场景中且 LLM 拒绝即兴 → OUT_OF_REACH"""
         state = _make_base_state()
+        state["intent_queue"][0]["data"]["target"] = "金戒指"
+        state["intent_queue"][0]["data"]["detail"] = "捡起地上的金戒指"
         state["_scene_interactables"] = []  # 空场景
         result = await spatial_physics_node(state)
         spatial = result.get("_spatial_result", {})
         assert spatial.get("spatial_valid") is False
-        assert spatial.get("spatial_reason") == "TARGET_NOT_FOUND"
+        assert spatial.get("execution_phase") == "OUT_OF_REACH"
+
+    @pytest.mark.asyncio
+    async def test_impromptu_approval(self):
+        """即兴降级：场景无该物品但 LLM 批准 → IMPROMPTU"""
+        state = _make_base_state()
+        state["_scene_interactables"] = []  # 空场景
+        result = await spatial_physics_node(state)
+        spatial = result.get("_spatial_result", {})
+        # 书桌是常见物品，LLM 应批准即兴交互
+        assert spatial.get("spatial_valid") is True
+        assert spatial.get("execution_phase") == "IMPROMPTU"
+        assert "impromptu_" in spatial.get("_target_key", "")
 
     @pytest.mark.asyncio
     async def test_locked_item_no_key(self):
@@ -318,8 +332,10 @@ class TestPhysicalInteractSubgraph:
 
     @pytest.mark.asyncio
     async def test_full_subgraph_out_of_reach(self):
-        """子图隔空取物：目标不在场景 → OUT_OF_REACH + 无线索"""
+        """子图隔空取物：目标不在场景且 LLM 拒绝即兴 → OUT_OF_REACH + 无线索"""
         state = _make_base_state()
+        state["intent_queue"][0]["data"]["target"] = "金戒指"
+        state["intent_queue"][0]["data"]["detail"] = "捡起地上的金戒指"
         state["players"]["default"]["character"] = {"skills": {"侦查": 60}}
         state["_scene_interactables"] = []  # 空场景
         result = await run_physical_interact_subgraph(state)
@@ -328,6 +344,22 @@ class TestPhysicalInteractSubgraph:
         assert action["rule_context"]["physical_executed"] is False
         assert action["rule_context"]["execution_phase"] == "OUT_OF_REACH"
         assert action["rule_context"]["clues_discovered"] == []
+
+    @pytest.mark.asyncio
+    async def test_full_subgraph_impromptu(self):
+        """子图即兴落包：LLM 批准 → IMPROMPTU + 无线索 + deterministic_changes 含落包"""
+        state = _make_base_state()
+        state["players"]["default"]["character"] = {"skills": {"侦查": 60}}
+        state["_scene_interactables"] = []  # 空场景
+        result = await run_physical_interact_subgraph(state)
+
+        action = result["executed_actions"][0]
+        assert action["rule_context"]["physical_executed"] is True
+        assert action["rule_context"]["execution_phase"] == "IMPROMPTU"
+        assert action["rule_context"]["clues_discovered"] == []
+        dyn = action.get("deterministic_changes", {})
+        assert "_inventory_append" in dyn
+        assert "_mark_searched" in dyn
 
     @pytest.mark.asyncio
     async def test_subgraph_temp_fields_cleaned(self):

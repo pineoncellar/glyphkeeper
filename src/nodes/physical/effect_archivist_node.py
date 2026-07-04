@@ -2,7 +2,8 @@
 @File     :   effect_archivist_node.py
 @Desc     :   结算与线索颁发节点 — 合并检定+仲裁结果，输出最终 ActionExecutionResult
 @Note     :   从旧 archivist_node 搬迁重构，去掉了独立的目标解析（复用 resolved_targets）。
-              只有 physical_executed=true + execution_phase=NORMAL 时才会查询线索。
+              普通物品: physical_executed=true + execution_phase=NORMAL 时查线索。
+              即兴物品: execution_phase=IMPROMPTU 时跳过线索查询，产出落包单。
               追加一条完整的 ActionExecutionResult 到 executed_actions，并清理临时字段。
 """
 
@@ -24,6 +25,7 @@ async def _query_clues(
     session_id: str,
     target_key: str,
     skill_name: str,
+    skill_value: int,
     roll_value: int,
     character_name: str,
 ) -> list[dict]:
@@ -42,6 +44,7 @@ async def _query_clues(
             session_id=session_id,
             target_key=target_key,
             skill_name=skill_name,
+            skill_value=skill_value,
             roll_value=roll_value,
             character_name=character_name,
         )
@@ -65,16 +68,27 @@ async def _query_clues(
 def _build_state_changes(
     spatial: dict,
     target_key: str,
+    target_name: str,
 ) -> dict:
     """基于执行结果生成状态变更补丁
 
     NORMAL 执行后标记物品为已搜索（通过 _mark_searched 通知外部处理器）。
+    IMPROMPTU 即兴路径跳过线索查询，直接产出落包通知和防复刷锁。
     其他状态不产生确定性变更。
     """
     if not spatial.get("physical_executed"):
         return {}
 
     phase = spatial.get("execution_phase", "")
+    if phase == "IMPROMPTU":
+        # 从 impromptu_xxx 格式的 key 中提取物品名
+        item_name = target_name or target_key
+        if target_key and target_key.startswith("impromptu_"):
+            item_name = target_key[len("impromptu_"):]
+        return {
+            "_mark_searched": f"impromptu_{item_name}",
+            "_inventory_append": item_name,
+        }
     if phase == "NORMAL":
         return {"_mark_searched": target_key}
     return {}
@@ -117,21 +131,39 @@ async def effect_archivist_node(state: GameState) -> dict:
     is_locked = spatial.get("is_locked", False)
     is_searched = spatial.get("is_searched", False)
 
-    # 决定是否查线索：检定成功 + 物理执行 + 首次搜索
+    # 读取意图目标名（即兴落包时用于生成物品名）
+    intent_data = current_intent.get("data", {})
+    target_name = intent_data.get("target", "")
+
+    # 决定是否查线索：
+    # NORMAL 路径 — 检定成功 + 物理执行 + 首次搜索，走 PG 线索表
+    # IMPROMPTU 路径 — 即兴物品，直接跳过线索查询防幻觉
     clues_discovered: list[dict] = []
     raw_text = ""
-    if is_success and physical_executed and execution_phase == "NORMAL":
+    if execution_phase == "IMPROMPTU":
+        # 即兴物品不查线索，不产生幻觉文本
+        pass
+    elif is_success and physical_executed and execution_phase == "NORMAL":
         session_id = state.get("session_id", "")
         character_data = get_current_player(state).get("character") or {}
         character_name = character_data.get("name", "")
+        skill_value = check.get("skill_value", 50)
         clues_discovered = await _query_clues(
             session_id=session_id,
             target_key=target_key,
             skill_name=skill_name,
+            skill_value=skill_value,
             roll_value=roll_value,
             character_name=character_name,
         )
         raw_text = clues_discovered[0].get("flavor_text", "") if clues_discovered else ""
+
+    # 从线索中提取掉落物品列表（loot_items），追加到 deterministic_changes
+    loot_items: list[str] = []
+    if clues_discovered:
+        loot = clues_discovered[0].get("loot_items", [])
+        if loot and isinstance(loot, list):
+            loot_items = loot
 
     # 构建 ActionExecutionResult
     action_result = {
@@ -158,10 +190,15 @@ async def effect_archivist_node(state: GameState) -> dict:
             "is_locked": is_locked,
             "is_searched": is_searched,
             "has_key": spatial.get("has_key", False),
-            # 线索（物理未执行时强行锁空）
+            # 即兴物品名（叙事节点可据此生成描述）
+            "impromptu_item": target_name if execution_phase == "IMPROMPTU" else "",
+            # 线索（物理未执行时强行锁空，即兴不查线索）
             "clues_discovered": clues_discovered if physical_executed else [],
         },
-        "deterministic_changes": _build_state_changes(spatial, target_key),
+        "deterministic_changes": {
+            **_build_state_changes(spatial, target_key, target_name),
+            **({"_inventory_append": loot_items} if loot_items else {}),
+        },
         "raw_fixed_text": raw_text,
         "flavor_context": current_intent.get("flavor_context", ""),
     }

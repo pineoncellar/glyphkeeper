@@ -3,15 +3,13 @@
 @Desc     :   空间与物理可行性仲裁节点 — 结合结构化数据判定动作是否实际可执行
 @Note     :   读取 _skill_check_result 和 _scene_interactables 缓存，
               输出 _spatial_result（FactManifest），不直接追加 executed_actions。
-
-三层校验管线:
-  Layer 1: 空间可达性 — 校验当前玩家场景是否与目标物品所属场景一致
-  Layer 2: 状态依赖   — 校验目标物品的锁定/搜索状态
-  Layer 3: 常识推理   — 可选 fast LLM，处理复杂开放物理行为
+              即兴降级：TARGET_NOT_FOUND 时走 Layer 3 常识 LLM 判断，
+              批准则发放 IMPROMPTU 标识符，拒绝则维持 OUT_OF_REACH。
 """
 
 from __future__ import annotations
 
+import json
 from typing import Any, Optional
 from src.state.game_state import GameState, get_current_player
 from src.tools import get_logger, get_settings
@@ -25,10 +23,18 @@ logger = get_logger(__name__)
 # ====================================================================
 
 SPATIAL_PHYSICS_LLM_COMMON_SENSE = False
-"""是否启用 Layer 3 动态常识推理（fast LLM）。
+"""是否启用旧 Layer 3 动态常识推理（fast LLM）。
 
 True 时在复杂开放物理行为时调用 fast 级 LLM 做二值可行性判断。
 False 时仅执行 Layer 1 + Layer 2 纯规则校验。
+"""
+
+SPATIAL_PHYSICS_IMPROMPTU_JUDGMENT = True
+"""是否启用即兴降级分支（Layer 3'）。
+
+True 时当目标在 PG 静态表中不存在时，调用 fast LLM 判断是否
+为合理的即兴交互（如捡石头、拨草等日常行为）。
+False 时维持旧行为：TARGET_NOT_FOUND 直接 OUT_OF_REACH。
 """
 
 
@@ -196,6 +202,72 @@ COMMON_SENSE_PROMPT = """你是一个 TRPG 物理仲裁官。判断以下动作�
 回答（只输出 true 或 false）:"""
 
 
+# ====================================================================
+# 即兴降级分支
+# ====================================================================
+
+IMPTOMPTU_JUDGMENT_PROMPT = """你是 CoC 守密人助手 — 即兴交互仲裁官。
+判断玩家在当前场景中是否能即兴产生该物品或进行该交互。
+只需回答一个 JSON 对象，不要包含代码块标记。
+
+当前场景描述:
+{scene_desc}
+
+玩家意图: {action_detail}
+
+约束原则:
+- 只有在场景中极其普遍、无秘密价值的背景物才算合理
+  （如荒院碎石、路边野草、墙上灰尘、掉落的树枝）
+- 模组未声明但具有明显价值的物品一律拒绝
+  （如武器、珠宝、钥匙、关键道具、金钱、药品）
+- 考虑场景氛围：废弃院子可以有碎石，但洁净的客厅不应该有
+
+输出格式（纯 JSON）:
+{{"approved": true/false, "item_name": "合理的物品名称（批准时填写，拒绝时填空字符串）", "reason": "简要原因"}}"""
+
+
+async def _impromptu_judgment(
+    state: GameState,
+    target_str: str,
+    action_detail: str,
+) -> dict:
+    """即兴降级裁决 — 判断玩家是否能即兴与环境交互产生物品
+
+    只有 SPATIAL_PHYSICS_IMPROMPTU_JUDGMENT 为 True 时才真正调用 LLM。
+    返回格式: {"approved": bool, "item_name": str, "reason": str}
+    """
+    if not SPATIAL_PHYSICS_IMPROMPTU_JUDGMENT:
+        return {"approved": False, "item_name": "", "reason": "即兴降级已关闭"}
+
+    physical_reality = state.get("physical_reality", "")
+    scene_desc = physical_reality[:800] if physical_reality else "未知场景"
+
+    try:
+        result = await _call_llm("fast", [
+            {"role": "user", "content": IMPTOMPTU_JUDGMENT_PROMPT.format(
+                scene_desc=scene_desc,
+                action_detail=action_detail or target_str,
+            )},
+        ])
+        if result.is_ok and result.text:
+            text = result.text.strip()
+            text = text.removeprefix("```json").removeprefix("```").removesuffix("```").strip()
+            parsed = json.loads(text)
+            if isinstance(parsed, dict):
+                approved = bool(parsed.get("approved", False))
+                item_name = str(parsed.get("item_name", ""))
+                reason = str(parsed.get("reason", ""))
+                logger.info(
+                    f"spatial_physics[impromptu]: '{target_str}' -> "
+                    f"{'approved' if approved else 'rejected'} ({reason})"
+                )
+                return {"approved": approved, "item_name": item_name, "reason": reason}
+    except Exception as e:
+        logger.debug(f"spatial_physics: 即兴裁决 LLM 调用失败（非阻塞）: {e}")
+
+    return {"approved": False, "item_name": "", "reason": "LLM 调用失败，安全拒绝"}
+
+
 async def _check_common_sense(
     fact: FactManifest,
     state: GameState,
@@ -272,10 +344,20 @@ def _get_target_key(state: GameState) -> str:
 
 
 def _finalize_verdict(fact: FactManifest) -> FactManifest:
-    """基于三层校验结果，输出最终执行判定"""
+    """基于校验结果输出最终执行判定
+
+    即兴降级批准时 spatial_reason=IMPROMPTU_APPROVED，
+    跳过锁定/已搜索检查直接标记执行阶段为 IMPROMPTU。
+    """
     if not fact.spatial_valid:
         fact.physical_executed = False
         fact.execution_phase = "OUT_OF_REACH"
+        return fact
+
+    # 即兴路径：已由 LLM 直接批准，不再检查状态依赖
+    if fact.spatial_reason == "IMPROMPTU_APPROVED":
+        fact.physical_executed = True
+        fact.execution_phase = "IMPROMPTU"
         return fact
 
     if fact.is_locked and not fact.has_key:
@@ -301,8 +383,12 @@ def _finalize_verdict(fact: FactManifest) -> FactManifest:
 async def spatial_physics_node(state: GameState) -> dict:
     """空间与物理可行性仲裁节点
 
-    读取 _skill_check_result 和 _scene_interactables 缓存，执行三层校验。
+    读取 _skill_check_result 和 _scene_interactables 缓存，执行仲裁。
     输出 _spatial_result（FactManifest 字典），不追加 executed_actions。
+
+    仲裁流程分两条互斥路径:
+      路径 A（静态物品）: Layer 1 命中 PG 物品 → Layer 2 状态依赖 → 旧 Layer 3
+      路径 B（即兴降级）: Layer 1 未命中 → 即兴 LLM 判断 → 批准则 IMPROMPTU
     """
     current_location = get_current_player(state).get("current_location", "")
     interactables = state.get("_scene_interactables", [])
@@ -318,14 +404,14 @@ async def spatial_physics_node(state: GameState) -> dict:
     # 用匹配到的系统 key 覆盖原始 target_key，供 effect_archivist 按 key 查线索
     fact._target_key = matched_key
 
-    # Layer 2: 状态依赖（仅在空间可达时进行）
+    # 路径 A: 静态物品 — 目标在 PG 中存在
     if fact.spatial_valid:
+        # Layer 2: 状态依赖
         inventory = _get_inventory(state)
         fact.is_locked, fact.is_searched, fact.has_key, fact.target_state = \
             _check_state_dependency(matched_key, interactables, inventory)
 
-    # Layer 3: 常识推理（可选，仅在空间可达时触发）
-    if fact.spatial_valid:
+        # 旧 Layer 3: 常识推理（可选）
         intent = _current_intent(state)
         intent_data = intent.get("data", {})
         action_detail = intent_data.get("detail", "")
@@ -333,6 +419,27 @@ async def spatial_physics_node(state: GameState) -> dict:
         fact.spatial_valid, fact.spatial_reason = await _check_common_sense(
             fact, state, action_detail, flavor_context,
         )
+
+    # 路径 B: 即兴降级 — 目标不在 PG 中，走 LLM 常识判断
+    elif fact.spatial_reason == "TARGET_NOT_FOUND":
+        intent = _current_intent(state)
+        intent_data = intent.get("data", {})
+        target_str = intent_data.get("target", target_key)
+        action_detail = intent_data.get("detail", "")
+        judgment = await _impromptu_judgment(state, target_str, action_detail)
+        if judgment.get("approved"):
+            fact.spatial_valid = True
+            fact.spatial_reason = "IMPROMPTU_APPROVED"
+            fact._target_key = f"impromptu_{judgment.get('item_name', target_str)}"
+            logger.info(
+                f"spatial_physics: 即兴批准 '{target_str}' -> "
+                f"{fact._target_key}"
+            )
+        else:
+            logger.debug(
+                f"spatial_physics: 即兴拒绝 '{target_str}': "
+                f"{judgment.get('reason', '')}"
+            )
 
     # 最终裁决
     fact = _finalize_verdict(fact)

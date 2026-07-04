@@ -96,6 +96,7 @@ class Archivist:
         session_id: str,
         target_key: str,
         skill_name: str = "",
+        skill_value: int = 0,
         roll_value: int = 0,
         character_name: str = "",
     ) -> Optional[dict]:
@@ -117,6 +118,7 @@ class Archivist:
                 clues=item_clues,
                 session_id=session_id,
                 skill_name=skill_name,
+                skill_value=skill_value,
                 roll_value=roll_value,
                 character_name=character_name,
                 source="examine",
@@ -129,6 +131,7 @@ class Archivist:
                 clues=entity_clues,
                 session_id=session_id,
                 skill_name=skill_name,
+                skill_value=skill_value,
                 roll_value=roll_value,
                 character_name=character_name,
                 source="dialogue",
@@ -144,6 +147,7 @@ class Archivist:
         clues: list[dict],
         session_id: str,
         skill_name: str,
+        skill_value: int,
         roll_value: int,
         character_name: str,
         source: str,
@@ -151,7 +155,7 @@ class Archivist:
         """逐条检查线索的发现条件是否满足
 
         无 required_check 的线索视为自动发现（如纯 flavor_text 的剧情提示）。
-        有检定条件的线索需比对技能名和掷骰结果，通过则授予。
+        有检定条件的线索需比对技能名和满足难度的成功率。
         """
         for clue in clues:
             raw_check = clue.get("required_check", {}) or {}
@@ -165,6 +169,7 @@ class Archivist:
                     flavor_text=clue.get("flavor_text", ""),
                     source=source,
                     character_name=character_name,
+                    loot_items=clue.get("loot_items", []),
                 )
 
             # 有检定条件：先比对技能名（含中英映射）
@@ -172,10 +177,8 @@ class Archivist:
             if required_skill and not _skill_name_matches(required_skill, skill_name):
                 continue
 
-            # 再比对掷骰结果 — 注意此处简化处理，实际应使用角色卡 skill_value
-            # 参与 determine_success_level 精确判定；当前用固定阈值做近似
-            # TODO: 实现
-            if roll_value > 0:
+            # 再比对掷骰结果是否满足线索要求的难度等级
+            if roll_value > 0 and skill_value > 0:
                 from src.domain.coc_rules import Difficulty
 
                 difficulty_str = required_check.get("difficulty", "Regular")
@@ -184,7 +187,7 @@ class Archivist:
                 except (KeyError, AttributeError):
                     difficulty = Difficulty.REGULAR
 
-                threshold = self._get_threshold_for_difficulty(difficulty)
+                threshold = self._get_threshold_for_difficulty(difficulty, skill_value)
                 if roll_value <= threshold:
                     return await self._grant_clue(
                         session_id=session_id,
@@ -192,6 +195,7 @@ class Archivist:
                         flavor_text=clue.get("flavor_text", ""),
                         source=source,
                         character_name=character_name,
+                        loot_items=clue.get("loot_items", []),
                     )
 
         return None
@@ -203,15 +207,17 @@ class Archivist:
         flavor_text: str,
         source: str,
         character_name: str,
+        loot_items: list = None,
     ) -> dict:
         """颁发线索：发出 ClueDiscovered 事件，随后投影到 session_knowledge_state
 
-        返回含 knowledge_id、flavor_text、source 的字典供上层拼接叙事。
+        返回含 knowledge_id、flavor_text、source、loot_items 的字典。
         投影失败仅记警告，不做回滚 — 事件本身已确保线索不会丢失。
         """
+        loot = loot_items or []
         if not knowledge_id:
             logger.debug("archivist: 线索无 knowledge_id，仅返回 flavor_text（纯文本线索）")
-            return {"knowledge_id": "", "flavor_text": flavor_text, "source": source}
+            return {"knowledge_id": "", "flavor_text": flavor_text, "source": source, "loot_items": loot}
 
         # 先发出 ClueDiscovered 事件（主流程，保证不丢）
         es = await self.event_store
@@ -247,23 +253,26 @@ class Archivist:
         logger.info(
             f"archivist: 线索已授予 knowledge={knowledge_id} "
             f"source={source} session={session_id[:8]}"
+            + (f" loot={loot}" if loot else "")
         )
         return {
             "knowledge_id": knowledge_id,
             "flavor_text": flavor_text,
             "source": source,
+            "loot_items": loot,
         }
 
     @staticmethod
-    def _get_threshold_for_difficulty(difficulty) -> int:
-        """根据 CoC 7e 难度等级返回近似阈值
+    def _get_threshold_for_difficulty(difficulty, skill_value: int) -> int:
+        """根据 CoC 7e 难度等级和角色真实技能值返回掷骰阈值
 
-        简化版本默认 skill_value=50，后续需从角色卡精确读取。
         Regular 对应 skill_value，Hard 对应一半，Extreme 对应五分之一。
+        skill_value 为 0 时回退到 50 避免除零。
         """
+        sv = skill_value if skill_value > 0 else 50
         mapping = {
-            "REGULAR": 50,
-            "HARD": 25,
-            "EXTREME": 10,
+            "REGULAR": sv,
+            "HARD": sv // 2,
+            "EXTREME": sv // 5,
         }
-        return mapping.get(difficulty.name, 50)
+        return mapping.get(difficulty.name, sv)
