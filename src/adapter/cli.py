@@ -418,7 +418,7 @@ class CliAdapter(AbstractAdapter):
         print(_BANNER)
         self._player_loader = CharacterStore()
 
-        print(_color("  输入 /start <模组名> 开始游戏，或 /load <存档名> 读档", _DIM))
+        print(_color("  输入 /world start <模组名> 开始游戏，或 /archive load <存档名> 读档", _DIM))
         print(_color("  输入 /help 查看所有命令", _DIM))
         print()
 
@@ -445,16 +445,14 @@ class CliAdapter(AbstractAdapter):
                 lower = msg.text.strip().lower()
                 allowed = (
                     "/quit", "/q", "/help", "/h",
-                    "/start", "/load", "/list", "/saves", "/save",
-                    "/modules", "/ingest", "/debug", "/d",
-                    "/scene", "/sc", "/worlds",
-                    "/import", "/cards", "/card", "/delete",
+                    "/world", "/archive", "/module", "/card",
+                    "/debug", "/d", "/scene", "/sc",
                 )
                 if msg.type == MessageType.PLAYER_INPUT or not any(
                     lower.startswith(a) for a in allowed
                 ):
                     await self.send(OutboundMessage.system_msg(
-                        "请先使用 /start <模组名> 开始游戏，或 /load <存档名> 读档。",
+                        "请先使用 /world start <模组名> 开始游戏，或 /archive load <存档名> 读档。",
                         level="warn", session_id=self.session_id,
                     ))
                     continue
@@ -479,17 +477,11 @@ class CliAdapter(AbstractAdapter):
                 self._show_character_sheet()
                 continue
 
-            # 处理 /save /load — 存档系统
-            if msg.type == MessageType.SYSTEM_CMD:
-                cmd_lower = msg.text.strip().lower()
-                if cmd_lower.startswith("/save"):
-                    out = await self._handle_save_cmd(cmd_lower, self.session_id)
-                    await self.send(out)
-                    continue
-                if cmd_lower.startswith("/load"):
-                    out = await self._handle_load_cmd(cmd_lower, self.session_id, msg)
-                    await self.send(out)
-                    continue
+            # 处理 /archive — 存档统一入口
+            if msg.type == MessageType.SYSTEM_CMD and msg.text.strip().lower().startswith("/archive"):
+                out = await self._handle_archive_cmd(msg.text.strip().lower(), self.session_id, msg)
+                await self.send(out)
+                continue
 
             # 处理 /inventory — 背包
             if msg.type == MessageType.SYSTEM_CMD and msg.text.strip().lower() in ("/inventory", "/inv", "/i"):
@@ -521,31 +513,31 @@ class CliAdapter(AbstractAdapter):
                 await self.send(out)
                 continue
 
-            # 处理 /list — 存档列表（覆盖 base 的 /list→modules 路由）
-            if msg.type == MessageType.SYSTEM_CMD and msg.text.strip().lower() in ("/list", "/saves"):
-                out = await self._handle_list_saves_cmd(self.session_id)
-                await self.send(out)
-                continue
 
-            # 处理 /cards — 列出种子卡库
-            if msg.type == MessageType.SYSTEM_CMD and msg.text.strip().lower() in ("/cards",):
-                out = await self._handle_cards_cmd(self.session_id)
-                await self.send(out)
-                print()
-                continue
 
-            # 处理 /card <名称> — 查看种子卡详情
+            # 处理 /card — 种子卡管理统一入口
             if msg.type == MessageType.SYSTEM_CMD and msg.text.strip().lower().startswith("/card"):
-                out = await self._handle_card_detail_cmd(msg.text.strip(), self.session_id)
+                out = await self._handle_card_cmd(msg.text.strip(), self.session_id)
                 await self.send(out)
                 if out.type == MessageType.SESSION_INFO:
                     print()
                 print()
                 continue
 
-            # 处理 /ingest（不是游戏回合）
-            if msg.type == MessageType.SYSTEM_CMD and msg.text.strip().lower().startswith("/ingest"):
+
+
+            # 处理 /module（不是游戏回合）
+            if msg.type == MessageType.SYSTEM_CMD and msg.text.strip().lower().startswith("/module"):
                 out = await self.handle(msg)
+                await self.send(out)
+                print()
+                continue
+
+
+
+            # 处理 /rollback — 回滚到指定事件版本
+            if msg.type == MessageType.SYSTEM_CMD and msg.text.strip().lower().startswith("/rollback"):
+                out = await self._handle_rollback_cmd(msg.text.strip(), self.session_id)
                 await self.send(out)
                 print()
                 continue
@@ -557,38 +549,8 @@ class CliAdapter(AbstractAdapter):
                 print()
                 continue
 
-            # 处理 /delete — 删除种子卡
-            if msg.type == MessageType.SYSTEM_CMD and msg.text.strip().lower().startswith("/delete"):
-                out = await self._handle_delete_card_cmd(msg.text.strip(), self.session_id)
-                await self.send(out)
-                print()
-                continue
-
-            # 处理 /import — 从 Excel 角色卡导入调查员
-            if msg.type == MessageType.SYSTEM_CMD and msg.text.strip().lower().startswith("/import"):
-                out = await self._handle_import_cmd(msg.text.strip(), self.session_id)
-                await self.send(out)
-                if out.type == MessageType.SESSION_INFO:
-                    # 导入成功后显示角色卡
-                    char_name = out.data.get("character_name", "")
-                    if char_name:
-                        print()
-                        self._show_character_sheet()
-                print()
-                continue
-
-            # 处理 /worlds — 列出所有世界（不是游戏回合）
-            if msg.type == MessageType.SYSTEM_CMD and msg.text.strip().lower() in ("/worlds",):
-                out = await self._handle_worlds_cmd(self.session_id)
-                await self.send(out)
-                print()
-                continue
-
-            # 处理 /start /modules（不是游戏回合）
-            lower = msg.text.strip().lower()
-            if msg.type == MessageType.SYSTEM_CMD and (
-                lower.startswith("/start") or lower in ("/modules",)
-            ):
+            # 处理 /world（不是游戏回合）
+            if msg.type == MessageType.SYSTEM_CMD and msg.text.strip().lower().startswith("/world"):
                 out = await self.handle(msg)
                 await self.send(out)
                 print()
@@ -622,7 +584,7 @@ class CliAdapter(AbstractAdapter):
     # ================================================================
 
     async def _handle_import_cmd(self, cmd: str, session_id: str) -> OutboundMessage:
-        """处理 /import <名称> — 从 cards 目录或指定路径导入角色卡
+        """处理 /card import <名称> — 从 cards 目录或指定路径导入角色卡
 
         名称搜索逻辑：
           含路径分隔符或扩展名 → 当文件路径处理
@@ -633,9 +595,9 @@ class CliAdapter(AbstractAdapter):
             cards_dir = ensure_cards_dir()
             return OutboundMessage.system_msg(
                 "用法:\n"
-                f"  /import 费莉西蒂       从 {cards_dir.name}/ 搜索名称\n"
-                f"  /import ./卡片.xlsx     直接指定路径\n"
-                "导入后可用 /start 开始游戏。",
+                f"  /card import 费莉西蒂    从 {cards_dir.name}/ 搜索名称\n"
+                f"  /card import ./卡片.xlsx  直接指定路径\n"
+                "导入后可用 /world start 开始游戏。",
                 level="warn", session_id=session_id,
             )
 
@@ -709,7 +671,7 @@ class CliAdapter(AbstractAdapter):
         return OutboundMessage(
             type=MessageType.SESSION_INFO,
             text=f"调查员 [{char.name}] 已导入种子卡库！\n"
-                 f"使用 /cards 查看所有卡片，/start <模组名> 开始游戏时选择此卡。",
+                 f"使用 /card list 查看所有卡片，/world start <模组名> 开始游戏时选择此卡。",
             session_id=session_id,
             data={
                 "character_name": char.name,
@@ -722,8 +684,48 @@ class CliAdapter(AbstractAdapter):
     # 种子卡库管理
     # ================================================================
 
+    # ── 种子卡管理统一入口 ──
+
+    async def _handle_card_cmd(self, cmd: str, session_id: str) -> OutboundMessage:
+        """处理 /card — 种子卡管理统一入口
+
+        子命令:
+          /card                — 列出种子卡库（缺省 = list）
+          /card list           — 列出种子卡库中的所有角色
+          /card show <名称>     — 查看种子卡完整属性
+          /card <名称>          — 同上（快捷方式）
+          /card import <名称>   — 从 Excel 导入角色卡到种子库
+          /card import <路径>   — 从指定文件路径导入
+          /card delete <名称>   — 从种子卡库删除角色卡
+          /card delete --all   — 清空整个种子卡库
+
+        """
+        lower = cmd.strip().lower()
+        parts = cmd.split(maxsplit=2)
+        subcmd = parts[1].strip().lower() if len(parts) > 1 else ""
+
+        # /card 或 /card list → 列表
+        if not subcmd or subcmd == "list":
+            return await self._handle_cards_cmd(session_id)
+
+        # /card import <名称> 或 /card import <路径>
+        if subcmd == "import":
+            import_cmd = f"/import {parts[2].strip()}" if len(parts) > 2 else "/import"
+            return await self._handle_import_cmd(import_cmd, session_id)
+
+        # /card delete <名称> 或 /card delete --all
+        if subcmd == "delete":
+            delete_cmd = f"/delete {parts[2].strip()}" if len(parts) > 2 else "/delete"
+            return await self._handle_delete_card_cmd(delete_cmd, session_id)
+
+        # /card show <名称> 或 /card <名称> → 查看详情
+        if subcmd == "show":
+            show_cmd = f"/card {parts[2].strip()}" if len(parts) > 2 else cmd
+            return await self._handle_card_detail_cmd(show_cmd, session_id)
+        return await self._handle_card_detail_cmd(cmd, session_id)
+
     async def _handle_cards_cmd(self, session_id: str) -> OutboundMessage:
-        """处理 /cards — 列出种子卡库中的所有角色"""
+        """处理 /card list — 列出种子卡库中的所有角色"""
         if self._player_loader is None:
             self._player_loader = CharacterStore()
         try:
@@ -735,7 +737,7 @@ class CliAdapter(AbstractAdapter):
 
         if not cards:
             return OutboundMessage.system_msg(
-                "种子卡库为空。使用 /import 从 xlsx 文件导入角色卡。",
+                "种子卡库为空。使用 /card import <名称> 从 xlsx 文件导入角色卡。",
                 session_id=session_id,
             )
 
@@ -746,15 +748,15 @@ class CliAdapter(AbstractAdapter):
             ts = str(c.get("saved_at", ""))[:19]
             suffix = f" ({occ})" if occ else ""
             lines.append(f"  {cname}{suffix}  [{ts}]")
-        lines.append("使用 /card <名称> 查看详情，/start 时选择卡片开始游戏。")
+        lines.append("使用 /card <名称> 查看详情，/world start 时选择卡片开始游戏。")
         return OutboundMessage.system_msg("\n".join(lines), session_id=session_id)
 
     async def _handle_card_detail_cmd(self, cmd: str, session_id: str) -> OutboundMessage:
-        """处理 /card <名称> — 查看种子卡完整属性"""
+        """处理 /card <名称> — 查看种子卡完整属性（由 _handle_card_cmd 调度）"""
         parts = cmd.split(maxsplit=1)
         if len(parts) < 2:
             return OutboundMessage.system_msg(
-                "用法: /card <角色名>\n使用 /cards 查看所有可用卡片。",
+                "用法: /card <角色名>\n使用 /card list 查看所有可用卡片。",
                 level="warn", session_id=session_id,
             )
 
@@ -770,7 +772,7 @@ class CliAdapter(AbstractAdapter):
 
         if char is None:
             return OutboundMessage.system_msg(
-                f"未找到种子卡「{card_name}」。使用 /cards 查看所有可用卡片。",
+                f"未找到种子卡「{card_name}」。使用 /card list 查看所有可用卡片。",
                 level="warn", session_id=session_id,
             )
 
@@ -778,19 +780,19 @@ class CliAdapter(AbstractAdapter):
         self._show_character_sheet(char)
         # 返回普通系统消息，避免触发会话状态面板渲染
         return OutboundMessage.system_msg(
-            f"种子卡 [{char.name} ({char.occupation})]  -- 使用 /start 开始游戏时选择此卡",
+            f"种子卡 [{char.name} ({char.occupation})]  -- 使用 /world start 开始游戏时选择此卡",
             session_id=session_id,
         )
 
     async def _handle_delete_card_cmd(self, cmd: str, session_id: str) -> OutboundMessage:
-        """处理 /delete <名称> 或 /delete --all — 从种子卡库删除角色卡"""
+        """处理 /card delete <名称> — 从种子卡库删除角色卡"""
         parts = cmd.split(maxsplit=1)
         if len(parts) < 2:
             return OutboundMessage.system_msg(
                 "用法:\n"
-                "  /delete <角色名>   删除指定种子卡\n"
-                "  /delete --all      清空整个种子卡库\n"
-                "使用 /cards 查看所有可用卡片。",
+                "  /card delete <角色名>   删除指定种子卡\n"
+                "  /card delete --all      清空整个种子卡库\n"
+                "使用 /card list 查看所有可用卡片。",
                 level="warn", session_id=session_id,
             )
 
@@ -846,7 +848,7 @@ class CliAdapter(AbstractAdapter):
 
         if not await self._player_loader.card_exists(card_name):
             return OutboundMessage.system_msg(
-                f"未找到种子卡「{card_name}」。使用 /cards 查看所有可用卡片。",
+                f"未找到种子卡「{card_name}」。使用 /card list 查看所有可用卡片。",
                 level="warn", session_id=session_id,
             )
 
@@ -905,7 +907,7 @@ class CliAdapter(AbstractAdapter):
         return char
 
     async def _handle_start_cmd(self, cmd: str, session_id: str, msg: Optional[InboundMessage] = None) -> OutboundMessage:
-        """处理 /start [模组名] — 创建角色 + 加载模组开始游戏。
+        """处理 /world start [模组名] — 创建角色 + 加载模组开始游戏。
 
         角色来源优先级：已有会话角色 > 种子卡库 > 新建角色向导。
         """
@@ -1039,31 +1041,6 @@ class CliAdapter(AbstractAdapter):
 
         self._game_started = True
         return result
-
-    # ================================================================
-    # 世界管理命令
-    # ================================================================
-
-    async def _handle_worlds_cmd(self, session_id: str) -> OutboundMessage:
-        """处理 /worlds — 列出所有世界和当前活跃世界"""
-        from src.tools.world_manager import list_worlds
-        from src.tools import get_settings
-
-        worlds = list_worlds()
-        if not worlds:
-            return OutboundMessage.system_msg(
-                "没有找到任何世界。使用 /start <模组名> 创建新世界。",
-                session_id=session_id,
-            )
-
-        active = get_settings().project.active_world
-        lines = [f"可用世界 ({len(worlds)} 个):"]
-        for w in worlds:
-            mark = _color("→", _GREEN) if w == active else " "
-            lines.append(f"  {mark} {w}")
-        lines.append(f"\n当前世界: {_color(active, _CYAN)}")
-        lines.append("每局 /start 自动创建新世界，数据完全隔离。")
-        return OutboundMessage.system_msg("\n".join(lines), session_id=session_id)
 
     # ================================================================
     # 增强型掷骰系统
@@ -1444,7 +1421,7 @@ class CliAdapter(AbstractAdapter):
     # ================================================================
 
     async def _handle_save_cmd(self, cmd: str, session_id: str) -> OutboundMessage:
-        """处理 /save [存档名] — 创建游戏快照。
+        """处理 /archive save [存档名] — 创建游戏快照。
 
         先获取当前会话的 GameState，再用 SnapshotManager 创建快照。
         存档名缺省时使用时间戳标签。保留策略由 SnapshotManager 内部
@@ -1481,7 +1458,7 @@ class CliAdapter(AbstractAdapter):
             return OutboundMessage.system_msg(f"存档失败: {e}", level="error", session_id=session_id)
 
     async def _handle_load_cmd(self, cmd: str, session_id: str, msg: Optional[InboundMessage] = None) -> OutboundMessage:
-        """处理 /load [存档名] — 读取游戏快照。
+        """处理 /archive load [存档名] — 读取游戏快照。
 
         先按标签名查找快照，匹配到后调用 SnapshotManager.restore()
         恢复状态并写入 scheduler 会话。若缺省存档名则加载最新快照。
@@ -1582,12 +1559,12 @@ class CliAdapter(AbstractAdapter):
             return OutboundMessage.system_msg(f"读档失败: {e}", level="error", session_id=session_id)
 
     async def _handle_list_saves_cmd(self, session_id: str) -> OutboundMessage:
-        """处理 /list — 列出当前会话的所有存档。"""
+        """处理 /archive list — 列出当前会话的所有存档。"""
         try:
             snapshots = await self._snapshot_mgr.list_snapshots(session_id)
             if not snapshots:
                 return OutboundMessage.system_msg(
-                    "没有存档。使用 /save <存档名> 创建存档。",
+                    "没有存档。使用 /archive save <存档名> 创建存档。",
                     session_id=session_id,
                 )
 
@@ -1597,12 +1574,98 @@ class CliAdapter(AbstractAdapter):
                 ver = s.get("version", 0)
                 ts = str(s.get("created_at", ""))[:19]  # ISO 前19字符
                 lines.append(f"  [{lbl}]  v{ver}  ({ts})")
-            lines.append("使用 /load <存档名> 读取存档。")
+            lines.append("使用 /archive load <存档名> 读取存档。")
             return OutboundMessage.system_msg("\n".join(lines), session_id=session_id)
 
         except Exception as e:
             logger.error(f"列出存档失败: {e}")
             return OutboundMessage.system_msg(f"列出存档失败: {e}", level="error", session_id=session_id)
+
+    async def _handle_delete_save_cmd(self, cmd: str, session_id: str) -> OutboundMessage:
+        """处理 /archive delete <存档名> — 删除特定存档。
+
+        先按标签名查找快照，匹配后调用 SnapshotManager.delete() 删除。
+        缺省存档名时列出可用存档供参考。
+        """
+        parts = cmd.split(maxsplit=2)
+        label = parts[2].strip() if len(parts) > 2 else ""
+
+        if not label:
+            snapshots = await self._snapshot_mgr.list_snapshots(session_id)
+            if not snapshots:
+                return OutboundMessage.system_msg(
+                    "没有存档可删除。", session_id=session_id,
+                )
+            available = ", ".join(s.get("label", "?") for s in snapshots[:10])
+            return OutboundMessage.system_msg(
+                f"用法: /archive delete <存档名>\n可用存档: {available}",
+                level="warn", session_id=session_id,
+            )
+
+        try:
+            snapshots = await self._snapshot_mgr.list_snapshots(session_id)
+            matches = [s for s in snapshots if s.get("label", "") == label]
+            if not matches:
+                available = ", ".join(s.get("label", "?") for s in snapshots[:10])
+                return OutboundMessage.system_msg(
+                    f"未找到存档 [{label}]。可用存档: {available}",
+                    level="warn", session_id=session_id,
+                )
+
+            target_id = matches[0]["id"]
+            deleted = await self._snapshot_mgr.delete(target_id)
+            if not deleted:
+                return OutboundMessage.system_msg(
+                    f"删除存档 [{label}] 失败", level="error", session_id=session_id,
+                )
+            logger.info("存档已删除: %s (%s)", label, target_id[:8])
+            return OutboundMessage.system_msg(
+                f"存档 [{label}] 已删除。", session_id=session_id,
+            )
+
+        except Exception as e:
+            logger.error(f"删除存档失败: {e}")
+            return OutboundMessage.system_msg(f"删除存档失败: {e}", level="error", session_id=session_id)
+
+    async def _handle_archive_cmd(self, cmd: str, session_id: str,
+                                   msg: Optional[InboundMessage] = None) -> OutboundMessage:
+        """处理 /archive — 存档统一入口。
+
+        子命令:
+          /archive                  — 列出所有存档（缺省 = list）
+          /archive list            — 列出所有存档
+          /archive save <存档名>    — 保存当前进度
+          /archive load <存档名>    — 读取存档
+          /archive delete <存档名>  — 删除特定存档
+
+        """
+        parts = cmd.split(maxsplit=2)
+        subcmd = parts[1].strip().lower() if len(parts) > 1 else "list"
+
+        if subcmd in ("list", "ls"):
+            return await self._handle_list_saves_cmd(session_id)
+
+        if subcmd == "save":
+            label = parts[2].strip() if len(parts) > 2 else ""
+            save_cmd = f"/save {label}" if label else "/save"
+            return await self._handle_save_cmd(save_cmd, session_id)
+
+        if subcmd == "load":
+            label = parts[2].strip() if len(parts) > 2 else ""
+            load_cmd = f"/load {label}" if label else "/load"
+            return await self._handle_load_cmd(load_cmd, session_id, msg)
+
+        if subcmd == "delete":
+            return await self._handle_delete_save_cmd(cmd, session_id)
+
+        return OutboundMessage.system_msg(
+            "用法:\n"
+            "  /archive              — 列出所有存档\n"
+            "  /archive save <名称>   — 保存当前进度\n"
+            "  /archive load <名称>   — 读取存档\n"
+            "  /archive delete <名称> — 删除存档",
+            level="warn", session_id=session_id,
+        )
 
     # ================================================================
     # RAG 搜索调试命令

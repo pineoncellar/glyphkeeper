@@ -261,6 +261,21 @@ class EventStore:
             "world_id": str(row.get("world_id", "")),
         }
 
+    async def delete_module_events(self, module_name: str) -> bool:
+        """删除指定模名的所有事件（用于 /module delete）
+
+        从 TEMPLATE_SESSION_ID 中删除 data->>'module_name' 匹配的事件。
+        """
+        conn = await self._get_conn()
+        from src.state.module_loader import TEMPLATE_SESSION_ID
+        result = await conn.execute(
+            "DELETE FROM events WHERE session_id = $1 AND data->>'module_name' = $2",
+            TEMPLATE_SESSION_ID, module_name,
+        )
+        affected = result.split()[1] if "DELETE" in result else "0"
+        logger.info("delete_module_events: 已删除 %s 条事件 (module=%s)", affected, module_name)
+        return int(affected) > 0
+
     async def clear_session(self, session_id: str, world_id: str = ""):
         """清空指定会话的事件（仅用于测试）"""
         conn = await self._get_conn()

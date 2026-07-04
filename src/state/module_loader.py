@@ -183,6 +183,28 @@ class ModuleLoader:
         )
         return state
 
+    async def delete_module(self, module_name: str) -> bool:
+        """删除已摄入的模组事件
+
+        验证模组存在后，从 EventStore 中删除该模名的所有事件。
+        读模型数据（PG 场景/实体/物品表）暂不自动清理 —
+        重摄入同名模组会自动覆盖，或使用 /module delete --all
+        配合重摄入清理。
+        """
+        modules = await self.list_modules()
+        names = [m["name"] for m in modules]
+        if module_name not in names:
+            logger.warning("delete_module: 模组 '%s' 不存在", module_name)
+            return False
+
+        es = await self.event_store
+        ok = await es.delete_module_events(module_name)
+        if not ok:
+            logger.warning("delete_module: 事件删除返回空结果 (module=%s)", module_name)
+
+        logger.info("模组已删除: %s", module_name)
+        return True
+
     async def load_opening_narrative(
         self, module_name: str
     ) -> Optional[str]:

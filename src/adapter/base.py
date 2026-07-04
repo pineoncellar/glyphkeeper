@@ -157,23 +157,36 @@ class AbstractAdapter(ABC):
                 "  /time /t           - 查看游戏内时间\n"
                 "  /status            - 查看当前会话状态\n"
                 "======= 存档 =======\n"
-                "  /save [存档名]     - 保存当前进度\n"
-                "  /load [存档名]     - 读取存档\n"
-                "  /list /saves       - 列出所有存档\n"
+                "  /archive            - 列出所有存档\n"
+                "  /archive save <名称> - 保存当前进度\n"
+                "  /archive load <名称> - 读取存档\n"
+                "  /archive delete <名称> - 删除存档\n"
+
                 "======= 调试 =======\n"
                 "  /rollback [版本]   - 回滚到指定事件版本\n"
                 "  /rag [模式] <内容>   - RAG 语义搜索调试\n"
                 "  /scene /sc         - 查看当前场景实体/物品/出口\n"
                 "  /debug /d          - 显示原始游戏状态\n"
-                "======= 系统 =======\n"
-                "  /modules           - 列出已摄入的模组\n"
-                "  /import <名称>       - 从 Excel 导入角色卡到种子库\n"
-                "  /cards               - 列出种子卡库中的所有角色\n"
-                "  /card <名称>        - 查看种子卡完整属性\n"
-                "  /delete <名称>       - 从种子卡库删除角色卡\n"
-                "  /start [模组名]    - 开始新游戏（自动创建独立世界）\n"
-                "  /worlds            - 列出所有世界与当前活跃世界\n"
-                "  /ingest ...        - 摄入模组数据\n"
+                "======= 模组 =======\n"
+                "  /module list          - 列出已摄入的模组\n"
+                "  /module import <名称>  - 摄入模组数据\n"
+                "  /module import file <路径> - 从文件摄入\n"
+                "  /module delete <名称>  - 删除已摄入的模组\n"
+
+                "======= 世界 =======\n"
+                "  /world list            - 列出所有世界与当前活跃世界\n"
+                "  /world start <模组名>   - 开始新游戏（自动创建独立世界）\n"
+                "  /world delete <世界ID>  - 删除指定世界及所有数据\n"
+                "======= 角色卡 =======\n"
+                "  /card                  - 列出种子卡库（缺省 = list）\n"
+                "  /card list             - 列出种子卡库中的所有角色\n"
+                "  /card show <名称>       - 查看种子卡完整属性\n"
+                "  /card <名称>           - 同上（快捷方式）\n"
+                "  /card import <名称>     - 从 Excel 导入角色卡到种子库\n"
+                "  /card import <路径>     - 从指定文件路径导入\n"
+                "  /card delete <名称>     - 从种子卡库删除角色卡\n"
+                "  /card delete --all     - 清空整个种子卡库\n"
+
                 "  /reset             - 重置当前会话\n"
                 "  /help /h           - 显示此帮助\n"
                 "  /quit /q           - 退出\n"
@@ -181,17 +194,13 @@ class AbstractAdapter(ABC):
                 session_id=session_id,
             )
 
-        # ── /modules 命令 — 列出已摄入模组 ──
-        if cmd in ("/modules", "/list"):
-            return await self._handle_modules_cmd(session_id)
+        # ── /world 命令 — 世界管理 ——
+        if cmd.startswith("/world"):
+            return await self._handle_world_cmd(cmd, session_id, msg)
 
-        # ── /start 命令 — 开始游戏 ──
-        if cmd.startswith("/start"):
-            return await self._handle_start_cmd(cmd, session_id, msg)
-
-        # ── /ingest 命令 — 模组数据摄入 ──
-        if cmd.startswith("/ingest"):
-            return await self._handle_ingest_cmd(cmd, session_id)
+        # ── /module 命令 — 模组管理 ——
+        if cmd.startswith("/module"):
+            return await self._handle_module_cmd(cmd, session_id)
 
         return OutboundMessage.system_msg(f"未知命令: {cmd}", level="warn", session_id=session_id)
 
@@ -325,7 +334,7 @@ class AbstractAdapter(ABC):
 
         if not modules:
             return OutboundMessage.system_msg(
-                "尚未摄入任何模组。使用 /ingest list 查看可摄入的文件。",
+                "尚未摄入任何模组。使用 /module import <模组名> 摄入。",
                 level="warn",
                 session_id=session_id,
             )
@@ -335,13 +344,276 @@ class AbstractAdapter(ABC):
             name = mod.get("name", "?")
             locs = mod.get("locations", 0)
             lines.append(f"  - {name}  ({locs} 个场景)")
-        lines.append('使用 /start <模组名> 开始游戏。')
+        lines.append('使用 /world start <模组名> 开始游戏。')
         return OutboundMessage.system_msg("\n".join(lines), session_id=session_id)
+
+    # ── 模组管理统一入口 ──
+
+    async def _handle_module_cmd(self, cmd: str, session_id: str) -> OutboundMessage:
+        """处理 /module — 模组管理统一入口
+
+        子命令:
+          /module list                    — 列出已摄入的模组
+          /module import list             — 列出可摄入的源文件
+          /module import <模组名>          — 摄入指定模组
+          /module import file <路径>       — 从文件路径摄入
+          /module delete <模组名>          — 删除已摄入的模组
+          /module delete --all            — 删除所有模组
+        """
+        parts = cmd.split(maxsplit=2)
+        subcmd = parts[1].strip().lower() if len(parts) > 1 else ""
+
+        if not subcmd or subcmd == "list":
+            return await self._handle_modules_cmd(session_id)
+
+        if subcmd == "import":
+            import_parts = cmd.split(maxsplit=2)
+            if len(import_parts) < 3:
+                # 无模组名 → 等同于 /module import list
+                from src.tools.ingestion import find_module_files
+                files = find_module_files()
+                if not files:
+                    return OutboundMessage.system_msg(
+                        "未找到任何模组文件。", session_id=session_id,
+                    )
+                lines = [f"可用模组 ({len(files)} 个):"]
+                for f in files:
+                    try:
+                        import json
+                        with open(f, "r", encoding="utf-8") as fh:
+                            data = json.load(fh)
+                        meta = data.get("meta", {})
+                        name = meta.get("module_name", f.stem)
+                        desc = meta.get("description", "")[:60]
+                        lines.append(f"  - {name}  ({desc})")
+                    except Exception:
+                        lines.append(f"  - {f.stem}")
+                lines.append("使用 /module import <模组名> 或 /module import file <路径> 摄入。")
+                return OutboundMessage.system_msg("\n".join(lines), session_id=session_id)
+
+            import_arg = import_parts[2].strip()
+            # /module import file <路径>
+            if import_arg.startswith("file "):
+                file_path = import_arg[5:].strip()
+                from pathlib import Path
+                path = Path(file_path)
+                if not path.is_absolute():
+                    from src.tools import PROJECT_ROOT
+                    path = PROJECT_ROOT / path
+                if not path.exists():
+                    return OutboundMessage.system_msg(
+                        f"文件不存在: {path}", level="error", session_id=session_id,
+                    )
+                from src.tools.ingestion import ingest_by_path
+                success = await ingest_by_path(path)
+                if success:
+                    return OutboundMessage.system_msg(
+                        f"[OK] 模组摄入完成: {path.name}", session_id=session_id,
+                    )
+                return OutboundMessage.system_msg(
+                    f"[FAIL] 模组摄入失败: {path.name}", level="error", session_id=session_id,
+                )
+
+            # /module import <模组名>
+            module_name = import_arg
+            from src.tools.ingestion import ingest_by_name
+            success = await ingest_by_name(module_name)
+            if success:
+                return OutboundMessage.system_msg(
+                    f"[OK] 模组 '{module_name}' 摄入完成", session_id=session_id,
+                )
+            return OutboundMessage.system_msg(
+                f"[FAIL] 模组 '{module_name}' 摄入失败（未找到或处理出错）",
+                level="error", session_id=session_id,
+            )
+
+        if subcmd == "delete":
+            delete_parts = cmd.split(maxsplit=2)
+            if len(delete_parts) < 3:
+                return OutboundMessage.system_msg(
+                    "用法:\n"
+                    "  /module delete <模组名>    - 删除指定模组\n"
+                    "  /module delete --all      - 删除所有模组\n"
+                    "使用 /module list 查看已摄入的模组。",
+                    level="warn", session_id=session_id,
+                )
+
+            arg = delete_parts[2].strip()
+            from src.state.module_loader import ModuleLoader
+            loader = ModuleLoader()
+            modules = await loader.list_modules()
+
+            if arg == "--all":
+                if not modules:
+                    return OutboundMessage.system_msg(
+                        "没有模组可删除。", session_id=session_id,
+                    )
+                names = [m["name"] for m in modules]
+                for name in names:
+                    await loader.delete_module(name)
+                return OutboundMessage.system_msg(
+                    f"已删除全部 {len(names)} 个模组。", session_id=session_id,
+                )
+
+            # 删除指定模组
+            module_name = arg
+            ok = await loader.delete_module(module_name)
+            if ok:
+                return OutboundMessage.system_msg(
+                    f"模组 '{module_name}' 已删除。", session_id=session_id,
+                )
+            return OutboundMessage.system_msg(
+                f"未找到模组 '{module_name}'。使用 /module list 查看已摄入的模组。",
+                level="warn", session_id=session_id,
+            )
+
+        return OutboundMessage.system_msg(
+            "用法:\n"
+            "  /module list                    - 列出已摄入的模组\n"
+            "  /module import list             - 列出可摄入的源文件\n"
+            "  /module import <模组名>          - 摄入指定模组\n"
+            "  /module import file <路径>       - 从文件路径摄入\n"
+            "  /module delete <模组名>          - 删除已摄入的模组\n"
+            "  /module delete --all            - 删除所有模组",
+            level="warn", session_id=session_id,
+        )
+
+    # ── 世界管理统一入口 ──
+
+    async def _handle_world_cmd(self, cmd: str, session_id: str,
+                                 msg: Optional[InboundMessage] = None) -> OutboundMessage:
+        """处理 /world — 世界管理统一入口
+
+        子命令:
+          /world list              — 列出所有世界与当前活跃世界
+          /world start <模组名>     — 开始新游戏（自动创建独立世界）
+          /world delete <世界ID>    — 删除指定世界及所有数据
+          /world delete --all      — 删除所有世界（不含种子工作区）
+        """
+        parts = cmd.split(maxsplit=2)
+        subcmd = parts[1].strip().lower() if len(parts) > 1 else ""
+
+        if not subcmd or subcmd == "list":
+            return await self._handle_world_list_cmd(session_id)
+
+        if subcmd == "start":
+            start_cmd = f"/start {parts[2].strip()}" if len(parts) > 2 else "/start"
+            return await self._handle_start_cmd(start_cmd, session_id, msg)
+
+        if subcmd == "delete":
+            return await self._handle_delete_world_cmd(cmd, session_id)
+
+        return OutboundMessage.system_msg(
+            "用法:\n"
+            "  /world list              - 列出所有世界\n"
+            "  /world start <模组名>     - 开始新游戏\n"
+            "  /world delete <世界ID>    - 删除指定世界\n"
+            "  /world delete --all      - 删除所有世界",
+            level="warn", session_id=session_id,
+        )
+
+    async def _handle_world_list_cmd(self, session_id: str) -> OutboundMessage:
+        """处理 /world list — 列出所有世界和当前活跃世界"""
+        from src.tools.world_manager import list_worlds
+        from src.tools import get_settings
+
+        worlds = list_worlds()
+        if not worlds:
+            return OutboundMessage.system_msg(
+                "没有找到任何世界。使用 /world start <模组名> 创建新世界。",
+                session_id=session_id,
+            )
+
+        active = get_settings().project.active_world
+        lines = [f"可用世界 ({len(worlds)} 个):"]
+        for w in worlds:
+            mark = "\u2192" if w == active else " "
+            lines.append(f"  {mark} {w}")
+        lines.append(f"\n当前世界: {active}")
+        lines.append("每局 /world start 自动创建新世界，数据完全隔离。")
+        return OutboundMessage.system_msg("\n".join(lines), session_id=session_id)
+
+    async def _handle_delete_world_cmd(self, cmd: str, session_id: str) -> OutboundMessage:
+        """处理 /world delete — 删除世界及关联数据
+
+        清理内容：世界目录、事件流、读模型、LightRAG 数据。
+        """
+        delete_parts = cmd.split(maxsplit=2)
+        if len(delete_parts) < 3:
+            return OutboundMessage.system_msg(
+                "用法:\n"
+                "  /world delete <世界ID>    - 删除指定世界\n"
+                "  /world delete --all      - 删除所有世界\n"
+                "使用 /world list 查看所有世界 ID。",
+                level="warn", session_id=session_id,
+            )
+
+        arg = delete_parts[2].strip()
+
+        from src.tools.world_manager import list_worlds, delete_world, set_active_world
+        from src.tools import get_settings
+
+        worlds = list_worlds()
+
+        if arg == "--all":
+            if not worlds:
+                return OutboundMessage.system_msg(
+                    "没有世界可删除。", session_id=session_id,
+                )
+            for wid in worlds:
+                await self._purge_world_data(wid)
+            return OutboundMessage.system_msg(
+                f"已删除全部 {len(worlds)} 个世界。", session_id=session_id,
+            )
+
+        if arg not in worlds:
+            return OutboundMessage.system_msg(
+                f"未找到世界「{arg}」。使用 /world list 查看所有世界 ID。",
+                level="warn", session_id=session_id,
+            )
+
+        await self._purge_world_data(arg)
+        return OutboundMessage.system_msg(
+            f"世界「{arg}」已删除。", session_id=session_id,
+        )
+
+    async def _purge_world_data(self, world_id: str):
+        """彻底删除一个世界及其所有关联数据"""
+        from src.tools.world_manager import delete_world, set_active_world
+        from src.tools import get_settings
+
+        # 如果是当前世界，切回默认
+        if world_id == get_settings().project.active_world:
+            set_active_world("test")
+
+        # 删除世界目录
+        await delete_world(world_id)
+
+        # 清理事件流
+        try:
+            from src.memory.event_store import create_event_store
+            es = await create_event_store()
+            await es.clear_all(world_id=world_id)
+        except Exception as e:
+            logger.warning(f"清理事件流失败 (world={world_id}): {e}")
+
+        # 清理读模型
+        try:
+            from src.state.read_models import StaticReadStore
+            store = StaticReadStore()
+            await store.clear_all(world_id=world_id)
+        except Exception as e:
+            logger.warning(f"清理读模型失败 (world={world_id}): {e}")
+
+        # 清理 VectorStore 缓存（下次使用时自动重建）
+        from src.memory.vector_store import VectorStore
+        await VectorStore.close_all()
+        logger.info("世界数据已彻底清除: %s", world_id)
 
     # ── 开始游戏命令 ──
 
     async def _handle_start_cmd(self, cmd: str, session_id: str, msg: Optional[InboundMessage] = None) -> OutboundMessage:
-        """处理 /start [模组名] — 加载模组并开始游戏
+        """处理 /world start [模组名] — 加载模组并开始游戏
 
         自动生成新 world_id 实现多世界数据隔离：
         先创建独立世界 → 播种模组基线知识到 LightRAG → 再加载游戏状态。
@@ -358,7 +630,7 @@ class AbstractAdapter(ABC):
             modules = await loader.list_modules()
             if not modules:
                 return OutboundMessage.system_msg(
-                    "尚未摄入任何模组。使用 /ingest list 查看可摄入的文件。",
+                    "尚未摄入任何模组。使用 /module import list 查看可摄入的文件。",
                     level="warn",
                     session_id=session_id,
                 )
@@ -367,7 +639,7 @@ class AbstractAdapter(ABC):
             else:
                 names = "、".join(m["name"] for m in modules)
                 return OutboundMessage.system_msg(
-                    f"请指定模组名: /start <模组名>\n可用模组: {names}",
+                    f"请指定模组名: /world start <模组名>\n可用模组: {names}",
                     session_id=session_id,
                 )
 
@@ -394,7 +666,7 @@ class AbstractAdapter(ABC):
         state = await loader.load(session_id, module_name)
         if state is None:
             return OutboundMessage.system_msg(
-                f"模组 '{module_name}' 未找到。使用 /modules 查看已摄入的模组。",
+                f"模组 '{module_name}' 未找到。使用 /module list 查看已摄入的模组。",
                 level="error",
                 session_id=session_id,
             )
