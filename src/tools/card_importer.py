@@ -239,22 +239,54 @@ def import_from_xlsx(filepath: str | Path) -> Character:
 
 # ------- 基本信息 -------
 
+# 骰子工厂模板的字段标签关键词——读到这些说明单元格实际是标签而非数据
+_LABEL_KEYWORDS = [
+    "姓名", "玩家", "职业", "职业序号", "年龄", "性别",
+    "住地", "故乡", "出生地", "时代", "力量", "敏捷",
+    "意志", "体质", "外貌", "教育", "体型", "智力",
+    "灵感", "幸运", "生命", "理智", "魔法", "移动",
+]
+
+
+def _is_label(text: str) -> bool:
+    """判断文本是否像字段标签而非实际数据"""
+    t = text.strip()
+    if not t:
+        return False
+    # 含换行的多行文本一定是标签（如 "力量\nSTR"）
+    if "\n" in t:
+        return True
+    # 匹配已知标签关键词
+    for kw in _LABEL_KEYWORDS:
+        if kw in t:
+            return True
+    return False
+
+
 def _parse_basic_info(ws) -> tuple[str, str, int, str, str]:
     """提取姓名、性别、年龄、出生地、职业"""
     name = str(ws.cell(row=3, column=_COL_NAME).value or "").strip()
+    if _is_label(name):
+        name = ""
 
     # M6 是性别（本卡格式：M6="女"）
     gender_raw = ws.cell(row=6, column=_COL_NAME + 8).value  # M6
     gender = str(gender_raw or "").strip()
+    if _is_label(gender):
+        gender = ""
 
     # E6 是年龄（本卡格式：E6=24）
     age = _to_int(ws.cell(row=6, column=_COL_NAME).value)
 
     # E7 住地
     birthplace = str(ws.cell(row=7, column=_COL_NAME).value or "").strip()
+    if _is_label(birthplace):
+        birthplace = ""
 
     # E5 职业
     occ_name = str(ws.cell(row=5, column=_COL_NAME).value or "").strip()
+    if _is_label(occ_name):
+        occ_name = ""
 
     logger.debug("基本信息: name=%s gender=%s age=%d occ=%s",
                  name, gender, age, occ_name)

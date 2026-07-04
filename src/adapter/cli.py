@@ -694,7 +694,8 @@ class CliAdapter(AbstractAdapter):
         # 保存为种子卡（独立于会话，/start 时拷贝到世界）
         if self._player_loader is None:
             self._player_loader = CharacterStore()
-        card_name = char.name
+        # 角色名为空时用文件名兜底，确保可被 /delete 定位
+        card_name = char.name or path.stem
         try:
             await self._player_loader.save_card(card_name, char)
         except Exception as e:
@@ -782,17 +783,66 @@ class CliAdapter(AbstractAdapter):
         )
 
     async def _handle_delete_card_cmd(self, cmd: str, session_id: str) -> OutboundMessage:
-        """处理 /delete <名称> — 从种子卡库删除角色卡"""
+        """处理 /delete <名称> 或 /delete --all — 从种子卡库删除角色卡"""
         parts = cmd.split(maxsplit=1)
         if len(parts) < 2:
             return OutboundMessage.system_msg(
-                "用法: /delete <角色名>\n使用 /cards 查看所有可用卡片。",
+                "用法:\n"
+                "  /delete <角色名>   删除指定种子卡\n"
+                "  /delete --all      清空整个种子卡库\n"
+                "使用 /cards 查看所有可用卡片。",
                 level="warn", session_id=session_id,
             )
 
-        card_name = parts[1].strip()
         if self._player_loader is None:
             self._player_loader = CharacterStore()
+
+        arg = parts[1].strip()
+
+        # ── 清空全部 ──
+        if arg == "--all":
+            cards = await self._player_loader.list_cards()
+            if not cards:
+                return OutboundMessage.system_msg(
+                    "种子卡库已为空。", session_id=session_id,
+                )
+            raw = await asyncio.get_event_loop().run_in_executor(
+                None, lambda: input(
+                    f"  确认清空全部 {len(cards)} 张种子卡? "
+                    f"{_color('(y/N)', _GREEN)} > "
+                )
+            )
+            if raw.strip().lower() not in ("y", "yes", "是"):
+                return OutboundMessage.system_msg("已取消删除。", session_id=session_id)
+
+            for c in cards:
+                sid = c.get("session_id", "")
+                if sid:
+                    await self._player_loader.delete(sid)
+            logger.info("种子卡库已清空 (%d 张)", len(cards))
+            return OutboundMessage.system_msg(
+                f"种子卡库已清空 ({len(cards)} 张)。", session_id=session_id,
+            )
+
+        # ── 删除单张 ──
+        card_name = arg
+        # 修复期兼容：修复前空卡存为 __card__，尝试用空名加载
+        if not card_name:
+            char = await self._player_loader.load_card("")
+            if char:
+                raw = await asyncio.get_event_loop().run_in_executor(
+                    None, lambda: input(
+                        f"  确认删除空名种子卡? {_color('(y/N)', _GREEN)} > "
+                    )
+                )
+                if raw.strip().lower() in ("y", "yes", "是"):
+                    await self._player_loader.delete_card("")
+                    return OutboundMessage.system_msg(
+                        "空名种子卡已删除。", session_id=session_id,
+                    )
+                return OutboundMessage.system_msg(
+                    "已取消删除。", session_id=session_id,
+                )
 
         if not await self._player_loader.card_exists(card_name):
             return OutboundMessage.system_msg(
@@ -800,7 +850,6 @@ class CliAdapter(AbstractAdapter):
                 level="warn", session_id=session_id,
             )
 
-        # 先加载展示一下，让用户确认
         char = await self._player_loader.load_card(card_name)
         brief = f"{char.name} ({char.occupation})" if char else card_name
         raw = await asyncio.get_event_loop().run_in_executor(
@@ -918,64 +967,57 @@ class CliAdapter(AbstractAdapter):
         if self._character and self._scheduler:
             from dataclasses import asdict
             slot = self._scheduler.get_session(session_id)
+            if not slot:
+                logger.warning("注入角色: scheduler 中未找到会话 %s", session_id)
             if slot:
                 char_dict = asdict(self._character)
                 get_current_player(slot.state)["character"] = char_dict
 
                 # ── 角色背景 → LightRAG ──
-                try:
-                    backstory_parts = []
-                    if self._character.appearance_desc:
-                        backstory_parts.append(f"形象描述：{self._character.appearance_desc}")
-                    if self._character.belief:
-                        backstory_parts.append(f"思想与信念：{self._character.belief}")
-                    if self._character.significant_person:
-                        backstory_parts.append(f"重要之人：{self._character.significant_person}")
-                    if self._character.significant_place:
-                        backstory_parts.append(f"意义非凡之地：{self._character.significant_place}")
-                    if self._character.cherished_possession:
-                        backstory_parts.append(f"宝贵之物：{self._character.cherished_possession}")
-                    if self._character.trait:
-                        backstory_parts.append(f"特质：{self._character.trait}")
-                    if self._character.injury_scar:
-                        backstory_parts.append(f"伤口和疤痕：{self._character.injury_scar}")
-                    if self._character.phobias_manias:
-                        backstory_parts.append(f"恐惧症和躁狂症：{self._character.phobias_manias}")
-                    # 完整背景故事作为独立文档导入（非摘要，保留叙事性）
-                    if self._character.full_backstory:
-                        backstory_parts.append(f"完整背景故事：\n{self._character.full_backstory}")
-                    if backstory_parts:
-                        from src.memory.vector_store import VectorStore
-                        world_id = slot.state.get("world_id", "")
-                        vs = await VectorStore.get_instance(domain="world", world_id=world_id)
-                        backstory_doc = (
-                            f"【调查员背景】{self._character.name}的人设信息\n"
-                            + "\n".join(backstory_parts)
-                        )
-                        await vs.insert(
-                            [{"content": backstory_doc, "source_type": "character_backstory"}],
-                            source_type="character_backstory",
-                        )
-                        logger.info(f"角色背景已导入 RAG (world={world_id})")
-
-                    # 法术也导入 RAG
-                    if self._character.spells:
-                        spell_lines = []
-                        for sp in self._character.spells:
-                            cost = f" 消耗: {sp.get('cost', '')}" if sp.get("cost") else ""
-                            effect = f" 效果: {sp.get('effect', '')}" if sp.get("effect") else ""
-                            spell_lines.append(f"- {sp.get('name', '?')}{cost}{effect}")
-                        spell_doc = (
-                            f"【调查员法术】{self._character.name}掌握的法术\n"
-                            + "\n".join(spell_lines)
-                        )
-                        await vs.insert(
-                            [{"content": spell_doc, "source_type": "character_spells"}],
-                            source_type="character_spells",
-                        )
-                        logger.info(f"角色法术已导入 RAG (world={world_id})")
-                except Exception as e:
-                    logger.warning(f"角色数据导入 RAG 失败: {e}")
+                # 用 session_slot.world_id 而非 state.get()，确保 key 与
+                # seed_world_lightrag 初始化时的缓存 key（world:<world_id>）一致
+                world_id = slot.world_id or slot.state.get("world_id", "")
+                if not world_id:
+                    logger.warning("world_id 为空，跳过角色背景 RAG 导入")
+                else:
+                    try:
+                        backstory_parts = []
+                        if self._character.appearance_desc:
+                            backstory_parts.append(f"形象描述：{self._character.appearance_desc}")
+                        if self._character.belief:
+                            backstory_parts.append(f"思想与信念：{self._character.belief}")
+                        if self._character.significant_person:
+                            backstory_parts.append(f"重要之人：{self._character.significant_person}")
+                        if self._character.significant_place:
+                            backstory_parts.append(f"意义非凡之地：{self._character.significant_place}")
+                        if self._character.cherished_possession:
+                            backstory_parts.append(f"宝贵之物：{self._character.cherished_possession}")
+                        if self._character.trait:
+                            backstory_parts.append(f"特质：{self._character.trait}")
+                        if self._character.injury_scar:
+                            backstory_parts.append(f"伤口和疤痕：{self._character.injury_scar}")
+                        if self._character.phobias_manias:
+                            backstory_parts.append(f"恐惧症和躁狂症：{self._character.phobias_manias}")
+                        if self._character.full_backstory:
+                            backstory_parts.append(f"完整背景故事：\n{self._character.full_backstory}")
+                        if backstory_parts:
+                            from src.memory.vector_store import VectorStore
+                            # copy_workspace_from 后缓存实例已被 close() 无效化，
+                            # 用 force_reinit=True 强制重建
+                            vs = await VectorStore.get_instance(
+                                domain="world", world_id=world_id, force_reinit=True,
+                            )
+                            backstory_doc = (
+                                f"【调查员背景】{self._character.name}的人设信息\n"
+                                + "\n".join(backstory_parts)
+                            )
+                            await vs.insert(
+                                backstory_doc,
+                                source_type="character_backstory",
+                            )
+                            logger.info(f"角色背景已导入 RAG (world={world_id})")
+                    except Exception as e:
+                        logger.warning(f"角色数据导入 RAG 失败: {e}")
 
                 # ── 记录 CharacterImported 事件 ──
                 try:
