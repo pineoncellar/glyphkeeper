@@ -21,6 +21,7 @@ from src.state.game_state import (
     GameState,
     create_initial_state,
     create_state_view,
+    get_current_player,
     INTENT_VIEW,
     RULE_VIEW,
     NARRATE_VIEW,
@@ -47,7 +48,7 @@ class TestGameState:
         assert state["active_tags"] == []
         assert state["errors"] == []
         assert state["node_trace"] == []
-        assert state["pending_dice"] is None
+        assert get_current_player(state)["pending_dice"] is None
         assert state["narrative"] == ""
 
     def test_create_state_view(self):

@@ -11,7 +11,7 @@ Node 签名:
 from __future__ import annotations
 
 from typing import Optional, Any
-from src.state.game_state import GameState
+from src.state.game_state import GameState, get_current_player
 from src.domain.checks import skill_check, stat_check, opposed_check, push_roll, CheckResult
 from src.domain.coc_rules import Difficulty, SuccessLevel
 from src.domain.character import Character
@@ -71,7 +71,7 @@ async def roll_node(state: GameState) -> dict:
     """
     intent = state.get("intent") or {}
     intent_data = intent.get("data") or {}
-    pending = state.get("pending_dice")
+    pending = get_current_player(state).get("pending_dice")
 
     # ── 确定检定参数 ──
     check_type = intent_data.get("check_type", "skill")
@@ -90,7 +90,7 @@ async def roll_node(state: GameState) -> dict:
         penalty_dice = intent_data.get("penalty_dice", 0)
 
         # 从角色数据获取技能值
-        character_data = state.get("character")
+        character_data = get_current_player(state).get("character")
         skill_value = _get_skill_value(character_data, skill_name)
         if skill_value is None:
             skill_value = intent_data.get("skill_value")

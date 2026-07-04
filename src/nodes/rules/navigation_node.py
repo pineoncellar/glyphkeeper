@@ -17,7 +17,7 @@ from __future__ import annotations
 import json
 from typing import Optional
 
-from src.state.game_state import GameState
+from src.state.game_state import GameState, get_current_player
 from src.tools import get_logger
 from src.domain.navigation import find_path, build_graph, is_blocked, BLOCKED_TAGS
 
@@ -294,7 +294,7 @@ async def navigation_node(state: GameState) -> dict:
     current_intent = queue[idx] if idx < len(queue) else {}
     intent_data = current_intent.get("data", {})
     target = intent_data.get("target", "")
-    current_loc = state.get("current_location", "")
+    current_loc = get_current_player(state).get("current_location", "")
     flavor = current_intent.get("flavor_context", "")
 
     if not target:

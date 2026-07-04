@@ -11,7 +11,7 @@ Node 签名:
 from __future__ import annotations
 
 from typing import Any
-from src.state.game_state import GameState
+from src.state.game_state import GameState, get_current_player
 from src.domain.sanity_rules import (
     calculate_sanity_loss,
     roll_full_insanity,
@@ -37,7 +37,7 @@ async def sanity_node(state: GameState) -> dict:
     intent_data = current_intent.get("data", {})
 
     source_type = intent_data.get("source_type", "")
-    character_data = state.get("character")
+    character_data = get_current_player(state).get("character")
 
     current_san = intent_data.get("current_san")
     if current_san is None and character_data:
@@ -104,9 +104,17 @@ async def sanity_node(state: GameState) -> dict:
         log_msg += f" [{resolution['insanity_type']}] {resolution['symptom']}"
     logger.info(log_msg)
 
+    # 写回 character：SAN 变更 + 疯狂标记持久化
     changes = {}
     if character_data:
-        changes["character"] = {**character_data, "sanity": new_san}
+        char_update = dict(character_data)
+        char_update["sanity"] = new_san
+        char_update["sanity_loss_today"] = character_data.get("sanity_loss_today", 0) + resolution["actual_loss"]
+        if resolution["insanity_type"] == "temporary":
+            char_update["temp_insanity"] = True
+        elif resolution["insanity_type"] == "indefinite":
+            char_update["indefinite_insanity"] = True
+        changes["character"] = char_update
 
     return {
         "executed_actions": [{

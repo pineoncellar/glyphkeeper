@@ -19,6 +19,7 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from typing import Any, Optional
 
+from src.state.game_state import get_current_player
 from src.tools import get_logger
 from src.runtime.engine import GraphEngine, ENGINE_MODE_LANGGRAPH
 from src.runtime.scheduler import InputScheduler
@@ -124,7 +125,7 @@ class AbstractAdapter(ABC):
             state = self._scheduler.get_session_state(session_id)
             if state is None:
                 return OutboundMessage.system_msg("当前无活跃会话", level="warn", session_id=session_id)
-            char = state.get("character") if state else None
+            char = get_current_player(state).get("character") if state else None
             return OutboundMessage.session_info(
                 {
                     "session_id": session_id,
@@ -133,7 +134,7 @@ class AbstractAdapter(ABC):
                     "game_phase": state.get("game_phase", "unknown"),
                     "combat_active": state.get("combat_active", False),
                     "active_tags": state.get("active_tags", []),
-                    "pending_dice": state.get("pending_dice"),
+                    "pending_dice": get_current_player(state).get("pending_dice"),
                 },
                 session_id=session_id,
             )
@@ -166,6 +167,10 @@ class AbstractAdapter(ABC):
                 "  /debug /d          - 显示原始游戏状态\n"
                 "======= 系统 =======\n"
                 "  /modules           - 列出已摄入的模组\n"
+                "  /import <名称>       - 从 Excel 导入角色卡到种子库\n"
+                "  /cards               - 列出种子卡库中的所有角色\n"
+                "  /card <名称>        - 查看种子卡完整属性\n"
+                "  /delete <名称>       - 从种子卡库删除角色卡\n"
                 "  /start [模组名]    - 开始新游戏（自动创建独立世界）\n"
                 "  /worlds            - 列出所有世界与当前活跃世界\n"
                 "  /ingest ...        - 摄入模组数据\n"
@@ -201,8 +206,8 @@ class AbstractAdapter(ABC):
 
         # 注入 pending_dice 到 state
         state = self._scheduler.get_session_state(session_id)
-        if state and state.get("pending_dice"):
-            state["pending_dice"]["roll_value"] = value
+        if state and get_current_player(state).get("pending_dice"):
+            get_current_player(state)["pending_dice"]["roll_value"] = value
         return OutboundMessage.system_msg(f"掷骰结果: {value}", session_id=session_id)
 
     async def _handle_player_input(self, text: str, session_id: str, msg: Optional[InboundMessage] = None) -> OutboundMessage:

@@ -1,41 +1,25 @@
 """
-角色域模型
-
-职责:
-  - 调查员角色数据类与校验
-  - 属性生成与分配
-  - 技能列表管理与成长
-  - 职业模板定义
-
-类:
-  - Character: 核心角色数据
-  - Stats: 八项属性值对象
-  - Occupation: 职业模板
-
-函数:
-  - create_investigator(name, occupation, stats) -> Character
-  - apply_skill_growth(character, skill_name, roll_value) -> bool
-  - calculate_combat_stats(str_score, siz_score) -> tuple[str, int]
-  - calculate_move(dex_score, str_score, siz_score) -> int
+@File     :   character.py
+@Desc     :   调查员角色域模型 — 数据类、衍生属性计算、职业模板、技能成长
 """
 
 import uuid
 from dataclasses import dataclass, field
-from typing import Dict, Optional, List
+from typing import Dict, Optional
 from src.tools.dice import roll_d100, roll_dice
 
 
 @dataclass
 class Stats:
-    """八项属性"""
-    strength: int = 50        # 力量 STR
-    constitution: int = 50    # 体质 CON
-    size: int = 50            # 体型 SIZ
-    dexterity: int = 50       # 敏捷 DEX
-    appearance: int = 50      # 外貌 APP
-    intelligence: int = 50    # 智力 INT
-    power: int = 50           # 意志 POW
-    education: int = 50       # 教育 EDU
+    """八项属性值对象"""
+    strength: int = 50
+    constitution: int = 50
+    size: int = 50
+    dexterity: int = 50
+    appearance: int = 50
+    intelligence: int = 50
+    power: int = 50
+    education: int = 50
 
     def to_dict(self) -> dict:
         return {
@@ -65,22 +49,55 @@ class Stats:
 
 @dataclass
 class Character:
-    """调查员角色"""
+    """调查员角色 — 身份、属性、状态池、技能、背包、背景、法术的完整容器"""
     id: str = ""
+    # 身份元数据
     name: str = ""
+    gender: str = ""
+    age: int = 0
+    birthplace: str = ""
     occupation: str = ""
     stats: Stats = field(default_factory=Stats)
     skills: Dict[str, int] = field(default_factory=dict)
-    sanity: int = 0
-    max_sanity: int = 0
+    # HP 系统
     hit_points: int = 0
     max_hit_points: int = 0
+    major_wound: bool = False          # 重伤标记
+    unconscious: bool = False           # 昏迷
+    dying: bool = False                 # 濒死
+    # MP 系统
     magic_points: int = 0
     max_magic_points: int = 0
+    # SAN 系统
+    sanity: int = 0
+    max_sanity: int = 0
+    initial_sanity: int = 0             # 初始理智（不定性疯狂恢复阈值）
+    sanity_loss_today: int = 0          # 本日理智损失累计
+    temp_insanity: bool = False         # 临时疯狂标记
+    indefinite_insanity: bool = False   # 不定性疯狂标记
+    # 幸运
+    luck: int = 0
+    # 面板衍生值
     damage_bonus: str = "0"
     build: int = 0
     move: int = 8
     armor: int = 0
+    # 背包
+    inventory: list = field(default_factory=list)
+    # 背景故事（经典七大项）
+    appearance_desc: str = ""
+    belief: str = ""
+    significant_person: str = ""
+    significant_place: str = ""
+    cherished_possession: str = ""
+    trait: str = ""
+    injury_scar: str = ""
+    # 法术
+    spells: list = field(default_factory=list)
+    # 完整背景故事
+    full_backstory: str = ""
+    # 恐惧症和躁狂症
+    phobias_manias: str = ""
 
 
 def create_investigator(
@@ -88,22 +105,28 @@ def create_investigator(
     occupation: str,
     stats: Stats,
     occupation_skills: Dict[str, int],
+    gender: str = "",
+    age: int = 0,
+    birthplace: str = "",
+    appearance_desc: str = "",
+    belief: str = "",
+    significant_person: str = "",
+    significant_place: str = "",
+    cherished_possession: str = "",
+    trait: str = "",
+    injury_scar: str = "",
+    spells: Optional[list] = None,
 ) -> Character:
     """
-    创建调查员角色，自动计算衍生属性。
+    创建调查员角色，自动计算所有衍生属性。
 
-    参数:
-      name: 角色名
-      occupation: 职业
-      stats: 八项属性
-      occupation_skills: 职业技能（技能名 → 技能值）
-
-    返回: 完整的 Character 对象
+    先算基础衍生值，再设基础技能表，最后合并职业技能。
     """
-    # 计算衍生属性
     max_hp = calculate_max_hp(stats.constitution, stats.size)
     max_mp = calculate_max_mp(stats.power)
-    max_san = stats.power  # 最大 SAN = POW
+    max_san = stats.power  # 运行时随克苏鲁神话递减
+    initial_sanity = max_san
+    luck = roll_dice("3D6") * 5
     db, build = calculate_combat_stats(stats.strength, stats.size)
     move = calculate_move(stats.dexterity, stats.strength, stats.size)
 
@@ -170,19 +193,32 @@ def create_investigator(
     return Character(
         id=str(uuid.uuid4()),
         name=name,
+        gender=gender,
+        age=age,
+        birthplace=birthplace,
         occupation=occupation,
         stats=stats,
         skills=all_skills,
-        sanity=max_san,
-        max_sanity=max_san,
         hit_points=max_hp,
         max_hit_points=max_hp,
         magic_points=max_mp,
         max_magic_points=max_mp,
+        sanity=max_san,
+        max_sanity=max_san,
+        initial_sanity=initial_sanity,
+        luck=luck,
         damage_bonus=db,
         build=build,
         move=move,
         armor=0,
+        appearance_desc=appearance_desc,
+        belief=belief,
+        significant_person=significant_person,
+        significant_place=significant_place,
+        cherished_possession=cherished_possession,
+        trait=trait,
+        injury_scar=injury_scar,
+        spells=spells or [],
     )
 
 
@@ -243,27 +279,35 @@ def calculate_max_mp(pow: int) -> int:
 
 def apply_skill_growth(character: Character, skill_name: str, roll_value: int) -> bool:
     """
-    技能成长：技能检定成功后，掷 D100，如果 > 当前技能值，则 +1D10。
+    技能成长：检定成功后掷 D100，大于当前值则 +1D10。
+    如果成长的是克苏鲁神话，同步重算 SAN 上限。
+
     返回是否成长。
-
-    参数:
-      character: 角色对象
-      skill_name: 技能名称
-      roll_value: 成长掷骰值（1-100）
-
-    返回: True 如果技能成长了，False 否则
     """
     current_value = character.skills.get(skill_name)
     if current_value is None:
         return False
 
-    # 如果掷骰值 > 当前技能值，则成长
     if roll_value > current_value:
         growth = roll_dice("1D10")
         character.skills[skill_name] = current_value + growth
+        if skill_name == "克苏鲁神话":
+            update_sanity_cap(character)
         return True
 
     return False
+
+
+def update_sanity_cap(character: Character) -> int:
+    """
+    重算 SAN 上限 = min(POW, 99 - 克苏鲁神话)。
+
+    每次克苏鲁神话技能成长后调用，确保上限随知识增长递减。
+    """
+    cthulhu_mythos = character.skills.get("克苏鲁神话", 0)
+    new_max = min(character.stats.power, 99 - cthulhu_mythos)
+    character.max_sanity = max(0, new_max)
+    return character.max_sanity
 
 
 # ====================================================================

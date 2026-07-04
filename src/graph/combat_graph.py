@@ -19,7 +19,7 @@
 from __future__ import annotations
 
 from langgraph.graph import StateGraph, START, END
-from src.state.game_state import GameState, create_initial_state
+from src.state.game_state import GameState, create_initial_state, get_current_player
 from src.nodes.tools.dice_node import dice_node as dice_node_fn
 from src.nodes.rules.combat_node import combat_node as combat_node_fn
 from src.tools import get_logger
@@ -49,7 +49,7 @@ def _check_combat_end(state: GameState) -> str:
 
     combatants = state.get("combatants", [])
     # 检查是否有存活敌人（名字不同于当前角色的 combatant 且 HP > 0）
-    character = state.get("character") or {}
+    character = get_current_player(state).get("character") or {}
     pc_name = character.get("name", "")
     enemies_alive = any(
         c.get("hit_points", 0) > 0

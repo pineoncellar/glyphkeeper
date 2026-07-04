@@ -11,7 +11,7 @@ Node 签名:
 from __future__ import annotations
 
 from typing import Any
-from src.state.game_state import GameState
+from src.state.game_state import GameState, get_current_player
 from src.tools.dice import roll_d100, roll_bonus_dice, roll_penalty_dice, roll_dice as roll_expression
 from src.domain.coc_rules import determine_success_level, SuccessLevel
 from src.tools import get_logger
@@ -36,7 +36,7 @@ async def dice_node(state: GameState) -> dict:
             "expression": "1D6",            # 自定义骰子表达式（可选，非 D100 时使用）
         }
     """
-    pending = state.get("pending_dice")
+    pending = get_current_player(state).get("pending_dice")
     if not pending:
         # 正常路径：combat_graph 无条件执行 dice_node 作为图的第一步，
         # 此时可能没有待处理的掷骰请求，属于正常"无事可做"

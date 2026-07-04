@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import random
 from typing import Optional
-from src.state.game_state import GameState
+from src.state.game_state import GameState, get_current_player
 from src.tools import get_logger, get_settings
 from src.tools.llm_client import call_llm as _call_llm, LLMResult
 from src.memory.retriever import Retriever
@@ -272,7 +272,7 @@ async def npc_dialogue_node(state: GameState) -> dict:
     intent_data = intent.get("data") or {}
     session_id = state.get("session_id", "default")
     player_input = state.get("player_input", "")
-    npc_relations = state.get("npc_relations") or {}
+    npc_relations = get_current_player(state).get("npc_relations") or {}
     active_tags = state.get("active_tags", [])
 
     # 从 disambiguation_node 输出的 resolved_targets 获取消歧后的 NPC 名称

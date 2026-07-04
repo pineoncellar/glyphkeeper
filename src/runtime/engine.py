@@ -17,7 +17,7 @@ from typing import Any, Optional
 
 from langgraph.graph.state import CompiledStateGraph as CompiledGraph
 
-from src.state.game_state import GameState, create_initial_state, DIALOGUE_HISTORY_MAX
+from src.state.game_state import GameState, create_initial_state, DIALOGUE_HISTORY_MAX, get_current_player, rehome_player_fields
 from src.state.event_log import EventLog
 from src.state.snapshot import SnapshotManager
 from src.state.world_state import WorldManager
@@ -55,8 +55,8 @@ _RUNTIME_FIELDS: dict[str, object] = {
     "intent_queue": [],           # intent_node 写（多意图队列）
     "current_intent_idx": 0,      # dispatch_node / intent_node 写
     "executed_actions": [],       # 规则节点追加写
-    "npc_dialogue_results": [],   # npc_dialogue_node 追加写
-    "npc_dialogue": "",           # npc_dialogue_node 写
+    "npc_dialogue_results": [],
+    "npc_dialogue": "",
     "world_context": "",          # db_lookup_node + engine 写
     "physical_reality": "",       # db_lookup_node 写
     "rag_context": "",            # rag_lookup_node 写
@@ -185,7 +185,7 @@ class GraphEngine:
         )
 
         # ── 执行前：注入场景上下文（如果 WorldManager 可用且有当前位置） ──
-        current_loc = state.get("current_location", "")
+        current_loc = get_current_player(state).get("current_location", "")
         if current_loc and self.world_manager:
             try:
                 loc_view = await self.world_manager.get_location_view(
@@ -212,15 +212,15 @@ class GraphEngine:
 
             # ── 执行后：由 navigation_node 处理 MOVE 位置更新，此处只做 WorldManager 同步 ──
             intent = new_state.get("intent") or {}
-            resolved_loc = new_state.get("current_location", "")
-            old_loc = state.get("current_location", "")
+            resolved_loc = get_current_player(new_state).get("current_location", "")
+            old_loc = get_current_player(state).get("current_location", "")
             if (
                 intent.get("type") == "MOVE"
                 and resolved_loc
                 and resolved_loc != old_loc
                 and self.world_manager
             ):
-                character = new_state.get("character") or {}
+                character = get_current_player(new_state).get("character") or {}
                 char_name = character.get("name", "")
                 if char_name:
                     try:
@@ -243,6 +243,9 @@ class GraphEngine:
                     logger.debug(f"Engine.run: 快照已创建 {snap_id[:8]}")
                 except Exception as e:
                     logger.warning(f"Engine.run: 快照创建失败: {e}")
+
+            # Graph 执行后将散落顶层的玩家字段归位到 players[uid]
+            new_state = rehome_player_fields(new_state, user_id=session_id)
 
             logger.info(
                 f"Engine.run: OK session={session_id[:8]} "
@@ -547,7 +550,7 @@ class GraphEngine:
                 # 构建完整持久状态快照（排除运行时字段，供回档重建）
                 runtime_keys = {
                     "intent", "resolution", "intent_queue", "current_intent_idx",
-                    "executed_actions", "npc_dialogue_results", "npc_dialogue",
+                    "executed_actions",
                     "world_context", "physical_reality", "rag_context",
                     "archivist_result", "entity_name_map", "_llm_trace",
                     "narrative_output", "pending_tier1_events", "pending_tier2_facts",

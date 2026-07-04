@@ -15,7 +15,7 @@ from __future__ import annotations
 import json
 import re
 from typing import Any, Optional
-from src.state.game_state import GameState, format_dialogue_history
+from src.state.game_state import GameState, format_dialogue_history, get_current_player
 from src.tools import get_logger, get_settings
 
 logger = get_logger(__name__)
@@ -400,7 +400,7 @@ async def intent_node(state: GameState) -> dict:
     # ── 构建场景目标列表（供 LLM 做 target→key 映射） ──
     scene_targets = ""
     if INTENT_NODE_TARGET_KEY_RESOLVE:
-        current_location = state.get("current_location", "")
+        current_location = get_current_player(state).get("current_location", "")
         if current_location:
             try:
                 from src.state.read_models import StaticReadStore

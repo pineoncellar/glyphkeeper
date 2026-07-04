@@ -19,7 +19,7 @@ from __future__ import annotations
 import json
 from typing import Optional
 
-from src.state.game_state import GameState
+from src.state.game_state import GameState, get_current_player
 from src.tools import get_logger, get_settings
 from src.tools.llm_client import call_llm as _call_llm, LLMResult
 
@@ -172,8 +172,8 @@ async def archivist_node(state: GameState) -> dict:
     intent = state.get("intent") or {}
     intent_data = intent.get("data") or {}
     session_id = state.get("session_id", "")
-    current_location = state.get("current_location", "")
-    character_data = state.get("character") or {}
+    current_location = get_current_player(state).get("current_location", "")
+    character_data = get_current_player(state).get("character") or {}
     character_name = character_data.get("name", "")
 
     # 读取 target 信息

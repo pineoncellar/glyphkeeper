@@ -13,7 +13,7 @@ import re
 from typing import Optional, Any
 import numpy as np
 
-from src.state.game_state import GameState
+from src.state.game_state import GameState, get_current_player
 from src.tools import get_logger, get_settings
 from src.tools.llm_client import call_llm as _call_llm, LLMResult
 
@@ -71,7 +71,7 @@ async def _build_candidates(
     if target_type == "npc":
         # 候选 NPC 来源：当前场景 NPC + 对话历史 NPC
         scene_npcs = state.get("scene_npcs") or []
-        npc_relations = state.get("npc_relations") or {}
+        npc_relations = get_current_player(state).get("npc_relations") or {}
         entity_name_map = state.get("entity_name_map") or {}
 
         seen = set()
@@ -147,7 +147,7 @@ async def _build_candidates(
 
     elif target_type == "inventory_item":
         # 从角色背包获取（当前未实现完整背包系统）
-        character = state.get("character") or {}
+        character = get_current_player(state).get("character") or {}
         inventory = character.get("inventory") or []
         for item in inventory:
             candidates.append({"id": item, "name": item, "source": "inventory"})

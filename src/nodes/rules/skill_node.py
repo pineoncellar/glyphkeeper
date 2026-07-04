@@ -11,7 +11,7 @@ Node 签名:
 from __future__ import annotations
 
 from typing import Any
-from src.state.game_state import GameState
+from src.state.game_state import GameState, get_current_player
 from src.domain.checks import skill_check, CheckResult
 from src.domain.coc_rules import Difficulty, SuccessLevel
 from src.domain.character import Character
@@ -90,7 +90,7 @@ async def skill_node(state: GameState) -> dict:
     # ── 获取技能值 ──
     skill_value = intent_data.get("skill_value")
     if skill_value is None:
-        character_data = state.get("character")
+        character_data = get_current_player(state).get("character")
         if character_data:
             skills = character_data.get("skills") or {}
             skill_value = skills.get(skill_name)
@@ -167,7 +167,7 @@ async def batch_skill_check(state: GameState) -> dict:
         return await skill_node(state)
 
     results = []
-    character_data = state.get("character")
+    character_data = get_current_player(state).get("character")
 
     for sc in skills_config:
         sname = sc.get("name", "")

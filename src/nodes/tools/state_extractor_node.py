@@ -16,7 +16,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from src.state.game_state import GameState
+from src.state.game_state import GameState, get_current_player
 from src.tools import get_logger
 from src.tools.llm_client import call_llm as _call_llm
 
@@ -92,7 +92,7 @@ async def state_extractor_node(state: GameState) -> dict[str, Any]:
     tier2 = []
     if narrative:
         world_context = state.get("world_context", "")
-        current_loc = state.get("current_location", "")
+        current_loc = get_current_player(state).get("current_location", "")
         scene_npcs = state.get("scene_npcs", [])
 
         context_lines = ["【物理现实上下文】"]

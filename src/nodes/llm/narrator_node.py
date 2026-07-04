@@ -11,8 +11,9 @@ Node 签名:
 from __future__ import annotations
 
 from typing import Optional
-from src.state.game_state import GameState, format_dialogue_history
+from src.state.game_state import GameState, format_dialogue_history, get_current_player
 from src.tools import get_logger, get_settings
+from src.tools.llm_client import call_llm as _call_llm, LLMResult
 
 logger = get_logger(__name__)
 
@@ -231,10 +232,6 @@ def _validate_npc_dialogue(narrative: str, original_dialogue: str) -> str:
     logger.debug(f"_validate_npc_dialogue: 替换了偏移的 NPC 对话")
     return narrative
 
-
-from src.tools.llm_client import call_llm as _call_llm, LLMResult
-
-
 async def _call_llm_for_narrative(
     intent: dict,
     resolution: dict,
@@ -383,7 +380,7 @@ async def narrate_node(state: GameState) -> dict:
     返回 narrative + narrative_output + _llm_trace。
     """
     actions = state.get("executed_actions", [])
-    npc_results = state.get("npc_dialogue_results", [])
+    npc_results = get_current_player(state).get("npc_dialogue_results", [])
     physical_reality = state.get("physical_reality", "")
     rag_context = state.get("rag_context", "")
     narrative_history = state.get("narrative", "")
@@ -429,7 +426,7 @@ async def narrate_node(state: GameState) -> dict:
     # ── 路径 B: 旧单意图路径（兼容） ──
     intent = state.get("intent") or {}
     resolution = state.get("resolution") or {}
-    npc_dialogue = state.get("npc_dialogue", "")
+    npc_dialogue = get_current_player(state).get("npc_dialogue", "")
     is_npc_scene = bool(npc_dialogue)
 
     archivist_result = state.get("archivist_result")

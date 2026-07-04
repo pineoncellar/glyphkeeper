@@ -11,7 +11,7 @@ Node 签名:
 from __future__ import annotations
 
 from typing import Any, Optional
-from src.state.game_state import GameState
+from src.state.game_state import GameState, get_current_player
 from src.domain.combat_rules import (
     WeaponStats, CombatRoundResult, WEAPONS,
     resolve_combat_round, calculate_damage, determine_hit_location,
@@ -48,7 +48,7 @@ async def combat_node(state: GameState) -> dict:
     queue = state.get("intent_queue", [])
     current_intent = queue[idx] if idx < len(queue) else {}
     intent_data = current_intent.get("data", {})
-    character_data = state.get("character")
+    character_data = get_current_player(state).get("character")
 
     action = intent_data.get("action", "attack")
     weapon_name = intent_data.get("weapon_name", "拳头")
@@ -163,12 +163,24 @@ async def combat_node(state: GameState) -> dict:
                         break
                 resolution["updated_combatants"] = combatants
 
+                # 受击目标是玩家角色时，伤害写回 character
+                if character_data and target_name == character_data.get("name"):
+                    new_hp = max(0, character_data.get("hit_points", 0) - round_result.net_damage)
+                    char_update = dict(character_data)
+                    char_update["hit_points"] = new_hp
+                    max_hp = character_data.get("max_hit_points", 1)
+                    if new_hp <= max_hp // 5 and new_hp > 0:
+                        char_update["major_wound"] = True
+                    if new_hp <= 0:
+                        char_update["unconscious"] = True
+                    character_data = char_update
+
         logger.info(
             f"combat_node: {actor_name} {action} vs {target_name} "
             f"→ {'命中' if resolution.get('hit') else '未命中'}"
         )
 
-        return {
+        result = {
             "executed_actions": [{
                 "intent_id": f"intent_{idx}",
                 "intent_type": "COMBAT_ACTION",
@@ -182,6 +194,9 @@ async def combat_node(state: GameState) -> dict:
             "combat_active": True,
             "combat_round": state.get("combat_round", 0) + 1,
         }
+        if character_data and "hit_points" in character_data:
+            result["character"] = character_data
+        return result
 
     except Exception as e:
         logger.error(f"combat_node: 战斗裁决失败: {e}")
@@ -212,7 +227,7 @@ async def init_combat_node(state: GameState) -> dict:
     allies = intent_data.get("allies", [])
 
     # 添加角色
-    character_data = state.get("character")
+    character_data = get_current_player(state).get("character")
     if character_data and not any(c.get("name") == character_data.get("name") for c in combatants):
         combatants.append({
             "name": character_data.get("name", "调查员"),

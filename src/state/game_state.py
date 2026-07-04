@@ -1,8 +1,7 @@
 """
 @File     :   game_state.py
 @Desc     :   游戏全局状态定义 — LangGraph StateGraph 的核心 TypedDict
-@Note     :   所有 Node 函数的签名都是 async def node(state: GameState) -> dict
-             返回的 dict 被 LangGraph reducer 自动合并到 state 中
+@Note     :   players dict 为多玩家预留，单玩家时以 DEFAULT_PLAYER_ID 为键
 """
 
 from __future__ import annotations
@@ -10,108 +9,144 @@ from __future__ import annotations
 from typing import TypedDict, Optional, Any
 from src.tools.time import TimeSlot
 
+DEFAULT_PLAYER_ID = "default"
+"""单玩家模式下的默认玩家 ID，多玩家时替换为真实 user_id"""
+
+
+def _default_player_entry() -> dict:
+    """新建一个玩家槽的默认结构"""
+    return {
+        "character": None,
+        "current_location": "",
+        "pending_dice": None,
+        "npc_relations": {},
+        "current_npc": "",
+        "npc_dialogue": "",
+        "npc_dialogue_results": [],
+    }
+
+
+def get_player(state: dict, user_id: str = "") -> dict:
+    """
+    从 state 中获取指定玩家的数据。
+    user_id 为空时取 DEFAULT_PLAYER_ID。
+    不存在时自动创建默认槽，保证调用方不用做 None 检查。
+    """
+    uid = user_id or DEFAULT_PLAYER_ID
+    players = state.get("players", {})
+    if uid not in players:
+        players[uid] = _default_player_entry()
+        state["players"] = players
+    return players[uid]
+
+
+def get_current_player(state: dict) -> dict:
+    """
+    获取当前活跃玩家（单玩家模式下取唯一玩家）。
+    兼容多玩家扩展：后续可根据 user_id 路由。
+    """
+    return get_player(state, DEFAULT_PLAYER_ID)
+
 
 class ActionExecutionResult(TypedDict):
     """单步行动的独立局部裁决账单
 
-    由每个规则节点在串行循环中产出，按执行顺序追加到 executed_actions 列表。
+    由每个规则节点在串行循环中产出，按执行顺序追加。
     """
-    intent_id: str                      # 对应 intent_queue[idx] 的唯一标识
-    intent_type: str                    # "COMBAT_ACTION" | "PHYSICAL_INTERACT" | ...
-    rule_context: dict                  # 裁决结果: {roll_value, success_level, skill_name, ...}
-    deterministic_changes: dict         # 实体状态增量: {"character": {...}, "current_location": "..."}
-    raw_fixed_text: str                 # 模组预设的绝对线索文本（archivist 产出）
-    flavor_context: str                 # 玩家的 RP 修辞文本（透传至 narrate_node）
+    intent_id: str
+    intent_type: str
+    rule_context: dict
+    deterministic_changes: dict
+    raw_fixed_text: str
+    flavor_context: str
 
 
 class GameState(TypedDict):
     """游戏全局状态 — 所有 Node 的唯一数据源
 
-    修改规则:
-      - Node 只能通过返回 state_patch 请求修改
-      - Engine 调用 Reducer 合并 state_patch 到 state
-      - 每次修改都生成一条不可变 Event
+    players: {user_id: {character, current_location, pending_dice, ...}}
+    玩家独有数据在 players[uid] 内；世界共享数据在顶层。
     """
 
     # ── 会话标识 ──
-    session_id: str                     # 当前游戏会话 UUID
-
-    # ── 多通道路由 ──
-    platform: str                       # 消息来源平台: cli / onebot / web
-    channel_id: str                     # 群号 / 频道 ID
-    user_id: str                        # 用户标识
-    world_id: str                       # 世界标识（决定 LightRAG workspace + PG schema）
+    session_id: str
+    platform: str
+    channel_id: str
+    user_id: str
+    world_id: str
 
     # ── 会话元数据 ──
-    scenario_name: str                  # 当前模组/剧本名称
-    status: str                         # 会话状态: active / paused / completed
-    created_at: str                     # 会话创建时间 ISO
+    scenario_name: str
+    status: str
+    created_at: str
 
     # ── 游戏内时间 ──
-    time_slot: str                      # 当前时间段（TimeSlot 枚举值）
-    beat_counter: int                   # 节拍计数器（每次玩家输入 +1）
+    time_slot: str
+    beat_counter: int
 
     # ── 当前输入 ──
-    player_input: str                   # 玩家的原始输入文本
+    player_input: str
 
     # ── 多意图串行循环控制流 ──
-    intent_queue: list[dict]            # 由 intent_node 裂变的结构化意图数组
-    current_intent_idx: int             # 当前循环指针（0 起始）
-    executed_actions: list[dict]        # 顺序追加的 ActionExecutionResult 账单链
-    npc_dialogue_results: list[dict]    # NPC 对话结果列表
+    intent_queue: list[dict]
+    current_intent_idx: int
+    executed_actions: list[dict]
 
-    # ── 当前处理结果（旧字段，逐步迁移到循环控制流） ──
-    intent: Optional[dict]              # IntentNode 的输出（即将废弃）
-    resolution: Optional[dict]          # RuleNode 的输出（即将废弃）
-    physical_reality: str               # db_lookup_node 的物理现实 XML
-    world_context: str                  # LookupNode 的世界知识上下文
-    rag_context: str                    # rag_lookup_node 的语义知识 XML
-    archivist_result: Optional[dict]    # archivist_node 的线索查询结果
-    entity_name_map: dict               # db_lookup_node 的 NPC 显示名映射
-    narrative: str                      # NarratorNode 的叙事文本
+    # ── 当前处理结果 ──
+    intent: Optional[dict]
+    resolution: Optional[dict]
+    physical_reality: str
+    world_context: str
+    rag_context: str
+    archivist_result: Optional[dict]
+    entity_name_map: dict
+    narrative: str
 
     # ── 游戏控制 ──
-    game_phase: str                     # 游戏阶段: exploration / combat / dialogue
-    active_tags: list[str]              # 当前激活的全局标签（条件性内容解锁）
+    game_phase: str
+    active_tags: list[str]
 
-    # ── NPC 对话原文（由 npc_dialogue_node 写入，供 narrate_node 消费） ──
-    npc_dialogue: str                   # NPC 发言原文，narrate_node 不得改写
+    # ── 多玩家数据 ──
+    players: dict[str, dict]
+    """{user_id: {character, current_location, pending_dice, npc_relations, ...}}"""
 
-    # ── 角色数据 ──
-    character: Optional[dict]           # 调查员角色数据（由角色创建流程注入）
-    current_location: str               # 玩家当前所在场景 key
+    # ── 战斗状态（世界共享） ──
+    combat_active: bool
+    combat_round: int
+    combatants: list[dict]
 
-    # ── NPC 交互状态 ──
-    npc_relations: dict                 # NPC 关系追踪: {npc_name: {talk_count, disposition, last_talk}}
-    current_npc: str                    # 当前对话中的 NPC 名称
-
-    # ── 交互挂起 ──
-    pending_dice: Optional[dict]        # 等待玩家掷骰: {reason, skill_name, difficulty, bonus_dice, penalty_dice}
-
-    # ── 战斗状态 ──
-    combat_active: bool                 # 是否处于战斗轮
-    combat_round: int                   # 当前战斗轮次
-    combatants: list[dict]              # 参战方快照列表
-
-    # ── 实体对齐结果（由 disambiguation_node 写入） ──
-    resolved_targets: Optional[dict]    # {primary_id, secondary_id, target_type}
-    scene_npcs: list[str]               # 当前场景中的 NPC key 列表
-    attention_focus: Optional[dict]     # {recent_actors, recent_objects} LIFO 焦点栈
+    # ── 实体对齐结果 ──
+    resolved_targets: Optional[dict]
+    scene_npcs: list[str]
+    attention_focus: Optional[dict]
 
     # ── 状态审计缓冲区 ──
-    narrative_output: str               # narrator_node 最终纯文本（给 state_extractor 消费）
-    pending_tier1_events: list[dict]    # state_extractor 提取的 Tier 1 待处理事件
-    pending_tier2_facts: list[str]      # state_extractor 提取的 Tier 2 待写入事实
+    narrative_output: str
+    pending_tier1_events: list[dict]
+    pending_tier2_facts: list[str]
 
-    # ── 对话历史（跨轮累积，cap 20 轮） ──
-    dialogue_history: list[dict]        # [{"turn":N, "player":"...", "keeper":"..."}, ...]
+    # ── 对话历史 ──
+    dialogue_history: list[dict]
 
     # ── 运行时元数据 ──
-    errors: list[str]                   # 执行过程中的错误记录
-    node_trace: list[dict]              # 节点执行追踪日志
+    errors: list[str]
+    node_trace: list[dict]
 
 
 # ── 辅助函数 ──
+
+def _fresh_player_entry(uid: str) -> dict:
+    """构造初始玩家槽（与 _default_player_entry 同步）"""
+    return {
+        "character": None,
+        "current_location": "",
+        "pending_dice": None,
+        "npc_relations": {},
+        "current_npc": "",
+        "npc_dialogue": "",
+        "npc_dialogue_results": [],
+    }
+
 
 def create_initial_state(
     session_id: str,
@@ -122,14 +157,16 @@ def create_initial_state(
     user_id: str = "",
     world_id: str = "",
 ) -> GameState:
-    """构建初始游戏状态"""
+    """构建初始游戏状态，自动为当前玩家创建默认槽"""
     from datetime import datetime, timezone
+
+    uid = user_id or DEFAULT_PLAYER_ID
 
     return {
         "session_id": session_id,
         "platform": platform,
         "channel_id": channel_id,
-        "user_id": user_id,
+        "user_id": uid,
         "world_id": world_id,
         "scenario_name": scenario_name,
         "status": "active",
@@ -141,8 +178,7 @@ def create_initial_state(
         "intent_queue": [],
         "current_intent_idx": 0,
         "executed_actions": [],
-        "npc_dialogue_results": [],
-        # 当前处理结果（旧字段，兼容保留）
+        # 当前处理结果
         "intent": None,
         "resolution": None,
         "physical_reality": "",
@@ -152,23 +188,24 @@ def create_initial_state(
         "entity_name_map": {},
         "narrative": "",
         "narrative_output": "",
-        "npc_dialogue": "",
         "game_phase": "exploration",
-        "character": None,
-        "current_location": "",
-        "npc_relations": {},
-        "current_npc": "",
-        "active_tags": [],
-        "pending_dice": None,
+        # 多玩家
+        "players": {uid: _fresh_player_entry(uid)},
+        # 战斗状态
         "combat_active": False,
         "combat_round": 0,
         "combatants": [],
+        # 实体对齐
         "resolved_targets": None,
         "scene_npcs": [],
         "attention_focus": None,
+        # 审计缓冲区
         "pending_tier1_events": [],
         "pending_tier2_facts": [],
+        # 对话历史
         "dialogue_history": [],
+        # 运行时元数据
+        "active_tags": [],
         "errors": [],
         "node_trace": [],
     }
@@ -206,6 +243,56 @@ def create_state_view(state: GameState, view_keys: list[str]) -> dict:
     return {k: v for k, v in state.items() if k in view_keys}
 
 
+# ── 运行时字段归属 ──
+
+_PLAYER_LOCAL_FIELDS = {
+    "character", "current_location", "pending_dice",
+    "npc_relations", "current_npc", "npc_dialogue", "npc_dialogue_results",
+}
+"""运行时 Graph 执行中由 Nodes 写入、但实际应归属于 players[uid] 的顶层字段。
+   engine 执行后调用 rehome_player_fields() 将它们搬回正确的嵌套位置。"""
+
+
+def rehome_player_fields(state: dict, user_id: str = "") -> dict:
+    """
+    将 Graph 执行后散落在 state 顶层的玩家字段搬回 players[uid]。
+    先读后删，避免覆盖已在 players[uid] 中的值（以 players 内的值为准）。
+
+    在 engine.run() 末尾、返回结果前调用。
+    """
+    uid = user_id or DEFAULT_PLAYER_ID
+    players = state.setdefault("players", {})
+    player = players.setdefault(uid, _default_player_entry())
+
+    for field in _PLAYER_LOCAL_FIELDS:
+        if field in state:
+            # 只在 players[uid] 中该字段为 None/空 时才搬运
+            if field == "character":
+                if player.get("character") is None:
+                    player["character"] = state.pop(field, None)
+                else:
+                    # character 特殊处理：合并而非替换
+                    existing = player.get("character") or {}
+                    incoming = state.pop(field, {}) or {}
+                    if incoming:
+                        existing.update(incoming)
+                        player["character"] = existing
+            elif field == "npc_dialogue_results":
+                existing = player.get("npc_dialogue_results", [])
+                incoming = state.pop(field, []) or []
+                if incoming:
+                    player["npc_dialogue_results"] = existing + incoming
+            else:
+                # 一般字段：优先保留 players 中的值，不覆盖
+                if not player.get(field):
+                    player[field] = state.pop(field)
+                else:
+                    state.pop(field, None)
+
+    state["players"] = players
+    return state
+
+
 def is_loop_complete(state: GameState) -> bool:
     """判断多意图串行循环是否已完成
 
@@ -215,6 +302,6 @@ def is_loop_complete(state: GameState) -> bool:
 
 
 # 常用视图模板
-INTENT_VIEW = ["session_id", "player_input", "game_phase", "active_tags", "narrative", "character", "current_location"]
-RULE_VIEW = ["session_id", "intent", "game_phase", "active_tags", "combat_active", "combatants", "character", "resolved_targets", "scene_npcs"]
-NARRATE_VIEW = ["session_id", "intent", "resolution", "world_context", "narrative", "game_phase", "active_tags", "character", "current_location", "resolved_targets", "scene_npcs"]
+INTENT_VIEW = ["session_id", "player_input", "game_phase", "active_tags", "narrative", "players"]
+RULE_VIEW = ["session_id", "intent", "game_phase", "active_tags", "combat_active", "combatants", "players", "resolved_targets", "scene_npcs"]
+NARRATE_VIEW = ["session_id", "intent", "resolution", "world_context", "narrative", "game_phase", "active_tags", "players", "resolved_targets", "scene_npcs"]

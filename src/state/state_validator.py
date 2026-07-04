@@ -11,7 +11,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
-from src.state.game_state import GameState
+from src.state.game_state import GameState, get_current_player
 from src.tools import get_logger
 
 logger = get_logger(__name__)
@@ -106,7 +106,7 @@ class StateValidator:
         """校验物品状态变更事件"""
         item_id = payload.get("item_id", "")
         location = payload.get("location", "")
-        current_loc = state.get("current_location", "")
+        current_loc = get_current_player(state).get("current_location", "")
 
         # 存在性：item_id 不能为空
         if not item_id:
@@ -177,7 +177,7 @@ class StateValidator:
         """校验场景切换暗示事件"""
         from_loc = payload.get("from_location", "")
         to_loc = payload.get("to_location", "")
-        current_loc = state.get("current_location", "")
+        current_loc = get_current_player(state).get("current_location", "")
 
         if not from_loc or not to_loc:
             return ValidationResult(

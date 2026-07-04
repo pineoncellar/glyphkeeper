@@ -9,7 +9,7 @@
 from __future__ import annotations
 
 from typing import Optional
-from src.state.game_state import GameState
+from src.state.game_state import GameState, get_current_player
 from src.tools import get_logger
 
 import json
@@ -59,7 +59,7 @@ async def db_lookup_node(state: GameState) -> dict:
       透传 time_slot 和 game_phase 到 XML
       产出 scene_npcs / entity_name_map 供 disambiguation_node 消歧
     """
-    current_loc = state.get("current_location", "")
+    current_loc = get_current_player(state).get("current_location", "")
     time_slot = state.get("time_slot", "AFTERNOON")
     game_phase = state.get("game_phase", "exploration")
     EMPTY = {"physical_reality": "", "world_context": "", "scene_npcs": [], "entity_name_map": {}}

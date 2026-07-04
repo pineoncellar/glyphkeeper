@@ -22,7 +22,7 @@ from typing import Any, Optional
 
 from src.tools import get_logger
 from src.memory.event_store import EventStore
-from src.state.game_state import GameState, create_initial_state
+from src.state.game_state import GameState, create_initial_state, get_current_player
 
 logger = get_logger(__name__)
 
@@ -149,7 +149,7 @@ class ModuleLoader:
 
         # ── 修复：设置初始地点 ──
         if start_location_key:
-            state["current_location"] = start_location_key
+            get_current_player(state)["current_location"] = start_location_key
             logger.info(
                 f"ModuleLoader: 初始位置 '{start_location_key}' 已设置"
             )

@@ -12,9 +12,11 @@ from __future__ import annotations
 
 import asyncio
 import sys
+from pathlib import Path
 from typing import Any, Optional
 import os
 
+from src.state.game_state import get_current_player
 from src.tools import get_logger
 from src.runtime.engine import GraphEngine
 from src.runtime.scheduler import InputScheduler
@@ -31,6 +33,10 @@ from src.workers.memorizer_worker import MemorizerWorker
 from src.workers.world_summarizer import WorldSummarizer
 from src.workers.background_sync import BackgroundSync
 from src.tools.config import get_settings
+from src.tools.card_importer import (
+    import_from_xlsx, search_cards_dir,
+    ensure_cards_dir, is_path_like,
+)
 
 logger = get_logger(__name__)
 
@@ -152,30 +158,45 @@ class CliAdapter(AbstractAdapter):
     # ── 角色创建向导 ──
 
     async def _character_creation_wizard(self) -> Character:
-        """互动式调查员角色创建向导"""
+        """互动式调查员角色创建向导：身份信息、职业、属性、技能、背景、法术"""
         print()
         print(_color("═" * 50, _CYAN))
-        print(_color("         🎭 调查员角色创建", _BOLD))
+        print(_color("         ", _BOLD) + _color("🎭 调查员角色创建", _BOLD))
         print(_color("═" * 50, _CYAN))
         print()
 
-        # 先输入调查员姓名
+        # ── 身份信息 ──
         name = ""
         while not name.strip():
             raw = await asyncio.get_event_loop().run_in_executor(
                 None, lambda: input(f"{_color('姓名', _GREEN)} > ")
             )
             name = raw.strip()
+        gender = await asyncio.get_event_loop().run_in_executor(
+            None, lambda: input(f"{_color('性别', _GREEN)} > ")
+        )
+        gender = gender.strip()
+        age_str = await asyncio.get_event_loop().run_in_executor(
+            None, lambda: input(f"{_color('年龄', _GREEN)} > ")
+        )
+        age = 0
+        try:
+            age = max(0, int(age_str.strip()))
+        except ValueError:
+            pass
+        birthplace = await asyncio.get_event_loop().run_in_executor(
+            None, lambda: input(f"{_color('出生地', _GREEN)} > ")
+        )
+        birthplace = birthplace.strip()
         print()
 
-        # 再让玩家从职业模板中选择
+        # ── 职业选择 ──
         print(_color("─ 选择职业 ───────────────────────", _BOLD))
         for i, occ in enumerate(OCCUPATIONS, 1):
             print(f"  {i:>2}. {_color(occ.name, _CYAN)}")
             print(f"      {occ.description}")
-            print(f"      本职技能: {', '.join(occ.skills[:4])}{' …' if len(occ.skills) > 4 else ''}")
+            print(f"      本职技能: {', '.join(occ.skills[:4])}{' ...' if len(occ.skills) > 4 else ''}")
         print()
-
         occ_idx = 0
         while not (1 <= occ_idx <= len(OCCUPATIONS)):
             raw = await asyncio.get_event_loop().run_in_executor(
@@ -189,7 +210,7 @@ class CliAdapter(AbstractAdapter):
         print(f"\n  已选择: {_color(occupation.name, _CYAN)}")
         print()
 
-        # 然后进入属性骰点环节
+        # ── 属性骰点 ──
         stats = None
         print(_color("─ 属性骰点 ───────────────────────", _BOLD))
         while True:
@@ -206,7 +227,7 @@ class CliAdapter(AbstractAdapter):
                 break
             print()
 
-        # 确定属性后分配职业技能点
+        # ── 职业技能分配 ──
         print()
         print(_color("─ 职业技能分配 ───────────────────", _BOLD))
         total_occ_pts = calculate_skill_points(occupation, stats)
@@ -214,49 +235,92 @@ class CliAdapter(AbstractAdapter):
         print(f"  职业技能点: {_color(str(total_occ_pts), _YELLOW)} ({occupation.skill_points_formula})")
         print(f"  信用评级范围: {credit_min}-{credit_max}")
         print()
-
         occ_skills = {}
         base_skills = _get_base_skill_values(stats)
         per_skill_base = total_occ_pts // len(occupation.skills)
-
         for skill_name in occupation.skills:
             base = base_skills.get(skill_name, 1)
             allocated = per_skill_base
-            prompt_text = f"  {skill_name} (基础{base}, 已分配+{allocated}={base+allocated})"
-            print(prompt_text)
-
-            # 信用评级特殊处理：限制在职业范围
+            print(f"  {skill_name} (基础{base}, 已分配+{allocated}={base+allocated})")
             if skill_name == "信用评级":
                 allocated = max(0, min(allocated, credit_max))
                 allocated = max(credit_min, allocated)
-
             occ_skills[skill_name] = base + allocated
-
-        # 节省未用尽的点数（加到第一个技能）
         used = sum(occ_skills.values()) - sum(base_skills.get(s, 1) for s in occupation.skills)
         leftover = total_occ_pts - used
         if leftover > 0 and occupation.skills:
             first_skill = occupation.skills[0]
             occ_skills[first_skill] = occ_skills.get(first_skill, base_skills.get(first_skill, 1)) + leftover
 
-        # 兴趣技能点
+        # ── 兴趣技能点 ──
         print()
         print(_color("─ 兴趣技能 ───────────────────────", _BOLD))
         interest_pts = calculate_interest_points(stats)
-        print(f"  兴趣技能点: {_color(str(interest_pts), _YELLOW)} (INT×2 = {stats.intelligence}×2)")
+        print(f"  兴趣技能点: {_color(str(interest_pts), _YELLOW)} (INTx2 = {stats.intelligence}x2)")
         print()
 
-        # 显示完整角色
-        character = create_investigator(name, occupation.name, stats, occ_skills)
+        # ── 背景故事（经典七大项，均可跳过） ──
+        print(_color("─ 背景故事 ───────────────────────", _DIM))
+        print(_color("  直接回车跳过该项", _DIM))
+        appearance_desc = (await asyncio.get_event_loop().run_in_executor(
+            None, lambda: input(f"  形象描述 > ")
+        )).strip()
+        belief = (await asyncio.get_event_loop().run_in_executor(
+            None, lambda: input(f"  思想与信念 > ")
+        )).strip()
+        significant_person = (await asyncio.get_event_loop().run_in_executor(
+            None, lambda: input(f"  重要之人 > ")
+        )).strip()
+        significant_place = (await asyncio.get_event_loop().run_in_executor(
+            None, lambda: input(f"  意义非凡之地 > ")
+        )).strip()
+        cherished_possession = (await asyncio.get_event_loop().run_in_executor(
+            None, lambda: input(f"  宝贵之物 > ")
+        )).strip()
+        trait = (await asyncio.get_event_loop().run_in_executor(
+            None, lambda: input(f"  特质 > ")
+        )).strip()
+        injury_scar = (await asyncio.get_event_loop().run_in_executor(
+            None, lambda: input(f"  伤口和疤痕 > ")
+        )).strip()
+        print()
 
-        # 最后完成角色创建
+        # ── 法术（可选列表） ──
+        print(_color("─ 法术 ───────────────────────────", _DIM))
+        print(_color("  直接回车结束输入", _DIM))
+        spells = []
+        while True:
+            spell_name = (await asyncio.get_event_loop().run_in_executor(
+                None, lambda: input(f"  法术名称（回车结束） > ")
+            )).strip()
+            if not spell_name:
+                break
+            spell_cost = (await asyncio.get_event_loop().run_in_executor(
+                None, lambda: input(f"    消耗代价 > ")
+            )).strip()
+            spell_effect = (await asyncio.get_event_loop().run_in_executor(
+                None, lambda: input(f"    效果简述 > ")
+            )).strip()
+            spells.append({"name": spell_name, "cost": spell_cost, "effect": spell_effect})
+        print()
+
+        # ── 创建角色 ──
+        character = create_investigator(
+            name, occupation.name, stats, occ_skills,
+            gender=gender, age=age, birthplace=birthplace,
+            appearance_desc=appearance_desc, belief=belief,
+            significant_person=significant_person, significant_place=significant_place,
+            cherished_possession=cherished_possession, trait=trait, injury_scar=injury_scar,
+            spells=spells,
+        )
+
         self._character = character
         if self._player_loader:
             await self._player_loader.save(self.session_id, character)
 
         print()
         print(_color("═" * 50, _GREEN))
-        print(_color(f"  ✅ 调查员 [{character.name}] 创建完成！", _BOLD))
+        print(_color(f"  ", _BOLD) + _color(f"调查员 [{character.name}] 创建完成！", _BOLD))
         print(_color("═" * 50, _GREEN))
         print()
         self._show_character_sheet(character)
@@ -264,22 +328,44 @@ class CliAdapter(AbstractAdapter):
         return character
 
     def _show_character_sheet(self, char: Optional[Character] = None):
-        """显示调查员属性卡"""
+        """显示调查员属性卡（全量版）"""
         c = char or self._character
         if c is None:
             print(_color("⚠️  未创建角色", _YELLOW))
             return
         s = c.stats.to_dict()
+        # ── 头部：身份信息 ──
         print(_color("┌─────────────────────────────────────────────────┐", _BOLD))
-        print(_color(f"  姓名: {c.name:<20s}  职业: {c.occupation:<12s}", _CYAN))
+        header = f"  {c.name:<16s} {c.occupation:<12s}"
+        if c.gender or c.age:
+            header += f"  {c.gender or ''} {c.age or ''}岁"
+        print(_color(header, _CYAN))
+        if c.birthplace:
+            print(_color(f"  出生地: {c.birthplace}", _DIM))
         print(_color(f"───────────────────────────────────────────────────", _DIM))
+        # ── 八大属性 ──
         print(f"  STR:{s['STR']:>3}  CON:{s['CON']:>3}  SIZ:{s['SIZ']:>3}  DEX:{s['DEX']:>3}")
         print(f"  APP:{s['APP']:>3}  INT:{s['INT']:>3}  POW:{s['POW']:>3}  EDU:{s['EDU']:>3}")
+        # ── 状态池 ──
         print(f"───────────────────────────────────────────────────")
-        print(f"  HP:{c.hit_points:>2}/{c.max_hit_points:>2}  SAN:{c.sanity:>2}/{c.max_sanity:>2}  MP:{c.magic_points:>2}/{c.max_magic_points:>2}")
+        hp_line = f"  HP:{c.hit_points:>2}/{c.max_hit_points:>2}"
+        if c.major_wound:
+            hp_line += _color(" [重伤]", _RED)
+        if c.unconscious:
+            hp_line += _color(" [昏迷]", _RED)
+        if c.dying:
+            hp_line += _color(" [濒死]", _RED)
+        print(hp_line)
+        san_str = f"  SAN:{c.sanity:>3}/{c.max_sanity:>3} (初始{c.initial_sanity})"
+        if c.temp_insanity:
+            san_str += _color(" [临时疯狂]", _RED)
+        if c.indefinite_insanity:
+            san_str += _color(" [不定性疯狂]", _RED)
+        print(san_str)
+        print(f"  MP:{c.magic_points:>2}/{c.max_magic_points:>2}  Luck:{c.luck:>3}")
         print(f"  DB:{c.damage_bonus:>4s}  Build:{c.build:>2}  MOV:{c.move:>2}  Armor:{c.armor:>2}")
         print()
-        # 显示重要技能
+        # 显示关键技能
         key_skills = ["侦查", "聆听", "图书馆利用", "潜行", "斗殴", "闪避", "信用评级", "急救"]
         print(_color(f"  关键技能:", _DIM))
         parts = []
@@ -287,9 +373,42 @@ class CliAdapter(AbstractAdapter):
             val = c.skills.get(sk, 0)
             val_str = _color(f"{val:>3}", _GREEN) if val >= 50 else str(val)
             parts.append(f"  {sk}:{val_str}")
-        # 每行4个
         for i in range(0, len(parts), 3):
             print(" " + "".join(parts[i:i+3]))
+        # 背包
+        if c.inventory:
+            print()
+            print(_color(f"  背包 ({len(c.inventory)} 件):", _DIM))
+            for it in c.inventory:
+                name = it if isinstance(it, str) else it.get("name", str(it))
+                qty = ""
+                if isinstance(it, dict):
+                    q = it.get("quantity", 1)
+                    qty = f" x{q}" if q > 1 else ""
+                print(f"    {name}{qty}")
+        # 背景摘要
+        has_bg = any([
+            c.appearance_desc, c.belief, c.significant_person,
+            c.significant_place, c.cherished_possession, c.trait, c.injury_scar,
+        ])
+        if has_bg:
+            print()
+            print(_color(f"  背景:", _DIM))
+            if c.appearance_desc:
+                print(f"    形象: {c.appearance_desc[:40]}{'...' if len(c.appearance_desc) > 40 else ''}")
+            if c.belief:
+                print(f"    信念: {c.belief[:40]}{'...' if len(c.belief) > 40 else ''}")
+            if c.significant_person:
+                print(f"    重要之人: {c.significant_person[:40]}{'...' if len(c.significant_person) > 40 else ''}")
+            if c.significant_place:
+                print(f"    意义之地: {c.significant_place[:40]}{'...' if len(c.significant_place) > 40 else ''}")
+        # 法术
+        if c.spells:
+            print()
+            print(_color(f"  法术 ({len(c.spells)} 个):", _DIM))
+            for sp in c.spells:
+                cost = f" [{sp.get('cost', '')}]" if sp.get("cost") else ""
+                print(f"    {sp.get('name', '?')}{cost}")
         print(_color("└─────────────────────────────────────────────────┘", _BOLD))
 
     # ── 主循环 ──
@@ -329,6 +448,7 @@ class CliAdapter(AbstractAdapter):
                     "/start", "/load", "/list", "/saves", "/save",
                     "/modules", "/ingest", "/debug", "/d",
                     "/scene", "/sc", "/worlds",
+                    "/import", "/cards", "/card", "/delete",
                 )
                 if msg.type == MessageType.PLAYER_INPUT or not any(
                     lower.startswith(a) for a in allowed
@@ -407,6 +527,22 @@ class CliAdapter(AbstractAdapter):
                 await self.send(out)
                 continue
 
+            # 处理 /cards — 列出种子卡库
+            if msg.type == MessageType.SYSTEM_CMD and msg.text.strip().lower() in ("/cards",):
+                out = await self._handle_cards_cmd(self.session_id)
+                await self.send(out)
+                print()
+                continue
+
+            # 处理 /card <名称> — 查看种子卡详情
+            if msg.type == MessageType.SYSTEM_CMD and msg.text.strip().lower().startswith("/card"):
+                out = await self._handle_card_detail_cmd(msg.text.strip(), self.session_id)
+                await self.send(out)
+                if out.type == MessageType.SESSION_INFO:
+                    print()
+                print()
+                continue
+
             # 处理 /ingest（不是游戏回合）
             if msg.type == MessageType.SYSTEM_CMD and msg.text.strip().lower().startswith("/ingest"):
                 out = await self.handle(msg)
@@ -418,6 +554,26 @@ class CliAdapter(AbstractAdapter):
             if msg.type == MessageType.SYSTEM_CMD and msg.text.strip().lower().startswith("/rollback"):
                 out = await self._handle_rollback_cmd(msg.text.strip(), self.session_id)
                 await self.send(out)
+                print()
+                continue
+
+            # 处理 /delete — 删除种子卡
+            if msg.type == MessageType.SYSTEM_CMD and msg.text.strip().lower().startswith("/delete"):
+                out = await self._handle_delete_card_cmd(msg.text.strip(), self.session_id)
+                await self.send(out)
+                print()
+                continue
+
+            # 处理 /import — 从 Excel 角色卡导入调查员
+            if msg.type == MessageType.SYSTEM_CMD and msg.text.strip().lower().startswith("/import"):
+                out = await self._handle_import_cmd(msg.text.strip(), self.session_id)
+                await self.send(out)
+                if out.type == MessageType.SESSION_INFO:
+                    # 导入成功后显示角色卡
+                    char_name = out.data.get("character_name", "")
+                    if char_name:
+                        print()
+                        self._show_character_sheet()
                 print()
                 continue
 
@@ -465,29 +621,286 @@ class CliAdapter(AbstractAdapter):
     # 游戏生命周期
     # ================================================================
 
+    async def _handle_import_cmd(self, cmd: str, session_id: str) -> OutboundMessage:
+        """处理 /import <名称> — 从 cards 目录或指定路径导入角色卡
+
+        名称搜索逻辑：
+          含路径分隔符或扩展名 → 当文件路径处理
+          否则 → 在 data/cards/ 目录模糊匹配文件名
+        """
+        parts = cmd.split(maxsplit=1)
+        if len(parts) < 2:
+            cards_dir = ensure_cards_dir()
+            return OutboundMessage.system_msg(
+                "用法:\n"
+                f"  /import 费莉西蒂       从 {cards_dir.name}/ 搜索名称\n"
+                f"  /import ./卡片.xlsx     直接指定路径\n"
+                "导入后可用 /start 开始游戏。",
+                level="warn", session_id=session_id,
+            )
+
+        raw = parts[1].strip("\"'").strip()
+
+        # 确定目标文件路径
+        if is_path_like(raw):
+            path = Path(raw)
+            if not path.is_absolute():
+                path = Path.cwd() / raw
+        else:
+            # 模糊搜索 cards 目录
+            hits = search_cards_dir(raw)
+            if len(hits) == 0:
+                cards_dir = ensure_cards_dir()
+                return OutboundMessage.system_msg(
+                    f"在 {cards_dir}/ 中未找到包含「{raw}」的 .xlsx 文件。\n"
+                    f"请先将角色卡放入 {cards_dir}/ 目录，再使用 /import 导入。",
+                    level="error", session_id=session_id,
+                )
+            if len(hits) > 1:
+                lines = [f"找到多张匹配的角色卡:"]
+                for h in hits:
+                    lines.append(f"  {h.name}")
+                lines.append("请使用更精确的名称，或直接指定完整路径。")
+                return OutboundMessage.system_msg(
+                    "\n".join(lines),
+                    level="warn", session_id=session_id,
+                )
+            path = hits[0]
+
+        # 校验文件存在和格式
+        if not path.exists():
+            return OutboundMessage.system_msg(
+                f"文件未找到: {path}",
+                level="error", session_id=session_id,
+            )
+        if path.suffix.lower() not in (".xlsx", ".xls"):
+            return OutboundMessage.system_msg(
+                f"不支持的文件格式: {path.suffix}，请使用 .xlsx 文件。",
+                level="warn", session_id=session_id,
+            )
+
+        # 执行导入
+        try:
+            loop = asyncio.get_event_loop()
+            char = await loop.run_in_executor(None, import_from_xlsx, str(path))
+        except Exception as e:
+            logger.error(f"角色卡导入失败: {e}", exc_info=True)
+            return OutboundMessage.system_msg(
+                f"角色卡解析失败: {type(e).__name__}: {e}\n"
+                f"请确认文件是骰子工厂格式的角色卡。",
+                level="error", session_id=session_id,
+            )
+
+        # 保存为种子卡（独立于会话，/start 时拷贝到世界）
+        if self._player_loader is None:
+            self._player_loader = CharacterStore()
+        card_name = char.name
+        try:
+            await self._player_loader.save_card(card_name, char)
+        except Exception as e:
+            return OutboundMessage.system_msg(
+                f"种子卡保存失败: {e}", level="error", session_id=session_id,
+            )
+
+        self._character = char
+        logger.info("种子卡已入库: %s", card_name)
+
+        return OutboundMessage(
+            type=MessageType.SESSION_INFO,
+            text=f"调查员 [{char.name}] 已导入种子卡库！\n"
+                 f"使用 /cards 查看所有卡片，/start <模组名> 开始游戏时选择此卡。",
+            session_id=session_id,
+            data={
+                "character_name": char.name,
+                "occupation": char.occupation,
+                "note": "衍生属性已按系统规则自动重算",
+            },
+        )
+
+    # ================================================================
+    # 种子卡库管理
+    # ================================================================
+
+    async def _handle_cards_cmd(self, session_id: str) -> OutboundMessage:
+        """处理 /cards — 列出种子卡库中的所有角色"""
+        if self._player_loader is None:
+            self._player_loader = CharacterStore()
+        try:
+            cards = await self._player_loader.list_cards()
+        except Exception as e:
+            return OutboundMessage.system_msg(
+                f"读取种子卡库失败: {e}", level="error", session_id=session_id,
+            )
+
+        if not cards:
+            return OutboundMessage.system_msg(
+                "种子卡库为空。使用 /import 从 xlsx 文件导入角色卡。",
+                session_id=session_id,
+            )
+
+        lines = [f"种子卡库 ({len(cards)} 张):"]
+        for c in cards:
+            cname = c.get("character_name", c.get("card_name", "?"))
+            occ = c.get("occupation", "")
+            ts = str(c.get("saved_at", ""))[:19]
+            suffix = f" ({occ})" if occ else ""
+            lines.append(f"  {cname}{suffix}  [{ts}]")
+        lines.append("使用 /card <名称> 查看详情，/start 时选择卡片开始游戏。")
+        return OutboundMessage.system_msg("\n".join(lines), session_id=session_id)
+
+    async def _handle_card_detail_cmd(self, cmd: str, session_id: str) -> OutboundMessage:
+        """处理 /card <名称> — 查看种子卡完整属性"""
+        parts = cmd.split(maxsplit=1)
+        if len(parts) < 2:
+            return OutboundMessage.system_msg(
+                "用法: /card <角色名>\n使用 /cards 查看所有可用卡片。",
+                level="warn", session_id=session_id,
+            )
+
+        card_name = parts[1].strip()
+        if self._player_loader is None:
+            self._player_loader = CharacterStore()
+        try:
+            char = await self._player_loader.load_card(card_name)
+        except Exception as e:
+            return OutboundMessage.system_msg(
+                f"加载种子卡失败: {e}", level="error", session_id=session_id,
+            )
+
+        if char is None:
+            return OutboundMessage.system_msg(
+                f"未找到种子卡「{card_name}」。使用 /cards 查看所有可用卡片。",
+                level="warn", session_id=session_id,
+            )
+
+        self._character = char
+        self._show_character_sheet(char)
+        # 返回普通系统消息，避免触发会话状态面板渲染
+        return OutboundMessage.system_msg(
+            f"种子卡 [{char.name} ({char.occupation})]  -- 使用 /start 开始游戏时选择此卡",
+            session_id=session_id,
+        )
+
+    async def _handle_delete_card_cmd(self, cmd: str, session_id: str) -> OutboundMessage:
+        """处理 /delete <名称> — 从种子卡库删除角色卡"""
+        parts = cmd.split(maxsplit=1)
+        if len(parts) < 2:
+            return OutboundMessage.system_msg(
+                "用法: /delete <角色名>\n使用 /cards 查看所有可用卡片。",
+                level="warn", session_id=session_id,
+            )
+
+        card_name = parts[1].strip()
+        if self._player_loader is None:
+            self._player_loader = CharacterStore()
+
+        if not await self._player_loader.card_exists(card_name):
+            return OutboundMessage.system_msg(
+                f"未找到种子卡「{card_name}」。使用 /cards 查看所有可用卡片。",
+                level="warn", session_id=session_id,
+            )
+
+        # 先加载展示一下，让用户确认
+        char = await self._player_loader.load_card(card_name)
+        brief = f"{char.name} ({char.occupation})" if char else card_name
+        raw = await asyncio.get_event_loop().run_in_executor(
+            None, lambda: input(
+                f"  确认删除 {_color(brief, _YELLOW)}? {_color('(y/N)', _GREEN)} > "
+            )
+        )
+        if raw.strip().lower() not in ("y", "yes", "是"):
+            return OutboundMessage.system_msg("已取消删除。", session_id=session_id)
+
+        await self._player_loader.delete_card(card_name)
+        logger.info("种子卡已删除: %s", card_name)
+        return OutboundMessage.system_msg(
+            f"种子卡「{brief}」已删除。", session_id=session_id,
+        )
+
+    async def _pick_card_interactive(self) -> Optional[Character]:
+        """交互式从种子卡库选择角色，返回选中的 Character 或 None"""
+        if self._player_loader is None:
+            self._player_loader = CharacterStore()
+        cards = await self._player_loader.list_cards()
+        if not cards:
+            print(_color("  种子卡库为空。", _YELLOW))
+            return None
+
+        print()
+        print(_color("─ 种子卡库 ───────────────────────", _BOLD))
+        for i, c in enumerate(cards, 1):
+            cname = c.get("character_name", c.get("card_name", f"card_{i}"))
+            occ = c.get("occupation", "")
+            suffix = f" ({occ})" if occ else ""
+            print(f"  {i:>2}. {_color(cname, _CYAN)}{suffix}")
+        print()
+
+        while True:
+            raw = await asyncio.get_event_loop().run_in_executor(
+                None, lambda: input(f"  {_color('选择角色编号', _GREEN)} (1-{len(cards)}) > ")
+            )
+            try:
+                idx = int(raw.strip()) - 1
+                if 0 <= idx < len(cards):
+                    break
+            except ValueError:
+                pass
+
+        entry = cards[idx]
+        card_name = entry.get("card_name") or entry.get("session_id", "")
+        if card_name.startswith("__card__"):
+            card_name = card_name[len("__card__"):]
+        char = await self._player_loader.load_card(card_name)
+        if char:
+            print(f"  已选择: {_color(char.name, _CYAN)} ({char.occupation})")
+        return char
+
     async def _handle_start_cmd(self, cmd: str, session_id: str, msg: Optional[InboundMessage] = None) -> OutboundMessage:
         """处理 /start [模组名] — 创建角色 + 加载模组开始游戏。
 
-        覆盖 base._handle_start_cmd，在加载模组之前先创建/选择角色。
+        角色来源优先级：已有会话角色 > 种子卡库 > 新建角色向导。
         """
         # ── 角色创建/选择 ──
-        exists = await self._player_loader.exists(session_id) if self._player_loader else False
+        if self._player_loader is None:
+            self._player_loader = CharacterStore()
+
+        exists = await self._player_loader.exists(session_id)
         if exists:
             loaded = await self._player_loader.load(session_id)
             if loaded:
                 print(_color(f"\n  检测到已有角色: {loaded.name} ({loaded.occupation})", _DIM))
                 raw = await asyncio.get_event_loop().run_in_executor(
-                    None, lambda: input(f"  {_color('使用此角色(v) / 新建(r)', _GREEN)} > ")
+                    None, lambda: input(
+                        f"  {_color('使用此角色(v) / 新建(r) / 从种子卡库选(c)', _GREEN)} > "
+                    )
                 )
-                if raw.strip().lower() in ("r", "重建", "新建"):
+                choice = raw.strip().lower()
+                if choice in ("r", "重建", "新建"):
                     self._character = await self._character_creation_wizard()
                     if self._player_loader:
                         await self._player_loader.save(session_id, self._character)
+                elif choice in ("c", "卡", "种子"):
+                    self._character = await self._pick_card_interactive()
                 else:
                     self._character = loaded
         else:
-            self._character = await self._character_creation_wizard()
-            if self._player_loader:
+            # 没有会话角色时，先问是否从种子卡库选
+            cards = await self._player_loader.list_cards()
+            if cards:
+                print(_color(f"\n  种子卡库有 {len(cards)} 张可用角色卡", _DIM))
+                raw = await asyncio.get_event_loop().run_in_executor(
+                    None, lambda: input(
+                        f"  {_color('从种子卡库选(c) / 新建角色(r)', _GREEN)} > "
+                    )
+                )
+                if raw.strip().lower() in ("c", "卡", "种子"):
+                    self._character = await self._pick_card_interactive()
+                else:
+                    self._character = await self._character_creation_wizard()
+            else:
+                self._character = await self._character_creation_wizard()
+
+            if self._character and self._player_loader:
                 await self._player_loader.save(session_id, self._character)
 
         # ── 加载模组（委托给 base 类） ──
@@ -506,7 +919,81 @@ class CliAdapter(AbstractAdapter):
             from dataclasses import asdict
             slot = self._scheduler.get_session(session_id)
             if slot:
-                slot.state["character"] = asdict(self._character)
+                char_dict = asdict(self._character)
+                get_current_player(slot.state)["character"] = char_dict
+
+                # ── 角色背景 → LightRAG ──
+                try:
+                    backstory_parts = []
+                    if self._character.appearance_desc:
+                        backstory_parts.append(f"形象描述：{self._character.appearance_desc}")
+                    if self._character.belief:
+                        backstory_parts.append(f"思想与信念：{self._character.belief}")
+                    if self._character.significant_person:
+                        backstory_parts.append(f"重要之人：{self._character.significant_person}")
+                    if self._character.significant_place:
+                        backstory_parts.append(f"意义非凡之地：{self._character.significant_place}")
+                    if self._character.cherished_possession:
+                        backstory_parts.append(f"宝贵之物：{self._character.cherished_possession}")
+                    if self._character.trait:
+                        backstory_parts.append(f"特质：{self._character.trait}")
+                    if self._character.injury_scar:
+                        backstory_parts.append(f"伤口和疤痕：{self._character.injury_scar}")
+                    if self._character.phobias_manias:
+                        backstory_parts.append(f"恐惧症和躁狂症：{self._character.phobias_manias}")
+                    # 完整背景故事作为独立文档导入（非摘要，保留叙事性）
+                    if self._character.full_backstory:
+                        backstory_parts.append(f"完整背景故事：\n{self._character.full_backstory}")
+                    if backstory_parts:
+                        from src.memory.vector_store import VectorStore
+                        world_id = slot.state.get("world_id", "")
+                        vs = await VectorStore.get_instance(domain="world", world_id=world_id)
+                        backstory_doc = (
+                            f"【调查员背景】{self._character.name}的人设信息\n"
+                            + "\n".join(backstory_parts)
+                        )
+                        await vs.insert(
+                            [{"content": backstory_doc, "source_type": "character_backstory"}],
+                            source_type="character_backstory",
+                        )
+                        logger.info(f"角色背景已导入 RAG (world={world_id})")
+
+                    # 法术也导入 RAG
+                    if self._character.spells:
+                        spell_lines = []
+                        for sp in self._character.spells:
+                            cost = f" 消耗: {sp.get('cost', '')}" if sp.get("cost") else ""
+                            effect = f" 效果: {sp.get('effect', '')}" if sp.get("effect") else ""
+                            spell_lines.append(f"- {sp.get('name', '?')}{cost}{effect}")
+                        spell_doc = (
+                            f"【调查员法术】{self._character.name}掌握的法术\n"
+                            + "\n".join(spell_lines)
+                        )
+                        await vs.insert(
+                            [{"content": spell_doc, "source_type": "character_spells"}],
+                            source_type="character_spells",
+                        )
+                        logger.info(f"角色法术已导入 RAG (world={world_id})")
+                except Exception as e:
+                    logger.warning(f"角色数据导入 RAG 失败: {e}")
+
+                # ── 记录 CharacterImported 事件 ──
+                try:
+                    from src.memory.event_store import create_event_store
+                    es = await create_event_store()
+                    await es.append(
+                        session_id=session_id,
+                        event_type="CharacterImported",
+                        data={
+                            "character": char_dict,
+                            "start_location": get_current_player(slot.state).get("current_location", ""),
+                            "world_id": world_id,
+                        },
+                        source_node="cli_adapter",
+                    )
+                    logger.info(f"CharacterImported 事件已记录 (session={session_id[:8]})")
+                except Exception as e:
+                    logger.warning(f"CharacterImported 事件记录失败: {e}")
 
         self._game_started = True
         return result
@@ -678,7 +1165,7 @@ class CliAdapter(AbstractAdapter):
         if not state:
             return
 
-        pending = state.get("pending_dice")
+        pending = get_current_player(state).get("pending_dice")
         if not pending:
             return
 
@@ -900,7 +1387,7 @@ class CliAdapter(AbstractAdapter):
 
         # 获取回滚后的 state 信息
         new_state = self._scheduler.get_session_state(session_id)
-        location = new_state.get("current_location", "") if new_state else ""
+        location = get_current_player(new_state).get("current_location", "") if new_state else ""
         phase = new_state.get("game_phase", "") if new_state else ""
         info = f"  当前位置: {location}" if location else ""
         if phase:
@@ -991,9 +1478,9 @@ class CliAdapter(AbstractAdapter):
             # 写入 scheduler 当前会话
             if self._scheduler:
                 # 若存档中无角色数据（旧存档），用当前角色兜底
-                if not restored_state.get("character") and self._character:
+                if not get_current_player(restored_state).get("character") and self._character:
                     from dataclasses import asdict
-                    restored_state["character"] = asdict(self._character)
+                    get_current_player(restored_state)["character"] = asdict(self._character)
                 # 使用 msg 中的 routing 信息，确保 key 与玩家当前会话一致
                 platform = msg.platform if msg else "cli"
                 channel_id = msg.channel_id if msg else ""
@@ -1005,7 +1492,7 @@ class CliAdapter(AbstractAdapter):
                     world_id=world_id,
                 )
                 # 恢复角色引用
-                char_data = restored_state.get("character")
+                char_data = get_current_player(restored_state).get("character")
                 if char_data and self._player_loader:
                     from src.state.player_state import _dict_to_character
                     loaded_char = _dict_to_character(char_data)
@@ -1188,7 +1675,7 @@ class CliAdapter(AbstractAdapter):
         items = []
 
         if state:
-            char = state.get("character") or {}
+            char = get_current_player(state).get("character") or {}
             items = char.get("inventory", [])
 
         if not items:
@@ -1215,7 +1702,7 @@ class CliAdapter(AbstractAdapter):
         if state is None:
             return OutboundMessage.system_msg("当前无活跃会话", level="warn", session_id=session_id)
 
-        current_loc = state.get("current_location", "")
+        current_loc = get_current_player(state).get("current_location", "")
         if not current_loc:
             return OutboundMessage.system_msg(
                 "尚未设置初始地点（未开始游戏或模组未加载）。",
@@ -1350,13 +1837,12 @@ class CliAdapter(AbstractAdapter):
         # 移除 node_trace（太长）和 character 技能详情
         debug_state = dict(state)
         debug_state.pop("node_trace", None)
-        char = debug_state.get("character")
+        char = get_current_player(debug_state).get("character")
         if char and isinstance(char, dict):
             char_copy = dict(char)
             if "skills" in char_copy:
-                # 只显示技能数量而非全部列表
                 char_copy["skills"] = f"<{len(char_copy['skills'])} 项技能>"
-            debug_state["character"] = char_copy
+            get_current_player(debug_state)["character"] = char_copy
 
         text = json.dumps(debug_state, ensure_ascii=False, indent=2, default=str)
         # 截断过长输出
