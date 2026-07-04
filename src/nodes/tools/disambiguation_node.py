@@ -46,7 +46,6 @@ _INTENT_TARGET_MAP: dict[str, str] = {
     "MOVE": "location",                  # 移动 → locations.exits 映射表
     "COMBAT_ACTION": "npc",             # 战斗 → recent_actors 焦点栈 + 场景 NPC
     "SOCIAL_INTERACT": "npc",           # 对话 → 同上
-    "USE_ITEM": "inventory_item",       # 使用物品 → 玩家背包
     "META": "none",                     # 元操作无需消歧
 }
 
@@ -144,13 +143,6 @@ async def _build_candidates(
                             "name": f"{_dir}({loc_key})",
                             "source": "exit",
                         })
-
-    elif target_type == "inventory_item":
-        # 从角色背包获取（当前未实现完整背包系统）
-        character = get_current_player(state).get("character") or {}
-        inventory = character.get("inventory") or []
-        for item in inventory:
-            candidates.append({"id": item, "name": item, "source": "inventory"})
 
     return candidates
 
@@ -363,7 +355,7 @@ def _push_attention_focus(
             actors.remove(entity_id)  # 去重后移到栈顶
         actors.insert(0, entity_id)
         actors[:] = actors[:max_actors]
-    elif target_type in ("item", "inventory_item"):
+    elif target_type == "item":
         if entity_id in objects:
             objects.remove(entity_id)
         objects.insert(0, entity_id)
@@ -383,7 +375,7 @@ async def disambiguation_node(state: GameState) -> dict:
 
     执行流：
       从 intent_queue[current_intent_idx] 提取当前意图的称呼和类型
-      根据意图类型确定目标 ID 类型（item/npc/location/inventory_item）
+      根据意图类型确定目标 ID 类型（item/npc/location）
       从 state 构建候选实体列表（按类型就近拉取）
       三级降级匹配找到系统唯一 ID
       写入 resolved_targets + attention_focus

@@ -244,6 +244,17 @@ async def db_lookup_node(state: GameState) -> dict:
             f"{len(entity_rows)} entities total"
         )
 
+        # 合并运行时掉落物品到 _scene_interactables（玩家丢弃在地上的物品）
+        dropped_items = state.get("_dropped_items", {})
+        if current_loc in dropped_items:
+            for item_name in dropped_items[current_loc]:
+                scene_items.append({
+                    "key": f"dropped_{item_name}",
+                    "name": item_name,
+                    "tags": ["dropped", "collectible"],
+                    "state": "default",
+                })
+
         return {
             "physical_reality": xml_str,
             "world_context": xml_str,

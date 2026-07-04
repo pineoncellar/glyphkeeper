@@ -136,6 +136,9 @@ class GameState(TypedDict):
     _scene_interactables: list[dict]          # 当前场景的可交互物品列表
     _scene_locations: dict                    # 当前场景 + 邻接场景元数据
 
+    # ── 运行时掉落物品池（key=场景key, value=该场景地面上的物品名列表） ──
+    _dropped_items: dict[str, list[str]]
+
     # ── 运行时元数据 ──
     errors: list[str]
     node_trace: list[dict]
@@ -212,6 +215,7 @@ def create_initial_state(
         "_spatial_result": None,
         "_scene_interactables": [],
         "_scene_locations": {},
+        "_dropped_items": {},
         # 审计缓冲区
         "pending_tier1_events": [],
         "pending_tier2_facts": [],

@@ -268,6 +268,67 @@ async def _impromptu_judgment(
     return {"approved": False, "item_name": "", "reason": "LLM 调用失败，安全拒绝"}
 
 
+# ====================================================================
+# 背包物品操作倾向判定
+# ====================================================================
+
+INVENTORY_DISPOSITION_PROMPT = """你是 CoC 守密人助手 — 背包操作分类器。
+判断玩家对背包里某件物品的操作倾向。
+只需回答一个 JSON 对象，不要包含代码块标记。
+
+玩家动作: {action_detail}
+目标物品: {target_item}
+场景描述: {scene_desc}
+
+分类规则:
+- CONSUME: 物品在动作后彻底消失/消耗（吃药、开枪、使用消耗品）
+- DROP: 物品只是脱离玩家身体，仍留在当前场景中（扔地上、放桌上、插墙上）
+
+输出格式（纯 JSON）:
+{{"disposition": "CONSUME" 或 "DROP", "reason": "简要原因"}}"""
+
+
+async def _inventory_disposition_judgment(
+    state: GameState,
+    target_str: str,
+    action_detail: str,
+) -> str:
+    """判断背包物品的操作倾向：CONSUME（消耗消失）或 DROP（掉落场景）
+
+    调用 fast LLM 做二值分类，不走即兴合理性判断（背包物品已确认持有）。
+    默认安全值为 CONSUME（宁可消失不可凭空产生）。
+    """
+    if not SPATIAL_PHYSICS_IMPROMPTU_JUDGMENT:
+        return "CONSUME"
+
+    physical_reality = state.get("physical_reality", "")
+    scene_desc = physical_reality[:500] if physical_reality else "未知场景"
+
+    try:
+        result = await _call_llm("fast", [
+            {"role": "user", "content": INVENTORY_DISPOSITION_PROMPT.format(
+                action_detail=action_detail or target_str,
+                target_item=target_str,
+                scene_desc=scene_desc,
+            )},
+        ])
+        if result.is_ok and result.text:
+            text = result.text.strip()
+            text = text.removeprefix("```json").removeprefix("```").removesuffix("```").strip()
+            parsed = json.loads(text)
+            if isinstance(parsed, dict):
+                disposition = str(parsed.get("disposition", "CONSUME")).upper()
+                if disposition in ("CONSUME", "DROP"):
+                    logger.info(
+                        f"spatial_physics[disposition]: '{target_str}' -> {disposition}"
+                    )
+                    return disposition
+    except Exception as e:
+        logger.debug(f"spatial_physics: 倾向判定 LLM 失败（非阻塞，默认 CONSUME）: {e}")
+
+    return "CONSUME"
+
+
 async def _check_common_sense(
     fact: FactManifest,
     state: GameState,
@@ -354,6 +415,13 @@ def _finalize_verdict(fact: FactManifest) -> FactManifest:
         fact.execution_phase = "OUT_OF_REACH"
         return fact
 
+    # 背包物品路径：玩家自有物品，直接放行
+    # INVENTORY_ITEM → 消耗消失，INVENTORY_DROP → 掉落场景
+    if fact.spatial_reason in ("INVENTORY_ITEM", "INVENTORY_DROP"):
+        fact.physical_executed = True
+        fact.execution_phase = "INVENTORY_CONSUME" if fact.spatial_reason == "INVENTORY_ITEM" else "INVENTORY_DROP"
+        return fact
+
     # 即兴路径：已由 LLM 直接批准，不再检查状态依赖
     if fact.spatial_reason == "IMPROMPTU_APPROVED":
         fact.physical_executed = True
@@ -420,26 +488,44 @@ async def spatial_physics_node(state: GameState) -> dict:
             fact, state, action_detail, flavor_context,
         )
 
-    # 路径 B: 即兴降级 — 目标不在 PG 中，走 LLM 常识判断
+    # 路径 B: 目标不在 PG 中 — 先查背包，再走即兴降级
     elif fact.spatial_reason == "TARGET_NOT_FOUND":
         intent = _current_intent(state)
         intent_data = intent.get("data", {})
         target_str = intent_data.get("target", target_key)
         action_detail = intent_data.get("detail", "")
-        judgment = await _impromptu_judgment(state, target_str, action_detail)
-        if judgment.get("approved"):
+
+        # 优先检查背包：玩家自己的物品不需要场景存在性验证
+        inventory = _get_inventory(state)
+        if target_str in inventory:
             fact.spatial_valid = True
-            fact.spatial_reason = "IMPROMPTU_APPROVED"
-            fact._target_key = f"impromptu_{judgment.get('item_name', target_str)}"
+            fact.spatial_reason = "INVENTORY_ITEM"
+            fact._target_key = target_str
+            # 调用 LLM 判断操作倾向（消耗消失 vs 掉落场景）
+            disposition = await _inventory_disposition_judgment(
+                state, target_str, action_detail,
+            )
+            if disposition == "DROP":
+                fact.spatial_reason = "INVENTORY_DROP"
             logger.info(
-                f"spatial_physics: 即兴批准 '{target_str}' -> "
-                f"{fact._target_key}"
+                f"spatial_physics: 背包命中 '{target_str}' -> {disposition}"
             )
         else:
-            logger.debug(
-                f"spatial_physics: 即兴拒绝 '{target_str}': "
-                f"{judgment.get('reason', '')}"
-            )
+            # 背包也没有，走即兴 LLM 判断是否可从环境中获得
+            judgment = await _impromptu_judgment(state, target_str, action_detail)
+            if judgment.get("approved"):
+                fact.spatial_valid = True
+                fact.spatial_reason = "IMPROMPTU_APPROVED"
+                fact._target_key = f"impromptu_{judgment.get('item_name', target_str)}"
+                logger.info(
+                    f"spatial_physics: 即兴批准 '{target_str}' -> "
+                    f"{fact._target_key}"
+                )
+            else:
+                logger.debug(
+                    f"spatial_physics: 即兴拒绝 '{target_str}': "
+                    f"{judgment.get('reason', '')}"
+                )
 
     # 最终裁决
     fact = _finalize_verdict(fact)

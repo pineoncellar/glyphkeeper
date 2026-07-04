@@ -10,7 +10,7 @@
 
 from __future__ import annotations
 
-from src.state.game_state import GameState, get_player
+from src.state.game_state import GameState, get_player, get_current_player
 from src.tools import get_logger
 
 logger = get_logger(__name__)
@@ -96,6 +96,42 @@ async def reduce_iter_node(state: GameState) -> dict:
         char["inventory"] = inv
         player["character"] = char
         patch["players"] = {uid: player}
+        # 落包后同步清理掉落池（捡回地上物品后销账）
+        dropped = dict(state.get("_dropped_items", {}))
+        cleaned = False
+        for loc, items in list(dropped.items()):
+            for item in items_to_add:
+                if item in items:
+                    items.remove(item)
+                    cleaned = True
+        if cleaned:
+            patch["_dropped_items"] = dropped
+
+    # _inventory_remove — 整层玩家槽覆写，剔除物品
+    remove_item = changes.pop("_inventory_remove", None)
+    if remove_item:
+        uid = state.get("user_id", "default")
+        player = dict(get_player(state, uid))
+        char = dict(player.get("character", {}))
+        inv = list(char.get("inventory", []))
+        if remove_item in inv:
+            inv.remove(remove_item)
+            logger.debug(f"reduce_iter: 离包 '{remove_item}' (剩 {len(inv)} 件)")
+        char["inventory"] = inv
+        player["character"] = char
+        patch["players"] = {uid: player}
+
+    # _scene_interactable_append — 将物品写入当前场景的掉落池
+    drop_item = changes.pop("_scene_interactable_append", None)
+    if drop_item:
+        current_loc = get_current_player(state).get("current_location", "")
+        if current_loc:
+            dropped = dict(state.get("_dropped_items", {}))
+            dropped.setdefault(current_loc, [])
+            if drop_item not in dropped[current_loc]:
+                dropped[current_loc].append(drop_item)
+                logger.debug(f"reduce_iter: 场景落物 '{drop_item}' @ {current_loc}")
+            patch["_dropped_items"] = dropped
 
     # _mark_searched — 发射事件 + 更新 PG
     mark = changes.pop("_mark_searched", None)

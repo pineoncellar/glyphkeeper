@@ -74,12 +74,20 @@ def _build_state_changes(
 
     NORMAL 执行后标记物品为已搜索（通过 _mark_searched 通知外部处理器）。
     IMPROMPTU 即兴路径跳过线索查询，直接产出落包通知和防复刷锁。
+    INVENTORY_CONSUME 背包物品消耗路径产出离包通知，用于从背包中移除物品。
     其他状态不产生确定性变更。
     """
     if not spatial.get("physical_executed"):
         return {}
 
     phase = spatial.get("execution_phase", "")
+    if phase == "INVENTORY_CONSUME":
+        return {"_inventory_remove": target_name or target_key}
+    if phase == "INVENTORY_DROP":
+        return {
+            "_inventory_remove": target_name or target_key,
+            "_scene_interactable_append": target_name or target_key,
+        }
     if phase == "IMPROMPTU":
         # 从 impromptu_xxx 格式的 key 中提取物品名
         item_name = target_name or target_key
@@ -90,6 +98,13 @@ def _build_state_changes(
             "_inventory_append": item_name,
         }
     if phase == "NORMAL":
+        # 掉落物品（dropped_ 前缀）：捡回入包 + 标记已搜索
+        if target_key and target_key.startswith("dropped_"):
+            item_name = target_key[len("dropped_"):]
+            return {
+                "_mark_searched": target_key,
+                "_inventory_append": item_name,
+            }
         return {"_mark_searched": target_key}
     return {}
 
@@ -138,10 +153,10 @@ async def effect_archivist_node(state: GameState) -> dict:
     # 决定是否查线索：
     # NORMAL 路径 — 检定成功 + 物理执行 + 首次搜索，走 PG 线索表
     # IMPROMPTU 路径 — 即兴物品，直接跳过线索查询防幻觉
+    # INVENTORY_CONSUME 路径 — 背包物品操作（消耗/使用），不查线索
     clues_discovered: list[dict] = []
     raw_text = ""
-    if execution_phase == "IMPROMPTU":
-        # 即兴物品不查线索，不产生幻觉文本
+    if execution_phase in ("IMPROMPTU", "INVENTORY_CONSUME"):
         pass
     elif is_success and physical_executed and execution_phase == "NORMAL":
         session_id = state.get("session_id", "")
@@ -164,6 +179,9 @@ async def effect_archivist_node(state: GameState) -> dict:
         loot = clues_discovered[0].get("loot_items", [])
         if loot and isinstance(loot, list):
             loot_items = loot
+
+    # 特殊兜底：掉落物品捡回（target_key 是 dropped_ 开头，无线索但应入包）
+    # 由 _build_state_changes 根据 target_key 前缀决定产出 _inventory_append
 
     # 构建 ActionExecutionResult
     action_result = {
