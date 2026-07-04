@@ -33,6 +33,7 @@ from src.workers.memorizer_worker import MemorizerWorker
 from src.workers.world_summarizer import WorldSummarizer
 from src.workers.background_sync import BackgroundSync
 from src.tools.config import get_settings
+from src.tools.card_importer import ensure_cards_dir
 from src.tools.card_importer import (
     import_from_xlsx, search_cards_dir,
     ensure_cards_dir, is_path_like,
@@ -1493,6 +1494,13 @@ class CliAdapter(AbstractAdapter):
 
             restored_state = restored.get("state", restored)
             known_ids = restored.get("known_knowledge_ids", [])
+            saved_world = restored_state.get("world_id", "")
+
+            # 先切 active_world，确保后续 session 创建时 world_id 正确
+            if saved_world:
+                from src.tools.world_manager import set_active_world
+                set_active_world(saved_world)
+                logger.info(f"读档: active_world → {saved_world}")
 
             # 写入 scheduler 当前会话
             if self._scheduler:
@@ -1500,37 +1508,38 @@ class CliAdapter(AbstractAdapter):
                 if not get_current_player(restored_state).get("character") and self._character:
                     from dataclasses import asdict
                     get_current_player(restored_state)["character"] = asdict(self._character)
-                # 使用 msg 中的 routing 信息，确保 key 与玩家当前会话一致
                 platform = msg.platform if msg else "cli"
                 channel_id = msg.channel_id if msg else ""
-                world_id = msg.world_id if msg else ""
                 await self._scheduler.restore_session_state(
                     session_id, restored_state,
                     platform=platform,
                     channel_id=channel_id,
-                    world_id=world_id,
+                    world_id=saved_world,
                 )
                 # 兜底：若存档丢失 current_location，从模组开场配置中恢复
                 slot = self._scheduler.get_session(session_id)
                 if slot:
                     current_loc = get_current_player(slot.state).get("current_location", "")
-                    scenario = slot.state.get("scenario_name", "")
-                    if not current_loc and scenario:
-                        logger.info(
-                            f"读档: current_location 为空，尝试从模组 '{scenario}' 恢复"
-                        )
-                        from src.state.module_loader import ModuleLoader
-                        loader = ModuleLoader()
-                        modules = await loader.list_modules()
-                        for m in modules:
-                            if m.get("name") == scenario:
-                                start_loc = m.get("start_location", "")
-                                if start_loc:
-                                    get_current_player(slot.state)["current_location"] = start_loc
-                                    logger.info(
-                                        f"读档: 已恢复 start_location='{start_loc}'"
-                                    )
-                                break
+                    if not current_loc:
+                        scenario = slot.state.get("scenario_name", "")
+                        if not scenario and saved_world:
+                            scenario = saved_world.rsplit("_", 1)[0]
+                        if scenario:
+                            logger.info(
+                                f"读档: current_location 为空，尝试从模组 '{scenario}' 恢复"
+                            )
+                            from src.state.module_loader import ModuleLoader
+                            loader = ModuleLoader()
+                            modules = await loader.list_modules()
+                            for m in modules:
+                                if m.get("name") == scenario:
+                                    start_loc = m.get("start_location", "")
+                                    if start_loc:
+                                        get_current_player(slot.state)["current_location"] = start_loc
+                                        logger.info(
+                                            f"读档: 已恢复 start_location='{start_loc}'"
+                                        )
+                                    break
                 # 恢复角色引用
                 char_data = get_current_player(restored_state).get("character")
                 if char_data and self._player_loader:
@@ -1538,13 +1547,6 @@ class CliAdapter(AbstractAdapter):
                     loaded_char = _dict_to_character(char_data)
                     if loaded_char:
                         self._character = loaded_char
-
-            # 将 active_world 切换到存档时的世界，确保后续查询指向正确 workspace
-            saved_world = restored_state.get("world_id", "")
-            if saved_world:
-                from src.tools.world_manager import set_active_world
-                set_active_world(saved_world)
-                logger.info(f"读档: active_world → {saved_world}")
 
             # 恢复 session_knowledge_state 至存档时的状态
             try:
@@ -1639,6 +1641,14 @@ class CliAdapter(AbstractAdapter):
                 return OutboundMessage.system_msg(
                     f"删除存档 [{label}] 失败", level="error", session_id=session_id,
                 )
+
+            # 清理快照关联的 LightRAG 备份目录
+            lightrag_dir = _ensure_lightrag_backup_dir(target_id)
+            if lightrag_dir.exists():
+                import shutil
+                shutil.rmtree(lightrag_dir)
+                logger.info("存档 LightRAG 备份已清理: %s", lightrag_dir)
+
             logger.info("存档已删除: %s (%s)", label, target_id[:8])
             return OutboundMessage.system_msg(
                 f"存档 [{label}] 已删除。", session_id=session_id,
@@ -2107,6 +2117,8 @@ def _get_base_skill_values(stats: Stats) -> dict[str, int]:
 
 async def main_async():
     adapter = CliAdapter()
+    ensure_cards_dir()
+
     # 启动时尝试载入已摄入的模组
     try:
         from src.state.module_loader import ModuleLoader

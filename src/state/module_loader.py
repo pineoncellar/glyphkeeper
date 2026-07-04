@@ -184,12 +184,11 @@ class ModuleLoader:
         return state
 
     async def delete_module(self, module_name: str) -> bool:
-        """删除已摄入的模组事件
+        """彻底删除模组：事件 + 读模型 + LightRAG 种子工作区
 
-        验证模组存在后，从 EventStore 中删除该模名的所有事件。
-        读模型数据（PG 场景/实体/物品表）暂不自动清理 —
-        重摄入同名模组会自动覆盖，或使用 /module delete --all
-        配合重摄入清理。
+        先从 EventStore 读取该模组的事件，提取场景/物品/实体/NPC 的 key，
+        再依次清理：读模型行 → 事件 → LightRAG 种子目录及 PG 数据。
+        重摄入同一模组后不会残留旧数据。
         """
         modules = await self.list_modules()
         names = [m["name"] for m in modules]
@@ -198,11 +197,127 @@ class ModuleLoader:
             return False
 
         es = await self.event_store
+        # 先读事件提取 key，再删事件
+        events = await es.get_events(TEMPLATE_SESSION_ID, since_version=0)
+        loc_keys: list[str] = []
+        entity_keys: list[str] = []
+        interactable_keys: list[str] = []
+        knowledge_ids: list[str] = []
+
+        for evt in events:
+            data = evt.get("data", {})
+            if data.get("module_name") != module_name:
+                continue
+            if evt.get("type") == "WorldInitialized":
+                for loc in data.get("locations", []):
+                    loc_keys.append(loc.get("key", ""))
+                for rl in data.get("raw_locations", []):
+                    for ent in rl.get("entities", []):
+                        entity_keys.append(ent.get("key", ""))
+                    for it in rl.get("interactables", []):
+                        interactable_keys.append(it.get("key", ""))
+                for kr in data.get("knowledge_registry", []):
+                    knowledge_ids.append(kr.get("knowledge_id", ""))
+
+        # 清理读模型
+        if loc_keys or entity_keys or interactable_keys or knowledge_ids:
+            try:
+                from src.state.read_models import StaticReadStore
+                store = StaticReadStore()
+                conn = await store._get_conn()
+                async with conn.transaction():
+                    # 按外键依赖顺序从子到父删除
+                    if interactable_keys:
+                        # clue_discoveries 通过 interactable_id UUID 关联，需先查 UUID
+                        rows = await conn.fetch(
+                            "SELECT id FROM interactables WHERE key = ANY($1::text[])",
+                            interactable_keys,
+                        )
+                        interactable_ids = [r["id"] for r in rows]
+                        if interactable_ids:
+                            await conn.execute(
+                                "DELETE FROM clue_discoveries WHERE interactable_id = ANY($1::uuid[])",
+                                interactable_ids,
+                            )
+                        await conn.execute(
+                            "DELETE FROM interactables WHERE key = ANY($1::text[])",
+                            interactable_keys,
+                        )
+                    if entity_keys:
+                        await conn.execute(
+                            "DELETE FROM entities WHERE key = ANY($1::text[])",
+                            entity_keys,
+                        )
+                    if knowledge_ids:
+                        # clue_discoveries 也通过 knowledge_id UUID 关联
+                        krows = await conn.fetch(
+                            "SELECT id FROM knowledge_registry WHERE knowledge_id = ANY($1::text[])",
+                            knowledge_ids,
+                        )
+                        kid_uuids = [r["id"] for r in krows]
+                        if kid_uuids:
+                            await conn.execute(
+                                "DELETE FROM clue_discoveries WHERE knowledge_id = ANY($1::uuid[])",
+                                kid_uuids,
+                            )
+                        await conn.execute(
+                            "DELETE FROM knowledge_registry WHERE knowledge_id = ANY($1::text[])",
+                            knowledge_ids,
+                        )
+                    if loc_keys:
+                        await conn.execute(
+                            "DELETE FROM locations WHERE key = ANY($1::text[])",
+                            loc_keys,
+                        )
+                logger.info(
+                    "读模型清理: locations=%d, interactables=%d, entities=%d, knowledge=%d",
+                    len(loc_keys), len(interactable_keys),
+                    len(entity_keys), len(knowledge_ids),
+                )
+            except Exception as e:
+                logger.warning("读模型清理失败（可重摄入修复）: %s", e)
+
+        # 清理 LightRAG 种子工作区
+        try:
+            from src.memory.vector_store import VectorStore
+            from src.tools.pg_manager import PgManager
+
+            # 删本地目录
+            seed_ws = VectorStore.seed_workspace_name(module_name)
+            import shutil
+            from src.tools import PROJECT_ROOT
+            seed_dir = PROJECT_ROOT / "data" / "worlds" / seed_ws
+            if seed_dir.exists():
+                shutil.rmtree(seed_dir)
+                logger.info("种子目录已删除: %s", seed_dir)
+
+            # 删 PG 中该 workspace 的 LightRAG 数据
+            mgr = await PgManager.get_instance()
+            if mgr.available:
+                await mgr.start()
+                import asyncpg
+                conn2 = await asyncpg.connect(mgr.uri)
+                try:
+                    for tbl in (
+                        "LIGHTRAG_VDB_ENTITY", "LIGHTRAG_VDB_RELATION",
+                        "LIGHTRAG_VDB_CHUNKS", "LIGHTRAG_DOC_CHUNKS",
+                        "LIGHTRAG_DOC_STATUS", "LIGHTRAG_LLM_CACHE",
+                    ):
+                        await conn2.execute(
+                            f"DELETE FROM {tbl} WHERE workspace = $1", seed_ws,
+                        )
+                    logger.info("种子 PG 数据已清理: workspace=%s", seed_ws)
+                finally:
+                    await conn2.close()
+        except Exception as e:
+            logger.warning("种子工作区清理失败（可忽略）: %s", e)
+
+        # 最后删事件
         ok = await es.delete_module_events(module_name)
         if not ok:
             logger.warning("delete_module: 事件删除返回空结果 (module=%s)", module_name)
 
-        logger.info("模组已删除: %s", module_name)
+        logger.info("模组已彻底删除: %s", module_name)
         return True
 
     async def load_opening_narrative(

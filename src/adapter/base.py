@@ -584,8 +584,7 @@ class AbstractAdapter(ABC):
 
         # 如果是当前世界，切回默认
         if world_id == get_settings().project.active_world:
-            set_active_world("test")
-
+            set_active_world("")
         # 删除世界目录
         await delete_world(world_id)
 
@@ -604,6 +603,29 @@ class AbstractAdapter(ABC):
             await store.clear_all(world_id=world_id)
         except Exception as e:
             logger.warning(f"清理读模型失败 (world={world_id}): {e}")
+
+        # 清理 LightRAG PG 数据
+        try:
+            from src.tools.pg_manager import PgManager
+            mgr = await PgManager.get_instance()
+            if mgr.available:
+                await mgr.start()
+                import asyncpg
+                conn = await asyncpg.connect(mgr.uri)
+                try:
+                    for tbl in (
+                        "LIGHTRAG_VDB_ENTITY", "LIGHTRAG_VDB_RELATION",
+                        "LIGHTRAG_VDB_CHUNKS", "LIGHTRAG_DOC_CHUNKS",
+                        "LIGHTRAG_DOC_STATUS", "LIGHTRAG_LLM_CACHE",
+                    ):
+                        await conn.execute(
+                            f"DELETE FROM {tbl} WHERE workspace = $1", world_id,
+                        )
+                    logger.info("世界 LightRAG PG 数据已清理: workspace=%s", world_id)
+                finally:
+                    await conn.close()
+        except Exception as e:
+            logger.warning(f"LightRAG PG 清理失败（可忽略）: {e}")
 
         # 清理 VectorStore 缓存（下次使用时自动重建）
         from src.memory.vector_store import VectorStore

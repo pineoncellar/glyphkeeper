@@ -545,6 +545,20 @@ class VectorStore:
                 col_names = ", ".join(columns)
                 placeholders = ", ".join(f"${i+1}" for i in range(len(columns)))
 
+                from datetime import datetime as _dt
+
+                def _parse_timestamp(val):
+                    """将 ISO 格式时间戳字符串转为 datetime 对象
+                    兼容 YYYY-MM-DDTHH:MM:SS 和 YYYY-MM-DD HH:MM:SS 两种格式"""
+                    if isinstance(val, str) and len(val) >= 19:
+                        head = val[:19]
+                        if head[4] == "-" and head[7] == "-" and head[10] in ("T", " ") and head[13] == ":":
+                            try:
+                                return _dt.fromisoformat(val.replace("Z", "+00:00"))
+                            except (ValueError, TypeError):
+                                pass
+                    return val
+
                 for rec in records:
                     values = []
                     for col in columns:
@@ -553,6 +567,8 @@ class VectorStore:
                         if isinstance(val, list) and col.endswith("_vector"):
                             import struct
                             val = memoryview(bytes(val))
+                        # 时间戳字段：str → datetime
+                        val = _parse_timestamp(val)
                         values.append(val)
                     try:
                         await conn.execute(

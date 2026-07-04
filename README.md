@@ -225,7 +225,7 @@ graph TB
 <tr>
     <th rowspan="100" style="text-align:center; vertical-align:middle; width:48px; border-top:2px solid #d0d7de;">游戏系统</th>
 </tr>
-<tr><td style="text-align:center;">⬜</td><td colspan="2">角色卡与物品背包系统</td>
+<tr><td style="text-align:center;">🔄</td><td colspan="2">角色卡与物品背包系统</td>
 <tr><td style="text-align:center;">🔄</td><td colspan="2">调查与线索系统</td></tr>
 <tr><td style="text-align:center;">⬜</td><td colspan="2" style="padding-left:2em;">├ 重复检定请求</td></tr>
 <tr><td style="text-align:center;">✅</td><td colspan="2" style="padding-left:2em;">├ 无线索时的幻觉问题</td></tr>

@@ -40,7 +40,7 @@ class TestConfig:
         s = gs()
         assert s.project.name == "GlyphKeeper"
         assert s.project.debug is False
-        assert s.project.active_world == "default_world"
+        assert s.project.active_world == ""
 
     def test_model_tiers_default(self, monkeypatch):
         """无配置时 model_tiers 为空字典"""
