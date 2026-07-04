@@ -473,8 +473,14 @@ class CliAdapter(AbstractAdapter):
                     print()
                     continue
 
-            # 处理 /sheet
+            # 处理 /sheet — 优先从运行时 GameState 读取（含落包等实时变更）
             if msg.type == MessageType.SYSTEM_CMD and msg.text.strip().lower() in ("/sheet", "/s"):
+                state = self._scheduler.get_session_state(self.session_id) if self._scheduler else None
+                if state:
+                    game_char = get_current_player(state).get("character")
+                    if game_char:
+                        from src.state.player_state import _dict_to_character
+                        self._character = _dict_to_character(game_char)
                 self._show_character_sheet()
                 continue
 
