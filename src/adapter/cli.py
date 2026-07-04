@@ -1012,6 +1012,13 @@ class CliAdapter(AbstractAdapter):
                     if loaded_char:
                         self._character = loaded_char
 
+            # 将 active_world 切换到存档时的世界，确保后续查询指向正确 workspace
+            saved_world = restored_state.get("world_id", "")
+            if saved_world:
+                from src.tools.world_manager import set_active_world
+                set_active_world(saved_world)
+                logger.info(f"读档: active_world → {saved_world}")
+
             # 恢复 session_knowledge_state 至存档时的状态
             try:
                 from src.state.session_state import SessionKnowledgeState

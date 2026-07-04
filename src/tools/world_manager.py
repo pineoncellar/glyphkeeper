@@ -93,15 +93,63 @@ async def delete_world(world_id: str) -> bool:
 # ------- LightRAG 播种 -------
 
 
+async def _check_seed_exists(seed_ws: str) -> bool:
+    """检查种子工作区在 PG 中是否有数据（查第一张表的行数）"""
+    try:
+        from src.tools.pg_manager import PgManager
+        mgr = await PgManager.get_instance()
+        if not mgr.available:
+            await mgr.start()
+        if not mgr.available:
+            return False
+        import asyncpg
+        conn = await asyncpg.connect(mgr.uri)
+        row = await conn.fetchval(
+            "SELECT COUNT(*) FROM LIGHTRAG_VDB_ENTITY WHERE workspace=$1",
+            seed_ws,
+        )
+        await conn.close()
+        return (row or 0) > 0
+    except Exception as e:
+        logger.debug(f"_check_seed_exists({seed_ws}): {e}")
+        return False
+
+
 async def seed_world_lightrag(world_id: str, module_name: str) -> bool:
-    """将模组的叙事知识（右脑数据）播种到新世界的 LightRAG
+    """将模组的叙事知识播种到新世界的 LightRAG
 
-    /start 新建世界后调用，确保新世界拥有模组基线知识，
-    而不含任何旧游戏的运行时状态。
+    优先从种子工作区高速复制（PG 级 INSERT...SELECT，秒级完成），
+    种子不存在时回退到从 JSON 重插 LLM 管线（约 5 分钟）。
     """
-    from src.tools.ingestion import load_json, find_module_files
+    from src.memory.vector_store import VectorStore
 
-    # 找到对应模组的 JSON 文件
+    target_vs = await VectorStore.get_instance(domain="world", world_id=world_id)
+    seed_ws = VectorStore.seed_workspace_name(module_name)
+
+    # 先检查种子工作区在 PG 中是否有数据
+    seed_exists = await _check_seed_exists(seed_ws)
+
+    if seed_exists:
+        # 高速路径：PG 级跨 workspace 复制（几秒完成）
+        logger.info(
+            f"seed_world_lightrag: 从种子 '{seed_ws}' 高速复制到 '{world_id}'"
+        )
+        ok = await target_vs.copy_workspace_from(seed_ws)
+        if ok:
+            logger.info(
+                f"seed_world_lightrag: 种子复制完成 "
+                f"{seed_ws} → {world_id}"
+            )
+            return True
+        logger.warning("seed_world_lightrag: 种子复制返回失败，回退到 JSON 重插")
+
+    # 回退路径：从 JSON 重插 LLM 管线（慢速，约 5 分钟）
+    logger.info(
+        f"seed_world_lightrag: 种子不存在，回退到 JSON 重插 "
+        f"world={world_id} module={module_name}"
+    )
+    from src.tools.ingestion import load_json, find_module_files, ModuleIngestor
+
     target_name = module_name.lower()
     json_path: Optional[Path] = None
     for fp in find_module_files():
@@ -116,15 +164,10 @@ async def seed_world_lightrag(world_id: str, module_name: str) -> bool:
     if data is None:
         return False
 
-    # 复用 ModuleIngestor 的右脑管线逻辑
-    from src.tools.ingestion import ModuleIngestor
-    from src.memory.vector_store import VectorStore
-
-    vs = await VectorStore.get_instance(domain="world", world_id=world_id)
-    ingestor = ModuleIngestor(vector_store=vs)
+    ingestor = ModuleIngestor(vector_store=target_vs)
     ok = await ingestor._ingest_right_brain(data, module_name)
     if ok:
-        logger.info(f"seed_world_lightrag: 模组 '{module_name}' 已播种到 world '{world_id}'")
+        logger.info(f"seed_world_lightrag: JSON 重插完成 world='{world_id}'")
     else:
-        logger.error(f"seed_world_lightrag: 播种失败 world={world_id} module={module_name}")
+        logger.error(f"seed_world_lightrag: JSON 重插失败 world={world_id}")
     return ok

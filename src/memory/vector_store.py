@@ -593,3 +593,106 @@ class VectorStore:
         except Exception as e:
             logger.error(f"LightRAG 恢复失败: {e}")
             return False
+
+    # ------- 种子工作区管理 -------
+
+    @staticmethod
+    def seed_workspace_name(module_name: str) -> str:
+        """返回模组对应的种子工作区名称"""
+        return f"__seed__{module_name}"
+
+    async def copy_workspace_from(self, source_workspace: str) -> bool:
+        """将 source_workspace 的 LightRAG 数据全量复制到当前 workspace
+
+        PG 级批量 INSERT...SELECT，重写 workspace 和 id 列。
+        适用于种子工作区 → 新世界的高速复制。
+        复制完后当前实例失效，需重新初始化。
+        """
+        target_workspace = self._workspace
+        if source_workspace == target_workspace:
+            logger.warning("copy_workspace_from: 源和目标 workspace 相同，跳过")
+            return False
+
+        try:
+            from src.tools.pg_manager import PgManager
+            mgr = await PgManager.get_instance()
+            if not mgr.available:
+                await mgr.start()
+            import asyncpg
+            conn = await asyncpg.connect(mgr.uri)
+
+            total_rows = 0
+            for tbl in self._BACKUP_TABLES:
+                # 检查表是否存在
+                exists = await conn.fetchval(
+                    "SELECT 1 FROM information_schema.tables WHERE table_name=$1",
+                    tbl.lower(),
+                )
+                if not exists:
+                    continue
+
+                # 获取列信息（排除向量字段的特殊处理）
+                columns = await conn.fetch(
+                    "SELECT column_name, data_type FROM information_schema.columns "
+                    "WHERE table_name=$1 ORDER BY ordinal_position",
+                    tbl.lower(),
+                )
+                col_names = [c["column_name"] for c in columns]
+
+                # 构建 SELECT 子句：重写 id(新UUID) + workspace(目标) + 其余原样
+                select_parts = []
+                for c in col_names:
+                    if c == "id":
+                        select_parts.append("gen_random_uuid()")
+                    elif c == "workspace":
+                        select_parts.append(f"'{target_workspace}'")
+                    elif c.endswith("_vector"):
+                        # 向量列需要特殊处理，保持原值
+                        select_parts.append(c)
+                    else:
+                        select_parts.append(c)
+
+                select_sql = ", ".join(select_parts)
+                insert_sql = ", ".join(col_names)
+
+                sql = (
+                    f"INSERT INTO {tbl} ({insert_sql}) "
+                    f"SELECT {select_sql} FROM {tbl} "
+                    f"WHERE workspace = $1 "
+                    f"ON CONFLICT (workspace, id) DO NOTHING"
+                )
+                result = await conn.execute(sql, source_workspace)
+                total_rows += 1
+                logger.debug(
+                    f"copy_workspace_from: {tbl} {result} "
+                    f"({source_workspace} → {target_workspace})"
+                )
+
+            await conn.close()
+
+            # 复制 graphml 文件
+            from src.tools import PROJECT_ROOT
+            src_graphml = (
+                PROJECT_ROOT / "data" / "worlds" / source_workspace
+                / "graph_chunk_entity_relation.graphml"
+            )
+            if src_graphml.exists():
+                import shutil
+                target_dir = PROJECT_ROOT / "data" / "worlds" / target_workspace
+                target_dir.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(str(src_graphml), str(target_dir / src_graphml.name))
+                logger.debug(f"copy_workspace_from: graphml 文件已复制")
+
+            # 关闭当前实例，标记需重新初始化
+            await self.close()
+            self._initialized = False
+
+            logger.info(
+                f"copy_workspace_from: {source_workspace} → {target_workspace}, "
+                f"涉及 {total_rows} 张表"
+            )
+            return True
+
+        except Exception as e:
+            logger.error(f"copy_workspace_from 失败: {e}")
+            return False

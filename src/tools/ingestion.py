@@ -99,7 +99,26 @@ class ModuleIngestor:
                         f"{len(json_data.get('locations', []))} 个场景")
 
         # ── 右脑管线：叙事文本 → 合并降噪 → LightRAG ──
-        right_ok = await self._ingest_right_brain(json_data, module_name)
+        # 只写入种子工作区（__seed__{module_name}），不写 active_world
+        # /start 时通过 PG 级复制从种子拷贝到新世界，避免重复 API 调用
+        docs = self._build_right_brain_docs(json_data, module_name)
+        right_ok = False
+
+        if docs:
+            try:
+                from src.memory.vector_store import VectorStore
+                seed_ws = VectorStore.seed_workspace_name(module_name)
+                seed_vs = await VectorStore.get_instance(
+                    domain="world", world_id=seed_ws,
+                )
+                await seed_vs.insert(docs, source_type="narrative_seed")
+                logger.info(f"  [OK] 种子工作区 '{seed_ws}' 已写入 ({len(docs)} 篇)")
+                right_ok = True
+            except Exception as e:
+                logger.error(f"  [FAIL] 种子工作区写入失败: {e}")
+        else:
+            logger.info(f"  [SKIP] 无非叙事内容需写入 LightRAG")
+            right_ok = True
 
         if left_ok and right_ok:
             logger.info(f"[OK] 模组 '{module_name}' 摄入完成")
@@ -245,18 +264,16 @@ class ModuleIngestor:
 
     # ── 右脑管线：叙事文本合并 → LightRAG ──
 
-    async def _ingest_right_brain(self, json_data: dict, module_name: str) -> bool:
-        """将散碎的叙事文本合并为大文档，集中写入 LightRAG
+    @staticmethod
+    def _build_right_brain_docs(json_data: dict, module_name: str) -> list[str]:
+        """将模组叙事文本合并为大文档列表（纯 Python，无 IO）
 
-        设计原则:
-          结构化元数据（exits/tags/keys/stats）不写入 RAG，
-          只写入需要语义理解的叙事内容: global_knowledge 原文、
-          NPC 深度对话文本、场景氛围描述。
+        结构化元数据（exits/tags/keys/stats）不写入 RAG，
+        只写入需要语义理解的叙事内容。
         """
-        vs = await self.vector_store
         docs: list[str] = []
 
-        # 合并 global_knowledge — 每条知识的内容接在一起形成 lore 文档
+        # 合并 global_knowledge
         gk = json_data.get("global_knowledge", [])
         if gk:
             lore_parts = [
@@ -268,7 +285,7 @@ class ModuleIngestor:
                 + "\n\n---\n\n".join(lore_parts)
             )
 
-        # 合并 NPC 深度人设 — 只取 dialogue_clues 中的风味文本
+        # 合并 NPC 深度人设
         npc_parts = []
         for loc_data in json_data.get("locations", []):
             for entity_data in loc_data.get("entities", []):
@@ -294,7 +311,7 @@ class ModuleIngestor:
                 + "\n\n---\n\n".join(npc_parts)
             )
 
-        # 合并场景氛围描述 — 只取 base_desc 不要 exits/tags 等结构化字段
+        # 合并场景氛围描述
         scene_parts = []
         for loc_data in json_data.get("locations", []):
             desc = loc_data.get("base_desc", "")
@@ -308,15 +325,12 @@ class ModuleIngestor:
                 + "\n\n---\n\n".join(scene_parts)
             )
 
-        # ── 实体名称索引 — 供 disambiguation_node 消歧向量匹配使用 ──
-        # 将 NPC/物品/场景的显示名称 + 系统 ID 嵌入 LightRAG，
-        # 使玩家自然语言称呼（如"托马斯"）能与实体名称在向量空间中匹配。
+        # 实体名称索引
         entity_index_parts = []
         for loc_data in json_data.get("locations", []):
             loc_name = loc_data.get("name", "?")
             loc_key = loc_data.get("key", "?")
 
-            # NPC 实体名称
             for entity_data in loc_data.get("entities", []):
                 ent_name = entity_data.get("name", "")
                 ent_key = entity_data.get("key", "")
@@ -329,7 +343,6 @@ class ModuleIngestor:
                         + f"  标签: {', '.join(entity_data.get('tags', []))}"
                     )
 
-            # 物品名称
             for item_data in loc_data.get("interactables", []):
                 item_name = item_data.get("name", "")
                 item_key = item_data.get("key", "")
@@ -342,7 +355,6 @@ class ModuleIngestor:
                         + f"  标签: {', '.join(item_data.get('tags', []))}"
                     )
 
-            # 场景名称
             loc_desc = loc_data.get("base_desc", "")
             entity_index_parts.append(
                 f"[场景: {loc_name}]\n"
@@ -356,6 +368,13 @@ class ModuleIngestor:
                 f"# {module_name} — 实体名称索引\n\n"
                 + "\n\n---\n\n".join(entity_index_parts)
             )
+
+        return docs
+
+    async def _ingest_right_brain(self, json_data: dict, module_name: str) -> bool:
+        """构建文档并写入当前 VectorStore"""
+        vs = await self.vector_store
+        docs = self._build_right_brain_docs(json_data, module_name)
 
         if not docs:
             logger.info(f"  [SKIP] 无非叙事内容需写入 LightRAG")
