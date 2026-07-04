@@ -54,7 +54,7 @@ graph TB
 
     subgraph "🧩 Rule Nodes（dispatch_node 内联调用）"
         CombatN["combat_node"]
-        SkillN["skill_node + archivist_node"]
+        SkillN["physical_interact_subgraph<br/>skill_check → spatial_physics → effect_archivist"]
         NavN["navigation_node"]
         NPCN["npc_dialogue_node"]
     end
@@ -145,8 +145,8 @@ graph TB
     │  ║   │         ↓                                        ║
     │  ║   │     dispatch_node (内联意图分发)                  ║
     │  ║   │       ├── COMBAT_ACTION    → combat_node         ║
-    │  ║   │       ├── PHYSICAL_INTERACT → skill_node         ║
-    │  ║   │       │   └── archivist_node (线索查询)          ║
+    │  ║   │       ├── PHYSICAL_INTERACT → physical_interact_subgraph  ║
+    │  ║   │       │   └── (skill_check → spatial_physics → effect_archivist)  ║
     │  ║   │       ├── MOVE            → navigation_node      ║
     │  ║   │       └── SOCIAL_INTERACT → npc_dialogue_node    ║
     │  ║   │         ↓                                        ║
@@ -188,12 +188,12 @@ graph TB
 | Intent 类型 | 目标节点 | 说明 |
 |---|---|---|
 | `COMBAT_ACTION` | `combat_node` | 战斗裁决（调用 domain/combat_rules.py） |
-| `PHYSICAL_INTERACT` | `skill_node` → `archivist_node` | 技能检定 + 线索查询 |
+| `PHYSICAL_INTERACT` | `physical_interact_subgraph`<br/>(`skill_check` → `spatial_physics` → `effect_archivist`) | 三阶段物理交互管线：纯数值检定 → 空间仲裁 → 结算与线索颁发 |
 | `MOVE` | `navigation_node` | 移动作（确定性验证 + 位置更新） |
 | `SOCIAL_INTERACT` | `npc_dialogue_node` | NPC 对话生成 |
 | `META` / 未知 | 跳过（空操作） | 仅递增指针，不执行规则 |
 
-> **注意**：旧版 `route_by_intent` 条件边、`CombatSubgraph`、`InvestigationSubgraph` 仍保留在代码中但已不再被主图使用，由 `dispatch_node` 内联调用对应的规则函数替代。
+> **注意**：旧版 `route_by_intent` 条件边、`CombatSubgraph`、`InvestigationSubgraph` 仍保留在代码中但已不再被主图使用，由 `dispatch_node` 内联调用对应的规则函数替代。`PHYSICAL_INTERACT` 已于本次迭代升级为三阶段 `physical_interact_subgraph`（纯数值检定 → 空间/物理可行性仲裁 → 结算与线索颁发），取代了原先的 `skill_node → archivist_node` 双节点链路。
 
 ---
 
@@ -225,7 +225,8 @@ graph TB
 <tr>
     <th rowspan="100" style="text-align:center; vertical-align:middle; width:48px; border-top:2px solid #d0d7de;">游戏系统</th>
 </tr>
-<tr><td style="text-align:center;">🔄</td><td colspan="2">角色卡与物品背包系统</td>
+<tr><td style="text-align:center;">✅</td><td colspan="2">角色卡与物品背包系统</td>
+<tr><td style="text-align:center;">✅</td><td colspan="2" style="padding-left:2em;">├ 物品离包逻辑</td></tr>
 <tr><td style="text-align:center;">🔄</td><td colspan="2">调查与线索系统</td></tr>
 <tr><td style="text-align:center;">⬜</td><td colspan="2" style="padding-left:2em;">├ 重复检定请求</td></tr>
 <tr><td style="text-align:center;">✅</td><td colspan="2" style="padding-left:2em;">├ 无线索时的幻觉问题</td></tr>
@@ -237,7 +238,7 @@ graph TB
 <tr><td style="text-align:center;">⬜</td><td colspan="2" style="padding-left:2em;">├ 经npc节点的narrator prompt构造</td></tr>
 <tr><td style="text-align:center;">✅</td><td colspan="2">CoC 7版技能检定</td></tr>
 <tr><td style="text-align:center;">⬜</td><td colspan="2">战斗轮与体力系统</td></tr>
-<tr><td style="text-align:center;">✅</td><td colspan="2">理智与疯狂</td></tr>
+<tr><td style="text-align:center;">⬜</td><td colspan="2">理智与疯狂</td></tr>
 <tr><td style="text-align:center;">✅</td><td colspan="2">场景切换与 location 更新</td></tr>
 <tr><td style="text-align:center;">✅</td><td colspan="2" style="padding-left:2em;">├ 场景切换后的新场景描述</td></tr>
 </table>
@@ -546,10 +547,11 @@ GlyphKeeper/
    → 拼 <physical_reality> XML
 4. disambiguation_node (三级降级匹配)
    → "书桌" → 匹配到 interactables.书桌 → resolved_targets
-5. dispatch_node → PHYSICAL_INTERACT → skill_node
-   → skill_node: 侦查检定 → 成功
-   → archivist_node: 解析目标 key + 查 clue_discoveries
-     → 发现"书桌→日记"的线索关联
+5. dispatch_node → PHYSICAL_INTERACT → physical_interact_subgraph
+   ├─ skill_check_node: 侦查检定 → 成功
+   ├─ spatial_physics_node: 书桌在当前场景 → 可达
+   └─ effect_archivist_node: 解析目标 key + 查 clue_discoveries
+      → 发现"书桌→日记"的线索关联
    → 输出 ActionExecutionResult 追加到 executed_actions
 6. reduce_iter_node → 将 deterministic_changes 即时回写 State
 7. loop_guard_node → current_intent_idx(1) >= len(queue)(1) → narrate
@@ -637,9 +639,10 @@ GlyphKeeper/
 7. loop_guard → 1 < 2 → continue
 8. db_lookup_node → 查当前场景（可能已因 NPC 对话而变化）
 9. disambiguation_node → "古籍" → 匹配 interactables
-10. dispatch_node → PHYSICAL_INTERACT → skill_node
-    → 图书馆使用检定 → archivist 查线索
-    → 追加 ActionExecutionResult
+10. dispatch_node → PHYSICAL_INTERACT → physical_interact_subgraph
+    ├─ skill_check_node: 图书馆使用检定
+    ├─ spatial_physics_node: 古籍可达性校验
+    └─ effect_archivist_node: 查线索 → 追加 ActionExecutionResult
 11. reduce_iter_node → 回写变更
         ↓
 
