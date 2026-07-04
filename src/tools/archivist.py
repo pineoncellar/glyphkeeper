@@ -14,6 +14,43 @@ from src.tools import get_logger
 logger = get_logger(__name__)
 
 
+# ── 技能名中英映射 ──
+# TODO: 统一模组标准，把这不优雅的硬映射删了
+_SKILL_NAME_ALIASES: dict[str, list[str]] = {
+    "侦查": ["侦查", "spot hidden", "侦查(spot hidden)", "spot_hidden"],
+    "聆听": ["聆听", "listen", "聆听(listen)"],
+    "潜行": ["潜行", "stealth", "潜行(stealth)"],
+    "图书馆利用": ["图书馆利用", "library use", "library", "library_use"],
+    "神秘学": ["神秘学", "occult", "occult(神秘学)"],
+    "心理学": ["心理学", "psychology", "心理学(psychology)"],
+    "说服": ["说服", "persuade", "说服(persuade)"],
+    "恐吓": ["恐吓", "intimidate", "恐吓(intimidate)"],
+    "斗殴": ["斗殴", "fighting", "fighting(brawl)", "brawl"],
+    "闪避": ["闪避", "dodge", "闪避(dodge)"],
+    "急救": ["急救", "first aid", "first_aid"],
+    "医学": ["医学", "medicine", "医学(medicine)"],
+    "锁匠": ["锁匠", "locksmith", "lock picking", "lock_picking"],
+    "机械维修": ["机械维修", "mechanical repair", "mechanical_repair"],
+    "计算机使用": ["计算机使用", "computer use", "computer_use"],
+    "手枪": ["手枪", "handgun", "手枪(handgun)"],
+    "射击": ["射击", "firearm", "射击(firearm)", "rifle", "shotgun"],
+}
+
+
+def _skill_name_matches(required: str, actual: str) -> bool:
+    """判断 required 技能名是否与 actual 匹配，支持中英别名"""
+    if not required or not actual:
+        return False
+    if required.lower() == actual.lower():
+        return True
+    # 查别名表
+    for aliases in _SKILL_NAME_ALIASES.values():
+        if required.lower() in [a.lower() for a in aliases]:
+            return actual.lower() in [a.lower() for a in aliases]
+    # 兜底：子串匹配（以防有未收录的别名）
+    return required.lower() in actual.lower() or actual.lower() in required.lower()
+
+
 class Archivist:
     """线索管理员 — 在技能检定成功后检查是否有线索可发现
 
@@ -130,9 +167,9 @@ class Archivist:
                     character_name=character_name,
                 )
 
-            # 有检定条件：先比对技能名
+            # 有检定条件：先比对技能名（含中英映射）
             required_skill = required_check.get("skill", "")
-            if required_skill and required_skill.lower() != skill_name.lower():
+            if required_skill and not _skill_name_matches(required_skill, skill_name):
                 continue
 
             # 再比对掷骰结果 — 注意此处简化处理，实际应使用角色卡 skill_value

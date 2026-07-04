@@ -65,7 +65,11 @@ async def db_lookup_node(state: GameState) -> dict:
     EMPTY = {"physical_reality": "", "world_context": "", "scene_npcs": [], "entity_name_map": {}}
 
     if not current_loc:
-        logger.debug("db_lookup_node: 无 current_location")
+        scenario_name = state.get("scenario_name", "")
+        logger.debug(
+            f"db_lookup_node: 无 current_location "
+            f"(scenario='{scenario_name}', session={state.get('session_id', '')[:8]})"
+        )
         return EMPTY
 
     try:
@@ -245,8 +249,15 @@ async def db_lookup_node(state: GameState) -> dict:
             "world_context": xml_str,
             "scene_npcs": scene_npcs,
             "entity_name_map": entity_name_map,
+            # 结构化数据缓存
+            "_scene_interactables": scene_items,
+            "_scene_locations": {k: dict(v) for k, v in loc_map.items()},
         }
 
     except Exception as e:
         logger.error(f"db_lookup_node: 查询失败: {e}")
-        return {"physical_reality": "", "world_context": "", "scene_npcs": [], "entity_name_map": {}}
+        return {
+            "physical_reality": "", "world_context": "",
+            "scene_npcs": [], "entity_name_map": {},
+            "_scene_interactables": [], "_scene_locations": {},
+        }

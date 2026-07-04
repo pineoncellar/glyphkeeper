@@ -47,6 +47,20 @@ NARRATOR_SYSTEM_PROMPT = """你是克苏鲁的呼唤 TRPG 的守密人 (Keeper) 
     - tags 属性描述物品的属性标签，其中部分标签（如 "wooden"、"heavy"、"dusty"）代表直观外观可直接用于描写；部分标签（如 "entrance"等）代表需要玩家互动或检定才能发现的隐含信息，禁止在叙事中直接点破。
     - 两者中的数据没有绝对可见性，必须结合场景和玩家行为判断哪些信息可以直接描写，哪些需要保留。
 
+【物理裁决铁律 — 优先级高于一切约束】
+11. 本回合的物理裁决结果在 actions 的 rule_context 中以以下字段提供：
+    - physical_executed: true/false  — 动作是否切实执行
+    - execution_phase: NORMAL / LOCKED / ALREADY_SEARCHED / OUT_OF_REACH
+    - spatial_reason: OK / OUT_OF_REACH / TARGET_NOT_FOUND
+    - is_locked: true/false
+    - is_searched: true/false
+    - clues_discovered: [...] — 发现的线索列表（为空时严禁编造任何线索或暗示）
+12. 若 physical_executed=false，你的叙事必须围绕动作因物理约束未能执行展开：
+    - LOCKED: 描写锁/障碍物阻挡动作，如银制锁扣得死死的、门纹丝不动
+    - OUT_OF_REACH: 描写距离/空间阻隔，如那个物品在另一个房间、你够不着
+    - ALREADY_SEARCHED: 描写已经仔细搜过了、没什么新发现
+13. 若 clues_discovered 为空，严禁在叙事中暗示有什么东西被遗漏了或还有什么可查的。
+
 输出纯文本，不要包含角色名或引号外的格式标记。"""
 
 NPC_NARRATOR_SUPPLEMENT = """[场景附加指令 — NPC 对话]
@@ -61,13 +75,21 @@ NARRATOR_CHAIN_SUPPLEMENT = """[时序映射指令]
 以下是本回合的已执行行动链（executed_actions）。请按顺序逐段翻译。
 
 每个 action 包含：
-- rule_context: 规则裁决的绝对结果（掷骰点、成功等级等），叙事不得与之矛盾
+- rule_context: 规则裁决的绝对结果（掷骰点、成功等级、物理裁决等），叙事不得与之矛盾
 - flavor_context: 玩家的 RP 修辞文本，必须融入该段的描写中
 - raw_fixed_text: 模组预设的绝对文本，如果有，必须逐字保留
 
 分段规则：
 先按顺序处理每个 action，段与段之间用自然过渡句连接，使整段叙事流畅。
 不要添加 rule_context 中未提及的新规则事实。
+
+【物理裁决特别指令】
+对于包含 physical_executed / execution_phase 字段的 action：
+- 如果 physical_executed=false 且 execution_phase=LOCKED，叙事必须围绕无法打开/无法操作展开
+- 如果 physical_executed=false 且 execution_phase=OUT_OF_REACH，叙事必须体现距离阻隔
+- 如果 execution_phase=ALREADY_SEARCHED，简要提及此地已搜过即可
+- physical_executed=true 时正常描写动作结果
+
 空间/标签/剧透等约束（见上文【守密人核心执行铁律】）仍然适用于整个叙事。"""
 
 

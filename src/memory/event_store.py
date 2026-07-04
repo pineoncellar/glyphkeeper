@@ -153,7 +153,7 @@ class EventStore:
             """INSERT INTO events (id, session_id, type, data, version, timestamp, source_node, parent_event_id, world_id)
                VALUES ($1, $2, $3, $4::jsonb, $5, $6::timestamptz, $7, $8, $9)""",
             event["id"], event["session_id"], event["type"],
-            json.dumps(event["data"], ensure_ascii=False),
+            json.dumps(event["data"], ensure_ascii=False, default=str),
             event["version"], now,
             event["source_node"], event["parent_event_id"],
             event["world_id"],

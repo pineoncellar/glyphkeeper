@@ -128,6 +128,14 @@ class GameState(TypedDict):
     # ── 对话历史 ──
     dialogue_history: list[dict]
 
+    # ── 物理交互子图内部传递（每轮清零，子图内节点间传递中间结果） ──
+    _skill_check_result: Optional[dict]       # skill_check_node 输出缓存
+    _spatial_result: Optional[dict]           # spatial_physics_node 输出缓存
+
+    # ── db_lookup_node 结构化缓存（供 spatial_physics_node 消费，免重复 SQL） ──
+    _scene_interactables: list[dict]          # 当前场景的可交互物品列表
+    _scene_locations: dict                    # 当前场景 + 邻接场景元数据
+
     # ── 运行时元数据 ──
     errors: list[str]
     node_trace: list[dict]
@@ -199,6 +207,11 @@ def create_initial_state(
         "resolved_targets": None,
         "scene_npcs": [],
         "attention_focus": None,
+        # 物理交互子图临时字段
+        "_skill_check_result": None,
+        "_spatial_result": None,
+        "_scene_interactables": [],
+        "_scene_locations": {},
         # 审计缓冲区
         "pending_tier1_events": [],
         "pending_tier2_facts": [],

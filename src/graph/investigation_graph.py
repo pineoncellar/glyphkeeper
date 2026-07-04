@@ -51,7 +51,7 @@ def build_investigation_subgraph() -> StateGraph:
     builder.add_edge("archivist", END)
 
     compiled = builder.compile()
-    logger.info("investigation_graph: 调查子图（含线索查询）编译完成")
+    logger.info("investigation_graph: 调查子图编译完成")
     return compiled
 
 

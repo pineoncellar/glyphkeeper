@@ -1510,6 +1510,27 @@ class CliAdapter(AbstractAdapter):
                     channel_id=channel_id,
                     world_id=world_id,
                 )
+                # 兜底：若存档丢失 current_location，从模组开场配置中恢复
+                slot = self._scheduler.get_session(session_id)
+                if slot:
+                    current_loc = get_current_player(slot.state).get("current_location", "")
+                    scenario = slot.state.get("scenario_name", "")
+                    if not current_loc and scenario:
+                        logger.info(
+                            f"读档: current_location 为空，尝试从模组 '{scenario}' 恢复"
+                        )
+                        from src.state.module_loader import ModuleLoader
+                        loader = ModuleLoader()
+                        modules = await loader.list_modules()
+                        for m in modules:
+                            if m.get("name") == scenario:
+                                start_loc = m.get("start_location", "")
+                                if start_loc:
+                                    get_current_player(slot.state)["current_location"] = start_loc
+                                    logger.info(
+                                        f"读档: 已恢复 start_location='{start_loc}'"
+                                    )
+                                break
                 # 恢复角色引用
                 char_data = get_current_player(restored_state).get("character")
                 if char_data and self._player_loader:

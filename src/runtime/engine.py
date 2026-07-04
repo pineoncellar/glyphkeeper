@@ -62,6 +62,10 @@ _RUNTIME_FIELDS: dict[str, object] = {
     "rag_context": "",            # rag_lookup_node 写
     "archivist_result": None,     # skill_node 写（有线索时）
     "entity_name_map": {},        # db_lookup_node 写（NPC key→显示名映射，供消歧）
+    "_skill_check_result": None,  # 物理交互子图内部传递
+    "_spatial_result": None,      # 物理交互子图内部传递
+    "_scene_interactables": [],   # db_lookup_node 结构化缓存
+    "_scene_locations": {},       # db_lookup_node 结构化缓存
     "_llm_trace": None,           # narrator_node 写
     "narrative_output": "",       # narrator_node 写（给 state_extractor 消费）
     "pending_tier1_events": [],   # state_extractor 写
@@ -409,6 +413,14 @@ class GraphEngine:
             state: GameState = dict(previous_state)
             state["player_input"] = player_input
             state["beat_counter"] = state.get("beat_counter", 0) + 1
+
+            # 防御：检测 current_location 是否丢失
+            current_loc = get_current_player(state).get("current_location", "")
+            if not current_loc and state.get("scenario_name"):
+                logger.warning(
+                    f"_prepare_state: current_location 在 scenario='{state.get('scenario_name')}' "
+                    f"下为空，session={session_id[:8]}"
+                )
         else:
             state = create_initial_state(
                 session_id=session_id,
@@ -566,7 +578,7 @@ class GraphEngine:
                     patch={"narrative": narrative},
                     event_type="NarrativeOutput",
                     source_node="engine",
-                    parent_event_id=ctx.execution_id,
+                    parent_event_id=str(ctx.execution_id),
                     extra_data={
                         "intent_type": intent_type,
                         "player_input": player_input[:60],

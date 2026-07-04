@@ -12,15 +12,17 @@ from src.nodes.rules.combat_node import combat_node
 from src.nodes.rules.skill_node import skill_node
 from src.nodes.rules.navigation_node import navigation_node
 from src.nodes.llm.npc_dialogue_node import npc_dialogue_node
+from src.nodes.physical.physical_interact_graph import run_physical_interact_subgraph
 from src.tools import get_logger
 
 logger = get_logger(__name__)
 
 
 # 意图类型 → 节点函数的路由表
+# PHYSICAL_INTERACT 走物理交互子图（三阶段检定→仲裁→结算）
 _DISPATCH_TABLE: dict[str, callable] = {
     "COMBAT_ACTION": combat_node,
-    "PHYSICAL_INTERACT": skill_node,
+    "PHYSICAL_INTERACT": run_physical_interact_subgraph,
     "SOCIAL_INTERACT": npc_dialogue_node,
     "MOVE": navigation_node,
 }
