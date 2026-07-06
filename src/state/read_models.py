@@ -181,6 +181,15 @@ class StaticReadStore:
             ALTER TABLE clue_discoveries
             ADD COLUMN IF NOT EXISTS loot_items TEXT[] DEFAULT '{}'
         """)
+        await conn.execute("""
+            ALTER TABLE clue_discoveries
+            ADD COLUMN IF NOT EXISTS required_item TEXT DEFAULT ''
+        """)
+        await conn.execute("""
+            ALTER TABLE clue_discoveries
+            ADD COLUMN IF NOT EXISTS deterministic_changes JSONB DEFAULT '{}'::jsonb
+        """)
+        logger.debug("read_models: 确保 required_item/deterministic_changes 列存在")
         for tbl in ("locations", "interactables", "entities", "knowledge_registry", "clue_discoveries"):
             col = await conn.fetchval(f"""
                 SELECT data_type FROM information_schema.columns
@@ -189,6 +198,29 @@ class StaticReadStore:
             if not col:
                 logger.info(f"read_models: 为 {tbl} 追加 world_id 列...")
                 await conn.execute(f"ALTER TABLE {tbl} ADD COLUMN world_id TEXT NOT NULL DEFAULT ''")
+
+        # 将单列 UNIQUE 升级为复合 UNIQUE (key, world_id)，使 copy_static_data_to_world 的 ON CONFLICT 生效
+        for tbl, col_name, constraint_name in [
+            ("locations", "key", "locations_key_key"),
+            ("interactables", "key", "interactables_key_key"),
+            ("entities", "key", "entities_key_key"),
+            ("knowledge_registry", "knowledge_id", "knowledge_registry_knowledge_id_key"),
+        ]:
+            try:
+                await conn.execute(f"ALTER TABLE {tbl} DROP CONSTRAINT IF EXISTS {constraint_name}")
+                await conn.execute(
+                    f"ALTER TABLE {tbl} ADD CONSTRAINT {constraint_name} UNIQUE ({col_name}, world_id)"
+                )
+            except Exception as e:
+                logger.debug(f"read_models: 迁移约束 {constraint_name} 跳过 ({e})")
+        # clue_discoveries 主键从 (id) 升级为 (id, world_id)，匹配 ON CONFLICT (id, world_id)
+        try:
+            await conn.execute("ALTER TABLE clue_discoveries DROP CONSTRAINT IF EXISTS clue_discoveries_pkey")
+            await conn.execute(
+                "ALTER TABLE clue_discoveries ADD PRIMARY KEY (id, world_id)"
+            )
+        except Exception as e:
+            logger.debug(f"read_models: 迁移 clue_discoveries 主键跳过 ({e})")
 
         # 索引加速运行时查询
         await conn.execute("""
@@ -285,7 +317,7 @@ class StaticReadStore:
                 await conn.execute(
                     """INSERT INTO interactables (id, key, name, location_id, tags, state, world_id)
                        VALUES ($1,$2,$3,$4,$5::text[],$6,$7)
-                       ON CONFLICT (key) DO NOTHING""",
+                       ON CONFLICT (key, world_id) DO NOTHING""",
                     iid, item["key"], item["name"],
                     item.get("location_id"),
                     item.get("tags", []),
@@ -336,7 +368,7 @@ class StaticReadStore:
                 await conn.execute(
                     """INSERT INTO knowledge_registry (id, knowledge_id, rag_key, description, tags_granted, world_id)
                        VALUES ($1,$2,$3,$4,$5::text[],$6)
-                       ON CONFLICT (knowledge_id) DO NOTHING""",
+                       ON CONFLICT (knowledge_id, world_id) DO NOTHING""",
                     kid, k["knowledge_id"], k.get("rag_key", ""),
                     k.get("description", ""), k.get("tags_granted", []),
                     wid,
@@ -356,13 +388,16 @@ class StaticReadStore:
             try:
                 await conn.execute(
                     """INSERT INTO clue_discoveries
-                       (id, interactable_id, entity_key, knowledge_id, required_check, flavor_text, loot_items, world_id)
-                       VALUES ($1,$2,$3,$4,$5::jsonb,$6,$7::text[],$8)""",
+                       (id, interactable_id, entity_key, knowledge_id, required_check,
+                        flavor_text, loot_items, required_item, deterministic_changes, world_id)
+                       VALUES ($1,$2,$3,$4,$5::jsonb,$6,$7::text[],$8,$9::jsonb,$10)""",
                     cid, c.get("interactable_id"), c.get("entity_key"),
                     c.get("knowledge_id"),
                     json.dumps(c.get("required_check", {}), ensure_ascii=False),
                     c.get("flavor_text", ""),
                     c.get("loot_items", []),
+                    c.get("required_item", ""),
+                    json.dumps(c.get("deterministic_changes", {}), ensure_ascii=False),
                     wid,
                 )
                 count += 1
@@ -500,6 +535,28 @@ class StaticReadStore:
             )
         return [dict(r) for r in rows]
 
+    async def get_clues_by_required_item(self, item_name: str, world_id: str = "") -> list[dict]:
+        """按 required_item 查询线索——用于背包物品消耗时匹配 use_item 型线索"""
+        conn = await self._get_conn()
+        wid = world_id or self._world_id
+        if wid:
+            rows = await conn.fetch(
+                """SELECT cd.*, kr.knowledge_id, kr.description, kr.tags_granted
+                   FROM clue_discoveries cd
+                   LEFT JOIN knowledge_registry kr ON cd.knowledge_id = kr.id
+                   WHERE cd.required_item = $1 AND cd.world_id = $2""",
+                item_name, wid,
+            )
+        else:
+            rows = await conn.fetch(
+                """SELECT cd.*, kr.knowledge_id, kr.description, kr.tags_granted
+                   FROM clue_discoveries cd
+                   LEFT JOIN knowledge_registry kr ON cd.knowledge_id = kr.id
+                   WHERE cd.required_item = $1""",
+                item_name,
+            )
+        return [self._normalize_jsonb_row(dict(r)) for r in rows]
+
     async def get_clues_for_entity(self, entity_key: str, world_id: str = "") -> list[dict]:
         """查询某个 NPC 关联的所有线索"""
         conn = await self._get_conn()
@@ -586,6 +643,23 @@ class StaticReadStore:
 
     # ── 触发器读模型查询 ──
 
+    @staticmethod
+    def _normalize_jsonb_row(row: dict) -> dict:
+        """将 asyncpg 行中的 JSONB 字符串字段反序列化为 Python 对象
+
+        某些历史数据中 conditions_json / actions_json 存储为 JSON 字符串
+        而非 JSON 对象（\"...\" 而非 {...}），asyncpg 返回 Python str 而非 dict。
+        此函数检测并修复之。
+        """
+        for col in ("conditions_json", "actions_json"):
+            val = row.get(col)
+            if isinstance(val, str):
+                try:
+                    row[col] = json.loads(val)
+                except (json.JSONDecodeError, TypeError):
+                    logger.warning(f"read_models: {col} 反序列化失败, val={val[:80]}")
+        return row
+
     async def get_triggers_by_module(self, module_name: str, world_id: str = "") -> list[dict]:
         """按模组名 + 世界 ID 查询静态触发器列表，按 priority 降序
 
@@ -606,7 +680,27 @@ class StaticReadStore:
                 "SELECT * FROM static_triggers WHERE module_name=$1 AND world_id='' ORDER BY priority DESC",
                 module_name,
             )
-        return [dict(r) for r in rows]
+        return [self._normalize_jsonb_row(dict(r)) for r in rows]
+
+    async def get_triggers_by_world(self, world_id: str) -> list[dict]:
+        """按世界 ID 查询所有静态触发器，不依赖 module_name
+
+        当 scenario_name 为空时的回退路径，查询精度与 /ev 命令一致。
+        先查精确 world_id，再回退到空 world_id（旧格式兼容）。
+        """
+        conn = await self._get_conn()
+        wid = world_id or self._world_id
+        rows = []
+        if wid:
+            rows = await conn.fetch(
+                "SELECT * FROM static_triggers WHERE world_id=$1 ORDER BY priority DESC",
+                wid,
+            )
+        if not rows:
+            rows = await conn.fetch(
+                "SELECT * FROM static_triggers WHERE world_id='' ORDER BY priority DESC",
+            )
+        return [self._normalize_jsonb_row(dict(r)) for r in rows]
 
     async def get_trigger_states(self, session_id: str) -> dict[str, dict]:
         """查询指定会话的所有触发器运行时状态
@@ -669,6 +763,44 @@ class StaticReadStore:
             "UPDATE session_trigger_state SET fired_this_turn = 0 WHERE session_id = $1",
             session_id,
         )
+
+    async def restore_trigger_states(
+        self,
+        session_id: str,
+        trigger_states: dict[str, dict],
+    ) -> int:
+        """读档时恢复触发器运行时状态
+
+        先清除会话现有 trigger_state 记录，然后按存档数据批量插入。
+        trigger_states 格式: {trigger_id: {fired_count, fired_this_turn, is_disabled}}
+        返回恢复的记录数。
+        """
+        conn = await self._get_conn()
+        # 清除现有记录
+        await conn.execute(
+            "DELETE FROM session_trigger_state WHERE session_id=$1",
+            session_id,
+        )
+        if not trigger_states:
+            return 0
+        count = 0
+        for tid, ts in trigger_states.items():
+            try:
+                await conn.execute("""
+                    INSERT INTO session_trigger_state
+                        (session_id, trigger_id, fired_count, fired_this_turn, is_disabled)
+                    VALUES ($1, $2, $3, $4, $5)
+                """,
+                    session_id, tid,
+                    ts.get("fired_count", 0),
+                    ts.get("fired_this_turn", 0),
+                    ts.get("is_disabled", False),
+                )
+                count += 1
+            except Exception as e:
+                logger.warning(f"恢复触发器状态失败 ({tid}): {e}")
+        logger.info(f"read_models: 已恢复 {count} 条触发器状态 (session={session_id[:8]})")
+        return count
 
     # ── 世界级触发器复制（种子 → 目标世界） ──
 
@@ -743,7 +875,7 @@ class StaticReadStore:
         counts: dict[str, int] = {"knowledge": 0, "locations": 0, "interactables": 0,
                                   "entities": 0, "clues": 0, "triggers": 0}
 
-        # 1. 复制 knowledge_registry（无 FK 依赖，保持 ID 不变）
+        # 1. 复制 knowledge_registry（保持 ID 不变供 clue FK 引用，已有相同 id 时跳过）
         kn_rows = await conn.fetch(
             "SELECT * FROM knowledge_registry WHERE world_id=$1", source_world_id,
         )
@@ -752,7 +884,7 @@ class StaticReadStore:
                 await conn.execute("""
                     INSERT INTO knowledge_registry (id, knowledge_id, rag_key, description, tags_granted, world_id)
                     VALUES ($1,$2,$3,$4,$5::text[],$6)
-                    ON CONFLICT (knowledge_id, world_id) DO NOTHING
+                    ON CONFLICT (id) DO NOTHING
                 """, row["id"], row["knowledge_id"], row.get("rag_key", ""),
                     row.get("description", ""), row.get("tags_granted", []), target_world_id)
                 counts["knowledge"] += 1
@@ -767,9 +899,12 @@ class StaticReadStore:
         loc_id_map: dict[str, str] = {}
         for row in loc_rows:
             try:
-                new_id = str(_uuid.uuid4())
+                new_id = str(uuid.uuid4())
                 loc_id_map[str(row["id"])] = new_id
-                exits_json_str = json.dumps(row.get("exits_json", {}), ensure_ascii=False)
+                raw_exits = row.get("exits_json", {})
+                if isinstance(raw_exits, str):
+                    raw_exits = json.loads(raw_exits) if raw_exits else {}
+                exits_json_str = json.dumps(raw_exits, ensure_ascii=False)
                 await conn.execute("""
                     INSERT INTO locations (id, key, name, base_desc, tags, exits_json, world_id)
                     VALUES ($1,$2,$3,$4,$5::text[],$6::jsonb,$7)
@@ -787,7 +922,7 @@ class StaticReadStore:
         item_id_map: dict[str, str] = {}
         for row in item_rows:
             try:
-                new_id = str(_uuid.uuid4())
+                new_id = str(uuid.uuid4())
                 item_id_map[str(row["id"])] = new_id
                 new_loc_id = loc_id_map.get(str(row["location_id"]), "")
                 await conn.execute("""
@@ -806,9 +941,12 @@ class StaticReadStore:
         )
         for row in ent_rows:
             try:
-                new_id = str(_uuid.uuid4())
+                new_id = str(uuid.uuid4())
                 new_loc_id = loc_id_map.get(str(row["location_id"]), "")
-                stats_str = json.dumps(row.get("stats_json", {}), ensure_ascii=False)
+                raw_stats = row.get("stats_json", {})
+                if isinstance(raw_stats, str):
+                    raw_stats = json.loads(raw_stats) if raw_stats else {}
+                stats_str = json.dumps(raw_stats, ensure_ascii=False)
                 await conn.execute("""
                     INSERT INTO entities (id, key, name, location_id, tags, stats_json, world_id)
                     VALUES ($1,$2,$3,$4,$5::text[],$6::jsonb,$7)
@@ -825,20 +963,29 @@ class StaticReadStore:
         )
         for row in clue_rows:
             try:
-                new_id = str(_uuid.uuid4())
+                new_id = str(uuid.uuid4())
                 new_item_id = item_id_map.get(str(row["interactable_id"]), "")
                 # knowledge_id 直接复用（knowledge_registry 保持 ID 不变）
                 kid = row.get("knowledge_id")
-                req_str = json.dumps(row.get("required_check", {}), ensure_ascii=False)
+                raw_req = row.get("required_check", {})
+                if isinstance(raw_req, str):
+                    raw_req = json.loads(raw_req) if raw_req else {}
+                req_str = json.dumps(raw_req, ensure_ascii=False)
+                raw_det = row.get("deterministic_changes", {})
+                if isinstance(raw_det, str):
+                    raw_det = json.loads(raw_det) if raw_det else {}
+                det_str = json.dumps(raw_det, ensure_ascii=False)
                 await conn.execute("""
                     INSERT INTO clue_discoveries
                         (id, interactable_id, entity_key, knowledge_id,
-                         required_check, flavor_text, loot_items, world_id)
-                    VALUES ($1,$2,$3,$4,$5::jsonb,$6,$7::text[],$8)
+                         required_check, flavor_text, loot_items,
+                         required_item, deterministic_changes, world_id)
+                    VALUES ($1,$2,$3,$4,$5::jsonb,$6,$7::text[],$8,$9::jsonb,$10)
                     ON CONFLICT (id, world_id) DO NOTHING
                 """, new_id, new_item_id or None, row.get("entity_key"),
                     kid, req_str, row.get("flavor_text", ""),
-                    row.get("loot_items", []), target_world_id)
+                    row.get("loot_items", []),
+                    row.get("required_item", ""), det_str, target_world_id)
                 counts["clues"] += 1
             except Exception as e:
                 logger.warning(f"复制线索失败: {e}")

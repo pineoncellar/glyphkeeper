@@ -68,7 +68,8 @@ class SnapshotManager:
                 version INTEGER NOT NULL, state_json JSONB NOT NULL,
                 event_version INTEGER NOT NULL,
                 created_at TIMESTAMPTZ NOT NULL, label TEXT DEFAULT '',
-                known_knowledge_ids JSONB DEFAULT '[]'::jsonb
+                known_knowledge_ids JSONB DEFAULT '[]'::jsonb,
+                trigger_states JSONB DEFAULT '{}'::jsonb
             )
         """)
 
@@ -82,6 +83,16 @@ class SnapshotManager:
                 "ALTER TABLE snapshots ADD COLUMN known_knowledge_ids JSONB DEFAULT '[]'::jsonb"
             )
             logger.info("snapshot: 追加 known_knowledge_ids 列")
+        # 迁移旧版表（无 trigger_states 列时追加）
+        tscol = await conn.fetchval("""
+            SELECT data_type FROM information_schema.columns
+            WHERE table_name='snapshots' AND column_name='trigger_states'
+        """)
+        if not tscol:
+            await conn.execute(
+                "ALTER TABLE snapshots ADD COLUMN trigger_states JSONB DEFAULT '{}'::jsonb"
+            )
+            logger.info("snapshot: 追加 trigger_states 列")
         await conn.execute("""
             CREATE INDEX IF NOT EXISTS idx_snapshots_session
             ON snapshots(session_id, version DESC)
@@ -107,14 +118,37 @@ class SnapshotManager:
         except Exception as e:
             logger.debug(f"snapshot: 获取 known_knowledge_ids 失败: {e}")
 
+        # 记录当前会话的触发器运行时状态（供读档恢复）
+        trigger_states: dict = {}
+        try:
+            from src.state.read_models import StaticReadStore
+            ts_store = StaticReadStore()
+            conn_ts = await ts_store._get_conn()
+            rows = await conn_ts.fetch(
+                "SELECT trigger_id, fired_count, fired_this_turn, is_disabled "
+                "FROM session_trigger_state WHERE session_id=$1",
+                session_id,
+            )
+            for r in rows:
+                trigger_states[r["trigger_id"]] = {
+                    "fired_count": r["fired_count"],
+                    "fired_this_turn": r["fired_this_turn"],
+                    "is_disabled": r["is_disabled"],
+                }
+        except Exception as e:
+            logger.debug(f"snapshot: 获取 trigger_states 失败: {e}")
+
         state_json = json.dumps(state, ensure_ascii=False, default=str)
         known_ids_json = json.dumps(known_ids, ensure_ascii=False)
+        trigger_states_json = json.dumps(trigger_states, ensure_ascii=False)
         await conn.execute(
             "INSERT INTO snapshots "
-            "(id,session_id,version,state_json,event_version,created_at,label,known_knowledge_ids) "
-            "VALUES ($1::uuid,$2,$3,$4::jsonb,$5,$6::timestamptz,$7,$8::jsonb)",
+            "(id,session_id,version,state_json,event_version,created_at,"
+            "label,known_knowledge_ids,trigger_states) "
+            "VALUES ($1::uuid,$2,$3,$4::jsonb,$5,$6::timestamptz,$7,$8::jsonb,$9::jsonb)",
             snapshot_id, session_id, next_version, state_json,
-            event_version, datetime.now(timezone.utc), label, known_ids_json,
+            event_version, datetime.now(timezone.utc), label,
+            known_ids_json, trigger_states_json,
         )
         await self._enforce_retention(session_id)
         return snapshot_id
@@ -142,9 +176,19 @@ class SnapshotManager:
             elif isinstance(known_ids_raw, (list, tuple)):
                 known_ids = list(known_ids_raw)
 
+        # 解析 trigger_states（兼容旧存档无此列的情况）
+        ts_raw = row.get("trigger_states")
+        trigger_states: dict = {}
+        if ts_raw:
+            if isinstance(ts_raw, str):
+                trigger_states = json.loads(ts_raw)
+            elif isinstance(ts_raw, dict):
+                trigger_states = dict(ts_raw)
+
         return {
             "state": state,
             "known_knowledge_ids": known_ids,
+            "trigger_states": trigger_states,
         }
 
     async def list_snapshots(self, session_id, limit=10):

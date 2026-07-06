@@ -515,6 +515,7 @@ class AbstractAdapter(ABC):
     async def _handle_world_list_cmd(self, session_id: str) -> OutboundMessage:
         """处理 /world list — 列出所有世界和当前活跃世界"""
         from src.tools.world_manager import list_worlds
+        from src.tools import get_settings
 
         worlds = list_worlds()
         if not worlds:
@@ -523,13 +524,12 @@ class AbstractAdapter(ABC):
                 session_id=session_id,
             )
 
-        from src.tools.world_manager import get_active_world
-        active = get_active_world()
+        active = get_settings().project.active_world
         lines = [f"可用世界 ({len(worlds)} 个):"]
         for w in worlds:
             mark = "\u2192" if w == active else " "
             lines.append(f"  {mark} {w}")
-        lines.append(f"\n当前世界: {active if active else '(未开始游戏)'}")
+        lines.append(f"\n当前世界: {active}")
         lines.append("每局 /world start 自动创建新世界，数据完全隔离。")
         return OutboundMessage.system_msg("\n".join(lines), session_id=session_id)
 
@@ -550,7 +550,8 @@ class AbstractAdapter(ABC):
 
         arg = delete_parts[2].strip()
 
-        from src.tools.world_manager import list_worlds, delete_world, set_active_world, get_active_world
+        from src.tools.world_manager import list_worlds, delete_world, set_active_world
+        from src.tools import get_settings
 
         worlds = list_worlds()
 
@@ -578,11 +579,13 @@ class AbstractAdapter(ABC):
 
     async def _purge_world_data(self, world_id: str):
         """彻底删除一个世界及其所有关联数据"""
-        from src.tools.world_manager import delete_world, set_active_world, get_active_world
+        from src.tools.world_manager import delete_world, set_active_world
+        from src.tools import get_settings
 
-        # 如果是当前活跃世界，切回空
-        if world_id == get_active_world():
+        # 如果是当前世界，切回默认
+        if world_id == get_settings().project.active_world:
             set_active_world("")
+        # 删除世界目录
         await delete_world(world_id)
 
         # 清理事件流
@@ -674,7 +677,7 @@ class AbstractAdapter(ABC):
                 f"世界目录创建失败: {world_id}",
                 level="error", session_id=session_id,
             )
-        # 先播种 LightRAG（模组基线知识），再设置内存活跃世界指针
+        # 先播种 LightRAG（模组基线知识），再切 active_world
         seed_ok = await seed_world_lightrag(world_id, module_name)
         # 从种子复制全部静态蓝图数据到新世界（locations/entities/items/clues/triggers）
         await copy_static_data_to_world(world_id, module_name)
@@ -695,6 +698,19 @@ class AbstractAdapter(ABC):
 
         # 覆盖 GameState 中的 world_id
         state["world_id"] = world_id
+
+        # 清空该会话的触发器运行时状态（新世界开始，旧 world 的触发记录不应残留）
+        try:
+            from src.state.read_models import StaticReadStore
+            ts_store = StaticReadStore()
+            conn_ts = await ts_store._get_conn()
+            await conn_ts.execute(
+                "DELETE FROM session_trigger_state WHERE session_id=$1",
+                session_id,
+            )
+            logger.info(f"world_start: 已清空触发器状态 (session={session_id[:8]})")
+        except Exception as e:
+            logger.debug(f"world_start: 清空触发器状态失败（非阻塞）: {e}")
 
         # 将会话状态注入 scheduler
         await self._ensure_engine()
@@ -752,7 +768,7 @@ class AbstractAdapter(ABC):
                 keeper_graph,
                 mode=ENGINE_MODE_LANGGRAPH,
                 enable_event_log=True,
-                enable_snapshot=False,
+                enable_snapshot=True,
             )
         if self._scheduler is None:
             self._scheduler = InputScheduler(self._engine)

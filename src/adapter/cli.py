@@ -113,8 +113,8 @@ class CliAdapter(AbstractAdapter):
         if slot and slot.world_id:
             world_id = slot.world_id
         else:
-            from src.tools.world_manager import get_active_world
-            world_id = get_active_world()
+            from src.tools.config import get_settings
+            world_id = get_settings().project.active_world
 
         routing = dict(
             platform="cli",
@@ -458,7 +458,7 @@ class CliAdapter(AbstractAdapter):
                     "/quit", "/q", "/help", "/h",
                     "/world", "/archive", "/module", "/card",
                     "/debug", "/d", "/scene", "/sc",
-                    "/events", "/ev",
+                    "/events", "/ev", "/endings",
                 )
                 if msg.type == MessageType.PLAYER_INPUT or not any(
                     lower.startswith(a) for a in allowed
@@ -570,6 +570,11 @@ class CliAdapter(AbstractAdapter):
                 await self.send(out)
                 print()
                 continue
+            if msg.type == MessageType.SYSTEM_CMD and msg.text.strip().lower() == "/endings":
+                out = await self._handle_endings_cmd(self.session_id)
+                await self.send(out)
+                print()
+                continue
             if msg.type == MessageType.SYSTEM_CMD and msg.text.strip().lower().startswith("/rollback"):
                 out = await self._handle_rollback_cmd(msg.text.strip(), self.session_id)
                 await self.send(out)
@@ -593,6 +598,29 @@ class CliAdapter(AbstractAdapter):
 
             # 检测 state 中是否有 pending_dice，进入交互式掷骰子循环
             await self._resolve_pending_dice_interactive(session_id=self.session_id)
+
+            # 检测结团：Engine 在 SUSPEND_ENDING 后会在 state 标记 _game_ended
+            state_after = self._scheduler.get_session_state(self.session_id) if self._scheduler else None
+            if state_after and state_after.get("_game_ended"):
+                ending_id = state_after.get("_ending_id_archive", "unknown")
+                # 结团后备份 LightRAG 数据到存档关联目录
+                try:
+                    world_id = state_after.get("world_id", "")
+                    if world_id:
+                        from src.memory.vector_store import VectorStore
+                        vs = await VectorStore.get_instance("world", world_id=world_id)
+                        backup_dir = _ensure_lightrag_backup_dir("__ENDING__" + ending_id)
+                        await vs.backup_to(backup_dir)
+                except Exception as e:
+                    logger.warning(f"结团: LightRAG 备份失败: {e}")
+                # 清除结团标记
+                state_after.pop("_game_ended", None)
+                state_after.pop("_ending_id_archive", None)
+                # 退回主菜单（不清除会话/引擎，允许重新 /world start）
+                self._game_started = False
+                print()
+                logger.info(f"游戏已结束，退回主菜单 (ending={ending_id})")
+                continue
 
             # 每轮交互后触发记忆固化
             await self._trigger_memorizer(session_id=self.session_id)
@@ -1503,12 +1531,17 @@ class CliAdapter(AbstractAdapter):
 
             target_id = ""
             if label:
-                # 按标签匹配
+                # 按标签匹配（排除结团存档）
                 matches = [s for s in snapshots if s.get("label", "") == label]
                 if not matches:
-                    available = ", ".join(s.get("label", "?") for s in snapshots[:10])
+                    available = ", ".join(s.get("label", "?") for s in snapshots[:10] if not s.get("label", "").startswith("__ENDING__"))
                     return OutboundMessage.system_msg(
                         f"未找到存档 [{label}]。可用存档: {available}",
+                        level="warn", session_id=session_id,
+                    )
+                if label.startswith("__ENDING__"):
+                    return OutboundMessage.system_msg(
+                        "结团存档为只读存档，无法加载。",
                         level="warn", session_id=session_id,
                     )
                 target_id = matches[0]["id"]
@@ -1585,6 +1618,16 @@ class CliAdapter(AbstractAdapter):
             except Exception as e:
                 logger.warning(f"读档: 恢复知识状态失败: {e}")
 
+            # 恢复触发器运行时状态至存档时的状态
+            trigger_states = restored.get("trigger_states", {})
+            if trigger_states:
+                try:
+                    from src.state.read_models import StaticReadStore
+                    ts_store = StaticReadStore()
+                    await ts_store.restore_trigger_states(session_id, trigger_states)
+                except Exception as e:
+                    logger.warning(f"读档: 恢复触发器状态失败: {e}")
+
             # 恢复 LightRAG 数据
             try:
                 from src.memory.vector_store import VectorStore
@@ -1620,11 +1663,18 @@ class CliAdapter(AbstractAdapter):
                     session_id=session_id,
                 )
 
-            lines = [f"存档列表 ({len(snapshots)} 个):"]
-            for s in snapshots:
+            # 过滤结团只读存档
+            normal = [s for s in snapshots if not s.get("label", "").startswith("__ENDING__")]
+            if not normal:
+                return OutboundMessage.system_msg(
+                    "没有可读取的存档。结团存档不可读取。",
+                    session_id=session_id,
+                )
+            lines = [f"存档列表 ({len(normal)} 个):"]
+            for s in normal:
                 lbl = s.get("label", "")
                 ver = s.get("version", 0)
-                ts = str(s.get("created_at", ""))[:19]  # ISO 前19字符
+                ts = str(s.get("created_at", ""))[:19]
                 lines.append(f"  [{lbl}]  v{ver}  ({ts})")
             lines.append("使用 /archive load <存档名> 读取存档。")
             return OutboundMessage.system_msg("\n".join(lines), session_id=session_id)
@@ -1876,10 +1926,11 @@ class CliAdapter(AbstractAdapter):
 
         try:
             from src.state.read_models import StaticReadStore
-            store = StaticReadStore()
+            world_id = state.get("world_id", "")
+            store = StaticReadStore(world_id=world_id)
 
             # 查场景基本信息
-            loc = await store.get_location(current_loc)
+            loc = await store.get_location(current_loc, world_id=world_id)
             if not loc:
                 return OutboundMessage.system_msg(
                     f"场景 '{current_loc}' 未在数据库中找到（模组可能尚未摄入）。",
@@ -1895,10 +1946,10 @@ class CliAdapter(AbstractAdapter):
                 raw_exits = json.loads(raw_exits) if raw_exits else {}
 
             # 查物品
-            items = await store.get_interactables_by_location(current_loc)
+            items = await store.get_interactables_by_location(current_loc, world_id=world_id)
 
             # 查 NPC 实体
-            entities = await store.get_entities_by_location(current_loc)
+            entities = await store.get_entities_by_location(current_loc, world_id=world_id)
 
             lines = [
                 f"📍 场景: {loc_name}  ({current_loc})",
@@ -2106,6 +2157,33 @@ class CliAdapter(AbstractAdapter):
                 level="warn", session_id=session_id,
             )
 
+    async def _handle_endings_cmd(self, session_id: str) -> OutboundMessage:
+        """处理 /endings — 列出所有结团只读存档。"""
+        try:
+            snapshots = await self._snapshot_mgr.list_snapshots(session_id)
+            endings = [s for s in snapshots if s.get("label", "").startswith("__ENDING__")]
+            if not endings:
+                return OutboundMessage.system_msg(
+                    "没有结团存档。游戏结束后会自动生成。",
+                    session_id=session_id,
+                )
+
+            lines = [f"结团存档 ({len(endings)} 个):"]
+            for s in endings:
+                lbl = s.get("label", "")
+                ending_id = lbl[len("__ENDING__"):] if lbl.startswith("__ENDING__") else lbl
+                ver = s.get("version", 0)
+                ts = str(s.get("created_at", ""))[:19]
+                lines.append(f"  [{ending_id}]  v{ver}  ({ts})")
+            lines.append("使用 /archive delete <标签> 删除结团存档。")
+            return OutboundMessage.system_msg("\n".join(lines), session_id=session_id)
+
+        except Exception as e:
+            logger.warning(f"/endings 查询失败: {e}")
+            return OutboundMessage.system_msg(
+                f"查询失败: {e}", level="warn", session_id=session_id,
+            )
+
     # ================================================================
     # Workers 生命周期管理
     # ================================================================
@@ -2126,9 +2204,15 @@ class CliAdapter(AbstractAdapter):
             from src.memory.vector_store import VectorStore
 
             event_store = await create_event_store()
-            vector_store = await VectorStore.get_instance(
-                domain="world", llm_tier="standard",
-            )
+            # 启动时尚未开始游戏，无活跃世界，VectorStore 暂不初始化
+            # 各 Worker 内部已处理 vector_store=None 的降级逻辑
+            vector_store = None
+            try:
+                vector_store = await VectorStore.get_instance(
+                    domain="world", llm_tier="standard",
+                )
+            except (ValueError, RuntimeError) as e:
+                logger.info(f"VectorStore 暂不可用（游戏开始后自动就绪）: {e}")
 
             self._memorizer = MemorizerWorker(
                 event_store=event_store, vector_store=vector_store, interval=300,

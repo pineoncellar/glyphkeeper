@@ -70,6 +70,10 @@ _RUNTIME_FIELDS: dict[str, object] = {
     "narrative_output": "",       # narrator_node 写（给 state_extractor 消费）
     "pending_tier1_events": [],   # state_extractor 写
     "pending_tier2_facts": [],    # state_extractor 写
+    "control": None,              # reduce_iter_node 写（SUSPEND_ENDING）
+    "_ending_id": None,           # reduce_iter_node 写
+    "_game_ended": None,          # Engine.run 写（adapter 层消费）
+    "_ending_id_archive": None,   # Engine.run 写（adapter 层消费）
 }
 """
 _prepare_state 用此清单清除上一轮遗留在 GameState 中的运行时数据。
@@ -228,7 +232,9 @@ class GraphEngine:
                 # 清除控制标记，避免下一轮再次触发
                 new_state.pop("control", None)
                 new_state.pop("_ending_id", None)
-                # 在 output 中添加结团标记供 adapter 层识别
+                # 打上结团标记，adapter 层据此触发存档备份并退回主菜单
+                new_state["_game_ended"] = True
+                new_state["_ending_id_archive"] = ending_id
                 return narrative, new_state
 
             # ── 执行后：由 navigation_node 处理 MOVE 位置更新，此处只做 WorldManager 同步 ──
@@ -366,13 +372,15 @@ class GraphEngine:
         try:
             from src.memory.event_store import create_event_store
             es = await create_event_store()
-            recent_events = await es.get_recent_by_session(
-                session_id, limit=5,
-                event_types=["PlayerMoved", "SanityLost", "CombatResolved",
-                             "ItemStateChanged", "ClueDiscovered", "EntityKilled"],
-            )
+            all_events = await es.get_events(session_id, since_version=0)
+            filtered = [
+                e for e in all_events
+                if e.get("type") in ("PlayerMoved", "SanityLost", "CombatResolved",
+                                     "ItemStateChanged", "ClueDiscovered", "EntityKilled")
+            ]
+            recent_events = filtered[-5:]
         except Exception as e:
-            logger.warning(f"Engine.game_over: 捞关键事件失败: {e}")
+            logger.debug(f"Engine.game_over: 捞关键事件失败（非阻塞）: {e}")
 
         # LLM 生成个性化谢幕词
         ending_narrative = await self._generate_ending_narrative(
@@ -383,11 +391,11 @@ class GraphEngine:
             current_narrative=narrative,
         )
 
-        # 锁存世界状态
+        # 保存结团存档快照
         if self._snapshot_mgr:
             try:
-                snap_id = await self._snapshot_mgr.create(state, label=f"ending_{ending_id}")
-                logger.info(f"Engine.game_over: 结局快照已创建 {snap_id[:8]}")
+                snap_id = await self._snapshot_mgr.create(state, label="__ENDING__" + ending_id)
+                logger.info(f"Engine.game_over: 结团快照已创建 {snap_id[:8]}")
             except Exception as e:
                 logger.warning(f"Engine.game_over: 快照创建失败: {e}")
 
@@ -452,7 +460,7 @@ class GraphEngine:
                 max_tokens=2048,
                 temperature=0.8,
             )
-            ending_text = result.content if hasattr(result, "content") else str(result)
+            ending_text = getattr(result, "text", None) or getattr(result, "content", None) or str(result)
             if ending_text and len(ending_text) > 50:
                 return ending_text
 

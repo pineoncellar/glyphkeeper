@@ -32,6 +32,7 @@ from pathlib import Path
 from typing import Optional, Literal
 
 from lightrag import LightRAG, QueryParam
+from lightrag.llm.openai import openai_complete_if_cache
 
 from src.tools import get_settings, get_logger, PROJECT_ROOT
 from src.tools.config import _DEBUG_MODE
@@ -106,7 +107,7 @@ class VectorStore:
             domain:     数据域 ("world" / "rules")
             llm_tier:   LLM 模型层级
             force_reinit: 强制重新初始化
-            world_id:   世界标识（覆盖 active_world，仅 domain="world" 时生效）
+            world_id:   世界标识
         """
         # 多世界缓存键：domain + world_id，确保不同世界隔离
         cache_key = f"{domain}:{world_id}" if world_id and domain == "world" else domain
@@ -171,8 +172,6 @@ class VectorStore:
 
     def _create_llm_func(self, tier: str):
         """创建 LightRAG 兼容的 LLM 调用函数（lazy import）"""
-        from lightrag.llm.openai import openai_complete_if_cache
-
         settings = get_settings()
         model_config, provider_config = settings.get_full_model_config(tier)
 

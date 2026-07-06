@@ -49,9 +49,18 @@ async def _query_clues(
             character_name=character_name,
         )
         if clue_result:
+            # 防御：asyncpg 可能以 str 返回 JSONB 值，统一转 dict
+            raw_det = clue_result.get("deterministic_changes", {})
+            if isinstance(raw_det, str):
+                try:
+                    import json
+                    clue_result["deterministic_changes"] = json.loads(raw_det)
+                except (json.JSONDecodeError, TypeError):
+                    clue_result["deterministic_changes"] = {}
             logger.info(
                 f"effect_archivist: 线索发现! "
-                f"knowledge={clue_result.get('knowledge_id')}"
+                f"knowledge={clue_result.get('knowledge_id')} "
+                f"det_type={type(clue_result.get('deterministic_changes')).__name__}"
             )
             return [clue_result]
     except Exception as e:
@@ -153,12 +162,12 @@ async def effect_archivist_node(state: GameState) -> dict:
     # 决定是否查线索：
     # NORMAL 路径 — 检定成功 + 物理执行 + 首次搜索，走 PG 线索表
     # IMPROMPTU 路径 — 即兴物品，直接跳过线索查询防幻觉
-    # INVENTORY_CONSUME 路径 — 背包物品操作（消耗/使用），不查线索
+    # INVENTORY_CONSUME 路径 — 背包物品消耗，按 required_item 查 use_item 型线索
     clues_discovered: list[dict] = []
     raw_text = ""
-    if execution_phase in ("IMPROMPTU", "INVENTORY_CONSUME"):
+    if execution_phase == "IMPROMPTU":
         pass
-    elif is_success and physical_executed and execution_phase == "NORMAL":
+    elif is_success and physical_executed and execution_phase in ("NORMAL", "INVENTORY_CONSUME"):
         session_id = state.get("session_id", "")
         character_data = get_current_player(state).get("character") or {}
         character_name = character_data.get("name", "")
@@ -175,10 +184,24 @@ async def effect_archivist_node(state: GameState) -> dict:
 
     # 从线索中提取掉落物品列表（loot_items），追加到 deterministic_changes
     loot_items: list[str] = []
+    clue_det_changes: dict = {}
     if clues_discovered:
         loot = clues_discovered[0].get("loot_items", [])
         if loot and isinstance(loot, list):
             loot_items = loot
+        det = clues_discovered[0].get("deterministic_changes", {})
+        if det and isinstance(det, dict):
+            clue_det_changes = det
+
+    # 从线索 deterministic_changes 提取无前缀的全局 flag 变更
+    # 如 {"poison_gas_released": true} → 写入 _global_flags.poison_gas_released
+    extra_det: dict = {}
+    if clue_det_changes:
+        extra_det["_global_flags"] = clue_det_changes
+    logger.info(
+        f"effect_archivist: clue_det={clue_det_changes!r} "
+        f"extra_det={extra_det!r} loot={loot_items}"
+    )
 
     # 特殊兜底：掉落物品捡回（target_key 是 dropped_ 开头，无线索但应入包）
     # 由 _build_state_changes 根据 target_key 前缀决定产出 _inventory_append
@@ -216,6 +239,7 @@ async def effect_archivist_node(state: GameState) -> dict:
         "deterministic_changes": {
             **_build_state_changes(spatial, target_key, target_name),
             **({"_inventory_append": loot_items} if loot_items else {}),
+            **extra_det,
         },
         "raw_fixed_text": raw_text,
         "flavor_context": current_intent.get("flavor_context", ""),

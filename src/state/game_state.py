@@ -139,6 +139,12 @@ class GameState(TypedDict):
     # ── 运行时掉落物品池（key=场景key, value=该场景地面上的物品名列表） ──
     _dropped_items: dict[str, list[str]]
 
+    # ── 运行时控制元数据 ──
+    control: Optional[str]
+    """引擎控制语义，如 SUSPEND_ENDING（结团挂起）、WAIT_DICE 等"""
+    _ending_id: Optional[str]
+    """结团标识，由触发器 TRIGGER_ENDING 动作设置，Engine 层消费"""
+
     # ── 运行时元数据 ──
     errors: list[str]
     node_trace: list[dict]

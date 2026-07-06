@@ -5,10 +5,11 @@
 @Note     :   每局 /start 自动生成新 world_id，确保数据完全隔离
 
 使用方式:
-    from src.tools.world_manager import generate_world_id, create_world, seed_world_lightrag, get_active_world
+    from src.tools.world_manager import generate_world_id, create_world, seed_world_lightrag, set_active_world
     wid = generate_world_id("mtest")
     await create_world(wid)
     await seed_world_lightrag(wid, "mtest")
+    set_active_world(wid)
 """
 
 from __future__ import annotations
@@ -18,35 +19,9 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
-from src.tools import get_logger, PROJECT_ROOT
+from src.tools import get_logger, get_settings, PROJECT_ROOT
 
 logger = get_logger(__name__)
-
-
-# ------- 运行时活跃世界（仅 CLI 会话级内存状态，非配置持久化） -------
-
-_active_world: str = ""
-
-
-def get_active_world() -> str:
-    """返回当前 CLI 会话的活跃世界 ID
-
-    仅作用于运行时的 CLI 会话层，不写任何配置文件。
-    空字符串表示尚未开始游戏。
-    """
-    return _active_world
-
-
-def set_active_world(world_id: str):
-    """设置当前 CLI 会话的活跃世界 ID
-
-    运行时生效，不写任何配置文件，重启后丢失。
-    仅 CLI 会话层使用，引擎层通过 SessionSlot.world_id 获取世界标识。
-    """
-    global _active_world
-    old = _active_world
-    _active_world = world_id
-    logger.info(f"Active world: {old if old else '(空)'} -> {world_id if world_id else '(空)'}")
 
 
 # ------- 世界 ID 生成 -------
@@ -86,6 +61,17 @@ def list_worlds() -> list[str]:
         d.name for d in worlds_dir.iterdir()
         if d.is_dir() and not d.name.startswith(".")
     )
+
+
+def set_active_world(world_id: str):
+    """将 settings 中的 active_world 切换为目标世界
+
+    运行时生效，不写回 config.yaml 文件。
+    """
+    settings = get_settings()
+    old = settings.project.active_world
+    settings.project.active_world = world_id
+    logger.info(f"Active world: {old} → {world_id}")
 
 
 async def delete_world(world_id: str) -> bool:

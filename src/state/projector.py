@@ -154,6 +154,8 @@ class StateProjector:
                         "required_check": clue.get("required_check", {}),
                         "flavor_text": clue.get("flavor_text", ""),
                         "loot_items": clue.get("loot_items", []),
+                        "required_item": clue.get("required_item", ""),
+                        "deterministic_changes": clue.get("deterministic_changes", {}),
                     })
 
             # NPC 的 dialogue_clues 字段同理

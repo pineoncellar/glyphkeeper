@@ -39,6 +39,7 @@ class ProjectConfig(BaseModel):
     """项目基础配置"""
     name: str = Field("GlyphKeeper", description="项目名称")
     debug: bool = Field(False, description="调试模式")
+    active_world: str = Field("", description="当前活跃世界 ID，运行时由 world_manager.set_active_world 设置，不写回配置文件")
     model_cost_tracking: bool = Field(False, description="是否开启模型成本追踪")
     model_usage_logging: bool = Field(True, description="是否将每次模型调用的用量/额度追加写入日志文件")
     model_usage_log_path: str = Field("logs/llm_usage.jsonl", description="模型用量日志文件路径（相对项目根目录）")

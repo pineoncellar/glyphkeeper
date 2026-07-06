@@ -29,7 +29,7 @@ APPEND_FIELDS = {
 }
 """需要追加而非替换的 list 字段"""
 
-DEEP_MERGE_FIELDS = {"intent", "resolution", "pending_dice"}
+DEEP_MERGE_FIELDS = {"intent", "resolution", "pending_dice", "_global_flags"}
 """需要深度合并的 dict 字段"""
 
 COUNTER_FIELDS = {"beat_counter", "combat_round"}

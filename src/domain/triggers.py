@@ -9,12 +9,14 @@
 
 from __future__ import annotations
 
-import logging
+import json
 from enum import Enum
 from dataclasses import dataclass, field
 from typing import Any, Callable, Optional
 
-logger = logging.getLogger(__name__)
+from src.tools import get_logger
+
+logger = get_logger(__name__)
 
 
 # ====================================================================
@@ -81,6 +83,11 @@ def _check_at_location(ctx: EvalContext, params: dict) -> bool:
     if not loc_key:
         return False
     players = ctx.state.get("players", {})
+    logger.info(
+        f"_check_at_location: loc_key={loc_key!r} "
+        f"players_keys={list(players.keys())} "
+        f"player_locs={ {k: v.get('current_location', 'N/A') for k, v in players.items()} }"
+    )
     for p in players.values():
         if p.get("current_location", "") == loc_key:
             return True
@@ -355,6 +362,16 @@ def evaluate_triggers(
         "fired_triggers": ["id1", "id2"],  # 本轮触发的 trigger_id 列表
       }
     """
+    # ── 安全反序列化：修复 JSONB 被存为 JSON 字符串的历史数据 ──
+    for t in triggers:
+        for col in ("conditions_json", "actions_json"):
+            val = t.get(col)
+            if isinstance(val, str):
+                try:
+                    t[col] = json.loads(val)
+                except (json.JSONDecodeError, TypeError):
+                    logger.warning(f"triggers: {col} 反序列化失败 (trigger={t.get('trigger_id','')})")
+
     patch: dict = {}
     echo_texts: list[str] = []
     ending_id = ""
@@ -387,9 +404,17 @@ def evaluate_triggers(
         # 求值条件
         conditions = trigger.get("conditions_json", {})
         if not conditions:
+            logger.info(f"triggers: '{tid}' conditions_json 为空，跳过")
             continue
 
-        if not evaluate_conditions(conditions, ctx):
+        logger.info(
+            f"triggers: '{tid}' 求值 conditions type={type(conditions).__name__} "
+            f"value={conditions!r}"
+        )
+
+        eval_ok = evaluate_conditions(conditions, ctx)
+        logger.info(f"triggers: '{tid}' evaluate_conditions → {eval_ok}")
+        if not eval_ok:
             continue
 
         # 条件满足，编译动作

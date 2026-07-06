@@ -104,9 +104,11 @@ class Archivist:
 
         先查物品线索（clue_discoveries WHERE interactable_id = target），
         无匹配再查 NPC 线索（clue_discoveries WHERE entity_key = target）。
+        最后查 use_item 线索（WHERE required_item = target）。
         均无匹配时返回 None。
 
-        注意：target_key 已由 archivist_node 解析完成，此处不再做降级匹配。
+        target_key 可能为场景物品 key（如 item_wooden_chest），
+        也可能为背包物品名（如"剧毒毒气弹"）。
         """
         store = await self.static_store
 
@@ -137,6 +139,24 @@ class Archivist:
                 source="dialogue",
             )
 
+        # 最后查 use_item 线索（背包物品消耗/使用）
+        item_clues = await store.get_clues_by_required_item(target_key)
+        logger.info(
+            f"archivist: get_clues_by_required_item({target_key!r}) "
+            f"返回 {len(item_clues)} 条, "
+            f"det={[c.get('deterministic_changes',{}) for c in item_clues[:3]]!r}"
+        )
+        if item_clues:
+            return await self._process_clues(
+                clues=item_clues,
+                session_id=session_id,
+                skill_name=skill_name,
+                skill_value=skill_value,
+                roll_value=roll_value,
+                character_name=character_name,
+                source="examine",
+            )
+
         logger.debug(f"archivist: 目标 '{target_key}' 无关联线索")
         return None
 
@@ -163,6 +183,13 @@ class Archivist:
             required_check = raw_check if isinstance(raw_check, dict) else {}
 
             if not required_check:
+                raw_det = clue.get("deterministic_changes", {})
+                if isinstance(raw_det, str):
+                    try:
+                        import json
+                        raw_det = json.loads(raw_det)
+                    except (json.JSONDecodeError, TypeError):
+                        raw_det = {}
                 return await self._grant_clue(
                     session_id=session_id,
                     knowledge_id=clue.get("knowledge_id", ""),
@@ -170,6 +197,7 @@ class Archivist:
                     source=source,
                     character_name=character_name,
                     loot_items=clue.get("loot_items", []),
+                    deterministic_changes=raw_det,
                 )
 
             # 有检定条件：先比对技能名（含中英映射）
@@ -208,16 +236,18 @@ class Archivist:
         source: str,
         character_name: str,
         loot_items: list = None,
+        deterministic_changes: dict = None,
     ) -> dict:
         """颁发线索：发出 ClueDiscovered 事件，随后投影到 session_knowledge_state
 
-        返回含 knowledge_id、flavor_text、source、loot_items 的字典。
+        返回含 knowledge_id、flavor_text、source、loot_items、deterministic_changes 的字典。
         投影失败仅记警告，不做回滚 — 事件本身已确保线索不会丢失。
         """
         loot = loot_items or []
+        det = deterministic_changes or {}
         if not knowledge_id:
             logger.debug("archivist: 线索无 knowledge_id，仅返回 flavor_text（纯文本线索）")
-            return {"knowledge_id": "", "flavor_text": flavor_text, "source": source, "loot_items": loot}
+            return {"knowledge_id": "", "flavor_text": flavor_text, "source": source, "loot_items": loot, "deterministic_changes": det}
 
         # 先发出 ClueDiscovered 事件（主流程，保证不丢）
         es = await self.event_store

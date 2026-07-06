@@ -390,10 +390,11 @@ def _get_target_key(state: GameState) -> str:
     intent = _current_intent(state)
     intent_data = intent.get("data", {})
 
-    # resolved_targets 按 target 名称索引
-    target_name = intent_data.get("target", "")
-    if target_name and target_name in resolved:
-        return resolved[target_name]
+    # resolved_targets 格式: {"primary_id": "...", "secondary_id": ..., "target_type": "..."}
+    # primary_id 是消岐节点匹配到的系统 ID（场景物品 key / 背包物品名 / NPC key）
+    primary_id = resolved.get("primary_id", "")
+    if primary_id:
+        return primary_id
 
     # 兜底用 intent_data 中的 target_key
     return intent_data.get("target_key", intent_data.get("target", ""))
@@ -492,7 +493,9 @@ async def spatial_physics_node(state: GameState) -> dict:
     elif fact.spatial_reason == "TARGET_NOT_FOUND":
         intent = _current_intent(state)
         intent_data = intent.get("data", {})
-        target_str = intent_data.get("target", target_key)
+        # 使用消岐后的 target_key（已含 resolved_targets.primary_id），
+        # 而非 intent_data 中的原始目标名（LLM 提取的可能不精确）
+        target_str = target_key or intent_data.get("target", "")
         action_detail = intent_data.get("detail", "")
 
         # 优先检查背包：玩家自己的物品不需要场景存在性验证

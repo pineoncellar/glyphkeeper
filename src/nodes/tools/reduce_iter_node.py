@@ -77,9 +77,11 @@ async def reduce_iter_node(state: GameState) -> dict:
     changes = dict(last.get("deterministic_changes", {}))
 
     if not changes:
+        logger.debug(f"reduce_iter: deterministic_changes 为空, action_type={last.get('intent_type','?')}")
         return {}
 
     patch = {}
+    logger.info(f"reduce_iter: 原始 deterministic_changes keys={list(changes.keys())}")
 
     # _inventory_append — 整层玩家槽覆写
     # 支持单物品 str（即兴落包）和批量物品 list（线索 loot_items）
@@ -189,12 +191,20 @@ async def _evaluate_triggers_after_reduce(state: dict, current_patch: dict) -> d
 
     从 PG 加载静态触发器 + 运行时状态，构造 EvalContext 后求值。
     全程 try-and-ignore，失败仅记 warning，不抛异常。
+
+    注意: Graph 运行时玩家字段（current_location 等）暂存于 state 顶层，
+    rehome_player_fields() 执行后才搬入 players[uid]。因此 merged_state
+    需做同样归位，否则触发器的 AT_LOCATION 等条件会读到 players 中的旧值。
     """
     session_id = state.get("session_id", "")
     world_id = state.get("world_id", "")
     module_name = state.get("scenario_name", "")
+    logger.info(
+        f"reduce_iter: 触发器评估 session={session_id[:8] if session_id else 'EMPTY'!r} "
+        f"module={module_name!r} world={world_id[:16] if world_id else 'EMPTY'!r}"
+    )
 
-    if not session_id or not module_name:
+    if not session_id:
         return {}
 
     try:
@@ -202,10 +212,25 @@ async def _evaluate_triggers_after_reduce(state: dict, current_patch: dict) -> d
         store = StaticReadStore()
         conn = await store._get_conn()
 
-        # 加载静态触发器
-        triggers = await store.get_triggers_by_module(module_name, world_id)
+        # 加载静态触发器：优先按 module_name+world_id 查，
+        # 若 module_name 为空则回退到按 world_id 查（兼容 /ev 的查询方式）
+        triggers = []
+        if module_name:
+            triggers = await store.get_triggers_by_module(module_name, world_id)
+            if not triggers:
+                logger.debug(f"reduce_iter: 按 module='{module_name}' 未查到触发器，尝试按 world_id 回退")
+        if not triggers and world_id:
+            triggers = await store.get_triggers_by_world(world_id)
+            if triggers:
+                logger.debug(f"reduce_iter: 按 world_id='{world_id[:20]}' 回退查到 {len(triggers)} 条触发器")
         if not triggers:
+            logger.debug(f"reduce_iter: 无触发器 (session={session_id[:8]}, module='{module_name}', world='{world_id[:20]}')")
             return {}
+
+        logger.info(
+            f"reduce_iter: 加载了 {len(triggers)} 条触发器, "
+            f"trigger_ids=[{', '.join(t.get('trigger_id','')[:30] for t in triggers[:5])}]"
+        )
 
         # 加载运行时状态
         trigger_states = await store.get_trigger_states(session_id)
@@ -213,8 +238,8 @@ async def _evaluate_triggers_after_reduce(state: dict, current_patch: dict) -> d
         # 构造求值上下文
         from src.domain.triggers import EvalContext, evaluate_triggers
 
-        # 组装一个合成 state 供触发器求值：当前 state + 本轮 patch 的推测结果
-        # 这样触发器能"看到"本轮刚刚发生的变更（如物品入包、位置变化）
+        # ── 组装合成 state ──
+        # 当前 state + 本轮 patch 的推测结果，并处理玩家字段归位
         merged_state = dict(state)
         for k, v in current_patch.items():
             if k == "players":
@@ -230,6 +255,43 @@ async def _evaluate_triggers_after_reduce(state: dict, current_patch: dict) -> d
             else:
                 merged_state[k] = v
 
+        # ── 玩家字段归位 ──
+        # 将顶层属于 players[uid] 的字段同步搬入 players 槽内。
+        # Graph 运行时节点将 current_location 等字段写入顶层，
+        # 但触发器的 AT_LOCATION 等条件从 players[uid] 读取。
+        # 此处以顶层最新值为准覆盖旧值，与 engine.py 的 rehome_player_fields()
+        # 方向相反（后者以 players 内值为准），因为此处顶层即本轮回写的最新结果。
+        _PLAYER_FIELDS = {
+            "character", "current_location", "pending_dice",
+            "npc_relations", "current_npc", "npc_dialogue", "npc_dialogue_results",
+        }
+        uid = state.get("user_id", "default")
+        players = merged_state.setdefault("players", {})
+        player = players.setdefault(uid, {})
+        for field in _PLAYER_FIELDS:
+            if field in merged_state and field != "players":
+                val = merged_state[field]
+                if field == "character" and isinstance(val, dict):
+                    existing = player.get("character") or {}
+                    existing.update(val)
+                    player["character"] = existing
+                elif field == "npc_dialogue_results" and isinstance(val, list):
+                    existing = player.get("npc_dialogue_results", [])
+                    player["npc_dialogue_results"] = existing + val
+                else:
+                    # 顶层值覆盖 players 中的旧值（顶层即本轮最新写入结果）
+                    player[field] = val
+        merged_state["players"] = players
+
+        # 调试：确认玩家位置已正确归位
+        pid = next(iter(players.keys()), 'N/A')
+        loc_in_player = players.get(pid, {}).get("current_location", "NOT_FOUND")
+        loc_top = merged_state.get("current_location", "NOT_FOUND")
+        logger.info(
+            f"reduce_iter: 归位后 players[{pid}].current_location={loc_in_player!r} "
+            f"(top={loc_top!r})"
+        )
+
         ctx = EvalContext(
             state=merged_state,
             session_id=session_id,
@@ -238,9 +300,16 @@ async def _evaluate_triggers_after_reduce(state: dict, current_patch: dict) -> d
         )
 
         result = evaluate_triggers(triggers, trigger_states, ctx)
+        logger.info(
+            f"reduce_iter: evaluate_triggers 返回 "
+            f"fired={result.get('fired_triggers', [])} "
+            f"has_patch={bool(result.get('patch', {}))} "
+            f"echo={bool(result.get('echo_text', ''))}"
+        )
 
         fired = result.get("fired_triggers", [])
         if not fired:
+            logger.debug(f"reduce_iter: 触发器求值完成，未命中任何触发器")
             return {}
 
         # 更新 PG 运行时状态
