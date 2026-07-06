@@ -75,12 +75,19 @@ async def db_lookup_node(state: GameState) -> dict:
     try:
         store = await _get_store()
         conn = await store._get_conn()
+        world_id = state.get("world_id", "")
 
-        # 查当前场景
-        loc_row = await conn.fetchrow(
-            "SELECT id, key, name, base_desc, tags, exits_json FROM locations WHERE key = $1",
-            current_loc,
-        )
+        # 查当前场景 — 按 world_id 世界隔离
+        if world_id:
+            loc_row = await conn.fetchrow(
+                "SELECT id, key, name, base_desc, tags, exits_json FROM locations WHERE key = $1 AND world_id = $2",
+                current_loc, world_id,
+            )
+        else:
+            loc_row = await conn.fetchrow(
+                "SELECT id, key, name, base_desc, tags, exits_json FROM locations WHERE key = $1",
+                current_loc,
+            )
         if not loc_row:
             logger.debug(f"db_lookup_node: 未找到场景 '{current_loc}'")
             return EMPTY
@@ -97,19 +104,32 @@ async def db_lookup_node(state: GameState) -> dict:
         all_loc_keys = [current_loc] + adjacent_keys
 
         # 批量查询所有相关场景的基础数据
-        loc_rows = await conn.fetch(
-            "SELECT id, key, name, base_desc, tags, exits_json FROM locations WHERE key = ANY($1)",
-            all_loc_keys,
-        )
+        if world_id:
+            loc_rows = await conn.fetch(
+                "SELECT id, key, name, base_desc, tags, exits_json FROM locations WHERE key = ANY($1) AND world_id = $2",
+                all_loc_keys, world_id,
+            )
+        else:
+            loc_rows = await conn.fetch(
+                "SELECT id, key, name, base_desc, tags, exits_json FROM locations WHERE key = ANY($1)",
+                all_loc_keys,
+            )
         loc_map = {r["key"]: r for r in loc_rows}  # key -> row
 
         # 收集所有相关场景的 id，批量查 entities
         all_loc_ids = [r["id"] for r in loc_rows]
-        entity_rows = await conn.fetch(
-            """SELECT e.key, e.name, e.location_id, e.tags, e.stats_json FROM entities e
-               WHERE e.location_id = ANY($1)""",
-            all_loc_ids,
-        )
+        if world_id:
+            entity_rows = await conn.fetch(
+                """SELECT e.key, e.name, e.location_id, e.tags, e.stats_json FROM entities e
+                   WHERE e.location_id = ANY($1) AND e.world_id = $2""",
+                all_loc_ids, world_id,
+            )
+        else:
+            entity_rows = await conn.fetch(
+                """SELECT e.key, e.name, e.location_id, e.tags, e.stats_json FROM entities e
+                   WHERE e.location_id = ANY($1)""",
+                all_loc_ids,
+            )
 
         # 按 location_id 分组 entities
         entities_by_loc: dict[str, list[dict]] = {}
@@ -123,12 +143,20 @@ async def db_lookup_node(state: GameState) -> dict:
             })
 
         # 批量查当前场景物品（interactables 表）— 供 disambiguation 消歧
-        interactable_rows = await conn.fetch(
-            """SELECT i.key, i.name, i.tags, i.state FROM interactables i
-               JOIN locations l ON i.location_id = l.id
-               WHERE l.key = $1""",
-            current_loc,
-        )
+        if world_id:
+            interactable_rows = await conn.fetch(
+                """SELECT i.key, i.name, i.tags, i.state FROM interactables i
+                   JOIN locations l ON i.location_id = l.id
+                   WHERE l.key = $1 AND l.world_id = $2""",
+                current_loc, world_id,
+            )
+        else:
+            interactable_rows = await conn.fetch(
+                """SELECT i.key, i.name, i.tags, i.state FROM interactables i
+                   JOIN locations l ON i.location_id = l.id
+                   WHERE l.key = $1""",
+                current_loc,
+            )
         scene_items = [
             {"key": r["key"], "name": r["name"], "tags": r["tags"] or [], "state": r["state"] or ""}
             for r in interactable_rows

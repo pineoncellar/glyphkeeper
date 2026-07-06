@@ -93,16 +93,19 @@ class StateProjector:
         """
         store = await self.static_store
 
+        # 从事件数据中提取 world_id（摄入期传入种子工作区名，如 __seed__mtest）
+        world_id = data.get("world_id", "")
+
         # 先写知识注册表和场景表 — 它们是线索表的外键依赖
         knowledge_list = data.get("knowledge_registry", [])
         if knowledge_list:
-            await store.bulk_insert_knowledge(knowledge_list)
+            await store.bulk_insert_knowledge(knowledge_list, world_id=world_id)
 
         locations_data = data.get("locations", [])
         loc_id_map: dict[str, str] = {}
         if locations_data:
             # bulk_insert_locations 返回 {key: actual_db_id} 映射
-            loc_id_map = await store.bulk_insert_locations(locations_data)
+            loc_id_map = await store.bulk_insert_locations(locations_data, world_id=world_id)
 
         # 遍历原始场景数据，拆解物品和 NPC 中的线索
         all_interactables = []

@@ -515,7 +515,6 @@ class AbstractAdapter(ABC):
     async def _handle_world_list_cmd(self, session_id: str) -> OutboundMessage:
         """处理 /world list — 列出所有世界和当前活跃世界"""
         from src.tools.world_manager import list_worlds
-        from src.tools import get_settings
 
         worlds = list_worlds()
         if not worlds:
@@ -524,12 +523,13 @@ class AbstractAdapter(ABC):
                 session_id=session_id,
             )
 
-        active = get_settings().project.active_world
+        from src.tools.world_manager import get_active_world
+        active = get_active_world()
         lines = [f"可用世界 ({len(worlds)} 个):"]
         for w in worlds:
             mark = "\u2192" if w == active else " "
             lines.append(f"  {mark} {w}")
-        lines.append(f"\n当前世界: {active}")
+        lines.append(f"\n当前世界: {active if active else '(未开始游戏)'}")
         lines.append("每局 /world start 自动创建新世界，数据完全隔离。")
         return OutboundMessage.system_msg("\n".join(lines), session_id=session_id)
 
@@ -550,8 +550,7 @@ class AbstractAdapter(ABC):
 
         arg = delete_parts[2].strip()
 
-        from src.tools.world_manager import list_worlds, delete_world, set_active_world
-        from src.tools import get_settings
+        from src.tools.world_manager import list_worlds, delete_world, set_active_world, get_active_world
 
         worlds = list_worlds()
 
@@ -579,13 +578,11 @@ class AbstractAdapter(ABC):
 
     async def _purge_world_data(self, world_id: str):
         """彻底删除一个世界及其所有关联数据"""
-        from src.tools.world_manager import delete_world, set_active_world
-        from src.tools import get_settings
+        from src.tools.world_manager import delete_world, set_active_world, get_active_world
 
-        # 如果是当前世界，切回默认
-        if world_id == get_settings().project.active_world:
+        # 如果是当前活跃世界，切回空
+        if world_id == get_active_world():
             set_active_world("")
-        # 删除世界目录
         await delete_world(world_id)
 
         # 清理事件流
@@ -667,7 +664,8 @@ class AbstractAdapter(ABC):
 
         # ── 为新游戏创建独立世界 ──
         from src.tools.world_manager import (
-            generate_world_id, create_world, set_active_world, seed_world_lightrag,
+            generate_world_id, create_world, set_active_world,
+            seed_world_lightrag, copy_static_data_to_world,
         )
         world_id = generate_world_id(module_name)
         dir_ok = await create_world(world_id)
@@ -676,8 +674,10 @@ class AbstractAdapter(ABC):
                 f"世界目录创建失败: {world_id}",
                 level="error", session_id=session_id,
             )
-        # 先播种 LightRAG（模组基线知识），再切 active_world
+        # 先播种 LightRAG（模组基线知识），再设置内存活跃世界指针
         seed_ok = await seed_world_lightrag(world_id, module_name)
+        # 从种子复制全部静态蓝图数据到新世界（locations/entities/items/clues/triggers）
+        await copy_static_data_to_world(world_id, module_name)
         set_active_world(world_id)
 
         # 更新 msg 中的 world_id，使后续 SessionKey 和 GameState 使用新世界的隔离键

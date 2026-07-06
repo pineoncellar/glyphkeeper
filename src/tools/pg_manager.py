@@ -15,6 +15,7 @@
 from __future__ import annotations
 
 import asyncio
+import asyncpg
 import os
 import sys
 from enum import Enum
@@ -363,9 +364,7 @@ class PgManager:
 
         logger.info("pgembed: PostgreSQL 已停止")
 
-
-
-    # ── 属性和查询 ──
+    # ── 实例属性 ──
 
     @property
     def backend(self) -> PgBackend:
@@ -401,7 +400,6 @@ class PgManager:
         }
         if self.available and self._started:
             try:
-                import asyncpg
                 conn = await asyncpg.connect(
                     self._uri, timeout=3.0,
                 )
@@ -420,77 +418,103 @@ class PgManager:
             result["status"] = "unavailable"
         return result
 
-    # ── 测试数据库隔离 ──
+    # ── 测试辅助 ──
 
-    async def ensure_test_database(self, dbname: str = "glyphkeeper_test") -> None:
-        """创建测试数据库并切换到它（仅测试使用）
-
-        在生产数据库 'glyphkeeper' 同级创建测试数据库，
-        所有测试中的读写操作完全隔离，不影响生产数据。
-        """
-        if not self._started:
-            await self.start()
-        if self._backend != PgBackend.LOCAL:
-            return
-
-        self._original_dbname = self._dbname
-        uri_admin = f"postgresql://postgres@localhost:{self._port}/postgres"
-        import asyncpg
-        conn = await asyncpg.connect(uri_admin, timeout=5.0)
-        try:
-            exists = await conn.fetchval(
-                "SELECT 1 FROM pg_database WHERE datname = $1", dbname
-            )
-            if exists:
-                await conn.execute(
-                    "SELECT pg_terminate_backend(pid) FROM pg_stat_activity "
-                    "WHERE datname = $1 AND pid <> pg_backend_pid()",
-                    dbname,
-                )
-                await conn.execute(f"DROP DATABASE IF EXISTS {dbname}")
-            await conn.execute(f"CREATE DATABASE {dbname}")
-            logger.info(f"PgManager: 测试数据库 '{dbname}' 已创建")
-        finally:
-            await conn.close()
-
+    async def switch_to_test_db(self, dbname: str = "glyphkeeper_test"):
+        """切换到测试数据库（副本）"""
+        old_uri = self._uri
         self._dbname = dbname
         self._uri = self._build_uri()
+        # 创建测试数据库（如果不存在）
+        try:
+            conn = await asyncpg.connect(old_uri)
+            exists = await conn.fetchval(
+                "SELECT 1 FROM pg_database WHERE datname=$1", dbname,
+            )
+            if not exists:
+                await conn.execute(f"CREATE DATABASE {dbname}")
+                logger.info(f"PgManager: 测试数据库 '{dbname}' 已创建")
+            await conn.close()
+        except Exception as e:
+            logger.warning(f"PgManager: 测试数据库创建失败: {e}")
+        # 标记为测试数据库以便后续恢复
         type(self)._test_dbname = dbname
 
-    async def restore_production_database(self) -> None:
-        """恢复 PgManager 指向生产数据库"""
-        if self._original_dbname and self._original_dbname != self._dbname:
-            self._dbname = self._original_dbname
-            self._uri = self._build_uri()
-            logger.info(f"PgManager: 已恢复指向生产数据库 '{self._dbname}'")
-
-    async def drop_test_database(self, dbname: str = "glyphkeeper_test") -> None:
-        """删除测试数据库（测试结束后清理用）"""
-        if self._backend != PgBackend.LOCAL:
-            return
-        # 先切回管理数据库再删，避免"正在使用"冲突
-        self._dbname = self._original_dbname
+    async def drop_test_db(self, dbname: str = "glyphkeeper_test"):
+        """删除测试数据库"""
+        old_uri = self._uri
         self._uri = self._build_uri()
-        uri_admin = f"postgresql://postgres@localhost:{self._port}/postgres"
-        import asyncpg
-        conn = await asyncpg.connect(uri_admin, timeout=5.0)
+        conn = await asyncpg.connect(old_uri)
         try:
-            exists = await conn.fetchval(
-                "SELECT 1 FROM pg_database WHERE datname = $1", dbname
+            await conn.execute(
+                f"SELECT pg_terminate_backend(pid) FROM pg_stat_activity "
+                f"WHERE datname='{dbname}'"
             )
-            if exists:
-                await conn.execute(
-                    "SELECT pg_terminate_backend(pid) FROM pg_stat_activity "
-                    "WHERE datname = $1 AND pid <> pg_backend_pid()",
-                    dbname,
-                )
-                await conn.execute(f"DROP DATABASE IF EXISTS {dbname}")
-                logger.info(f"PgManager: 测试数据库 '{dbname}' 已删除")
-                type(self)._test_dbname = None
+            await conn.execute(f"DROP DATABASE IF EXISTS {dbname}")
+            logger.info(f"PgManager: 测试数据库 '{dbname}' 已删除")
+            type(self)._test_dbname = None
         finally:
             await conn.close()
 
 
+# ── 脚本安全连接辅助 ──
+# 以下函数供 trigger_inject.py / trigger_seed_modify.py 等外部脚本使用，
+# 它们绕过 PgManager 的生命周期管理，只做纯客户端连接，不启动/停止 PG 服务。
+
+_PG_URI_CACHE: str | None = None
+"""进程级缓存，避免同一脚本多次发现时反复读取 postmaster.pid"""
+
+
+async def _discover_pg_uri() -> str | None:
+    """发现已运行的嵌入式 PostgreSQL 连接 URI
+
+    读取 data/pg_data/postmaster.pid 第 4 行得到端口号。
+    不启动、不停止 PG，纯客户端发现。
+    """
+    global _PG_URI_CACHE
+    if _PG_URI_CACHE:
+        return _PG_URI_CACHE
+
+    pid_path = Path(PROJECT_ROOT) / "data" / "pg_data" / "postmaster.pid"
+    if not pid_path.exists():
+        logger.debug("_discover_pg_uri: postmaster.pid 不存在，PG 可能未运行")
+        return None
+
+    try:
+        lines = pid_path.read_text(encoding="utf-8").strip().splitlines()
+        if len(lines) < 4:
+            logger.debug("_discover_pg_uri: postmaster.pid 格式不完整")
+            return None
+        port = lines[3].strip()
+        uri = f"postgresql://postgres@localhost:{port}/glyphkeeper"
+        # 验证连接
+        import asyncpg
+        conn = await asyncpg.connect(uri, timeout=3.0)
+        await conn.close()
+        _PG_URI_CACHE = uri
+        logger.debug(f"_discover_pg_uri: 已发现 PG @ localhost:{port}")
+        return uri
+    except Exception as e:
+        logger.debug(f"_discover_pg_uri: 发现失败: {e}")
+        return None
+
+
+async def get_script_connection():
+    """供脚本使用的只读连接工厂
+
+    只连接不管理：不启动 PG、不停止 PG、不初始化表结构。
+    适合 trigger_inject.py / trigger_seed_modify.py 等运维脚本。
+    失败时抛出 RuntimeError。
+    """
+    uri = await _discover_pg_uri()
+    if not uri:
+        raise RuntimeError(
+            "无法发现正在运行的 PostgreSQL。请先启动游戏（运行 run_cli.py），"
+            "确保 pgembed 启动后再运行此脚本。"
+        )
+    import asyncpg
+    conn = await asyncpg.connect(uri, timeout=5.0)
+    return conn
 # ====================================================================
 # 便捷函数
 # ====================================================================

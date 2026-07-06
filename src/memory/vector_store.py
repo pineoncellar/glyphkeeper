@@ -18,8 +18,8 @@
         async def close(self)
 
 实现:
-  - 单例模式：每个 domain 一个实例
-  - domain="world" → 使用 active_world 作为 workspace
+  - 单例模式：每个 domain + world_id 组合一个实例
+  - domain="world" → workspace 由 world_id 确定
   - domain="rules" → 固定 workspace="rules"
   - LLM 和 Embedding 函数通过 lazy import 加载（避免循环依赖）
 """
@@ -140,10 +140,13 @@ class VectorStore:
             working_dir = PROJECT_ROOT / "data" / "rules"
             workspace = "rules"
         else:
-            # 优先使用 world_id_override，兜底 active_world
-            world_name = self._world_id_override or settings.project.active_world
+            if not self._world_id_override:
+                raise ValueError(
+                    "VectorStore(domain='world') 需要显式指定 world_id。"
+                    "请通过 get_instance(domain='world', world_id=...) 传入。"
+                )
             working_dir = PROJECT_ROOT / "data" / "worlds"
-            workspace = world_name
+            workspace = self._world_id_override
 
         working_dir.mkdir(parents=True, exist_ok=True)
 
@@ -422,8 +425,13 @@ class VectorStore:
         """获取当前实例的 workspace 名称"""
         if self.domain == "rules":
             return "rules"
-        settings = get_settings()
-        return self._world_id_override or settings.project.active_world
+        if not self._world_id_override:
+            raise ValueError(
+                "VectorStore(domain='world') 缺失 world_id，"
+                "无法确定 workspace 名称。"
+                "请确保通过 get_instance(world_id=...) 传入。"
+            )
+        return self._world_id_override
 
     _BACKUP_TABLES = [
         "LIGHTRAG_VDB_ENTITY", "LIGHTRAG_VDB_RELATION", "LIGHTRAG_VDB_CHUNKS",
