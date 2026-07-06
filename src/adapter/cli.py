@@ -1620,6 +1620,18 @@ class CliAdapter(AbstractAdapter):
 
             self._game_started = True
 
+            # 读档成功后发世界回滚信号，通知 Worker 抹盘归零
+            if self._engine and self._engine.event_log:
+                event_version = restored.get("event_version", 0)
+                await self._engine.event_log.emit_signal(
+                    signal_type="WorldRollback",
+                    world_id=saved_world,
+                    payload={
+                        "rollback_version": event_version,
+                        "snapshot_id": target_id,
+                    },
+                )
+
             return OutboundMessage.system_msg(
                 f"原子读档完成: [{label or snapshots[0].get('label', 'latest')}] "
                 f"(轮次 {restored_state.get('beat_counter', 0)})",
@@ -2172,6 +2184,9 @@ class CliAdapter(AbstractAdapter):
         再创建 MemorizerWorker、WorldSummarizer、BackgroundSync，
         最后用 asyncio.create_task 启动。各 Worker 内部已处理
         存储层为 None 的降级逻辑，初始化失败不影响游戏主循环。
+
+        MemorizerWorker 和 WorldSummarizer 共享同一份 LedgerManager，
+        后者通过 EventLog.subscribe 接收前台信号，实现事件通知 + 内存记账。
         """
         if self._memorizer is not None:
             return
@@ -2179,6 +2194,12 @@ class CliAdapter(AbstractAdapter):
         try:
             from src.memory.event_store import create_event_store
             from src.memory.vector_store import VectorStore
+            from src.workers._ledger import LedgerManager
+            from src.state.event_log import (
+                SIGNAL_TURN_RECORD_COMMITTED,
+                SIGNAL_BOUNDARY_ENCOUNTERED,
+                SIGNAL_WORLD_ROLLBACK,
+            )
 
             event_store = await create_event_store()
             # 启动时尚未开始游戏，无活跃世界，VectorStore 暂不初始化
@@ -2191,11 +2212,26 @@ class CliAdapter(AbstractAdapter):
             except (ValueError, RuntimeError) as e:
                 logger.info(f"VectorStore 暂不可用（游戏开始后自动就绪）: {e}")
 
+            # 创建共享账本管理器 — MemorizerWorker 和 WorldSummarizer 共用
+            ledger = LedgerManager()
+
+            # 通过 EventLog 订阅前台信号，自动喂入账本
+            if self._engine and self._engine.event_log:
+                elog = self._engine.event_log
+                for sig_type in (
+                    SIGNAL_TURN_RECORD_COMMITTED,
+                    SIGNAL_BOUNDARY_ENCOUNTERED,
+                    SIGNAL_WORLD_ROLLBACK,
+                ):
+                    elog.subscribe(sig_type, ledger.feed_signal)
+
             self._memorizer = MemorizerWorker(
-                event_store=event_store, vector_store=vector_store, interval=300,
+                event_store=event_store, vector_store=vector_store,
+                ledger=ledger, interval=60,
             )
             self._summarizer = WorldSummarizer(
-                event_store=event_store, vector_store=vector_store, interval=600,
+                event_store=event_store, vector_store=vector_store,
+                ledger=ledger, interval=60,
             )
             self._sync = BackgroundSync(
                 event_store=event_store, vector_store=vector_store,

@@ -34,6 +34,12 @@ EVENT_NARRATIVE_OUTPUT = "NarrativeOutput"
 EVENT_CLUE_DISCOVERED = "ClueDiscovered"
 EVENT_WORLD_INITIALIZED = "WorldInitialized"
 
+# ── Worker 运行时控制信号 ──
+
+SIGNAL_TURN_RECORD_COMMITTED = "TurnRecordCommitted"
+SIGNAL_BOUNDARY_ENCOUNTERED = "BoundaryEncountered"
+SIGNAL_WORLD_ROLLBACK = "WorldRollback"
+
 # ── Tier 1 追赶事件类型 ──
 
 EVENT_TIER1_ITEM_STATE = "Tier1ItemStateChange"
@@ -112,6 +118,27 @@ class EventLog:
         await self._notify(event_record)
 
         return new_state, event_record
+
+    # ── 轻量运行时信号 ──
+
+    async def emit_signal(
+        self,
+        signal_type: str,
+        world_id: str,
+        payload: Optional[dict] = None,
+    ):
+        """发射运行时控制信号，不写 state、不进 Reducer，只通知订阅者。
+
+        供 Worker 层接收 TurnRecordCommitted / BoundaryEncountered / WorldRollback。
+        """
+        signal: dict = {
+            "type": signal_type,
+            "world_id": world_id,
+            "data": payload or {},
+            "version": -1,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        }
+        await self._notify(signal)
 
     # ── 查询与回放 ──
 

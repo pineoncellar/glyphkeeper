@@ -270,6 +270,18 @@ class GraphEngine:
                     except Exception as e:
                         logger.debug(f"Engine.run: WorldManager 同步失败: {e}")
 
+                # 位置变化时发射边界信号，通知 Worker 当前叙事段已落幕
+                if self._event_log:
+                    await self._event_log.emit_signal(
+                        signal_type="BoundaryEncountered",
+                        world_id=session_id,
+                        payload={
+                            "boundary_type": "LOCATION_CHANGE",
+                            "from_location": old_loc,
+                            "to_location": resolved_loc,
+                        },
+                    )
+
             # 自动快照（对 new_state 做）
             if auto_snapshot and self._snapshot_mgr:
                 try:
@@ -756,6 +768,20 @@ class GraphEngine:
                         "intent_type": intent_type,
                         "player_input": player_input[:60],
                         "state_snapshot": state_snapshot,
+                    },
+                )
+
+            # 在叙事持久化后发射回合账单信号，通知 Worker 有可固化的新数据
+            world_id = result.get("world_id", "")
+            if world_id:
+                latest_version = result.get("beat_counter", 0)
+                turn_tokens = len(narrative or "") + len(player_input or "")
+                await self._event_log.emit_signal(
+                    signal_type="TurnRecordCommitted",
+                    world_id=world_id,
+                    payload={
+                        "latest_msg_id": latest_version,
+                        "turn_tokens": turn_tokens // 4,  # 字符到 token 的粗略估算
                     },
                 )
 

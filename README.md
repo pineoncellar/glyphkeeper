@@ -201,7 +201,7 @@ graph TB
 
 <table>
 <tr>
-    <th rowspan="18" style="text-align:center; vertical-align:middle; width:48px;">系统框架</th>
+    <th rowspan="22" style="text-align:center; vertical-align:middle; width:48px;">系统框架</th>
     <th style="width:48px; text-align:center;">状态</th>
     <th colspan="2" style="text-align:center;">模块与说明</th>
 </tr>
@@ -219,7 +219,7 @@ graph TB
 <tr><td style="text-align:center;">✅</td><td colspan="2">对象名称消岐系统</td></tr>
 <tr><td style="text-align:center;">🔄</td><td colspan="2">状态同步模块（state_extractor_node + Tier1/Tier2 提取管线）</td></tr>
 <tr><td style="text-align:center;">✅</td><td colspan="2" style="padding-left:2em;">├ 增加历史消息数</td></tr>
-<tr><td style="text-align:center;">🔄</td><td colspan="2">Worker 后台任务（记忆固化 / 世界摘要 / 健康检查备份）</td></tr>
+<tr><td style="text-align:center;">✅</td><td colspan="2">Worker 后台任务</td></tr>
 <tr><td style="text-align:center;">⬜</td><td colspan="2">多世界并行与管理</td></tr>
 <tr><td style="text-align:center;">✅</td><td colspan="2" style="padding-left:2em;">├ known_knowledge未随存档存读而修改</td></tr>
 <tr><td style="text-align:center;">✅</td><td colspan="2" style="padding-left:2em;">├ 整体整理乱七八糟的多世界管理与存档</td></tr>
@@ -248,7 +248,7 @@ graph TB
 <tr><td style="text-align:center;">⬜</td><td colspan="2">理智与疯狂</td></tr>
 <tr><td style="text-align:center;">✅</td><td colspan="2">场景切换与 location 更新</td></tr>
 <tr><td style="text-align:center;">✅</td><td colspan="2" style="padding-left:2em;">├ 场景切换后的新场景描述</td></tr>
-<tr><td style="text-align:center;">⬜</td><td colspan="2">结团检测</td></tr>
+<tr><td style="text-align:center;">✅</td><td colspan="2">结团检测</td></tr>
 </table>
 
 > To be continue......

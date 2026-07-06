@@ -191,6 +191,16 @@ class StaticReadStore:
             )
         """)
 
+        # 记忆固化分界线表 — 记录各世界已刷入 LightRAG 的最大事件版本
+        # Worker 层据此增量捞取未固化数据，实现断点续传
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS consolidation_checkpoints (
+                world_id            TEXT PRIMARY KEY,
+                last_pushed_version INTEGER NOT NULL DEFAULT 0,
+                last_pushed_at      TIMESTAMPTZ
+            )
+        """)
+
         # 索引加速运行时查询
         await conn.execute("""CREATE INDEX IF NOT EXISTS idx_clue_interactable ON clue_discoveries(interactable_id)""")
         await conn.execute("""CREATE INDEX IF NOT EXISTS idx_clue_entity ON clue_discoveries(entity_key)""")
@@ -267,6 +277,36 @@ class StaticReadStore:
             "intro_text": opening.get("intro_text_template", ""),
             "required_tags": opening.get("required_tags", []),
         }
+
+    # ── 记忆固化分界线 ──
+
+    async def get_checkpoint(self, world_id: str) -> int:
+        """查询指定世界已固化的最大事件版本号"""
+        conn = await self._get_conn()
+        val = await conn.fetchval(
+            "SELECT last_pushed_version FROM consolidation_checkpoints WHERE world_id = $1",
+            world_id,
+        )
+        return val or 0
+
+    async def update_checkpoint(self, world_id: str, version: int):
+        """推进指定世界的已固化版本号"""
+        from datetime import datetime, timezone
+        conn = await self._get_conn()
+        await conn.execute("""
+            INSERT INTO consolidation_checkpoints (world_id, last_pushed_version, last_pushed_at)
+            VALUES ($1, $2, $3::timestamptz)
+            ON CONFLICT (world_id) DO UPDATE SET
+                last_pushed_version = $2, last_pushed_at = $3::timestamptz
+        """, world_id, version, datetime.now(timezone.utc))
+
+    async def clear_checkpoint(self, world_id: str):
+        """抹除指定世界的固化分界线（读档时调用）"""
+        conn = await self._get_conn()
+        await conn.execute(
+            "DELETE FROM consolidation_checkpoints WHERE world_id = $1",
+            world_id,
+        )
 
     # ── 清除 — 测试或重摄入时调用 ──
 
