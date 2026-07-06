@@ -193,7 +193,7 @@ graph TB
 | `SOCIAL_INTERACT` | `npc_dialogue_node` | NPC 对话生成 |
 | `META` / 未知 | 跳过（空操作） | 仅递增指针，不执行规则 |
 
-> **注意**：旧版 `route_by_intent` 条件边、`CombatSubgraph`、`InvestigationSubgraph` 仍保留在代码中但已不再被主图使用，由 `dispatch_node` 内联调用对应的规则函数替代。`PHYSICAL_INTERACT` 已于本次迭代升级为三阶段 `physical_interact_subgraph`（纯数值检定 → 空间/物理可行性仲裁 → 结算与线索颁发），取代了原先的 `skill_node → archivist_node` 双节点链路。
+> **注意**：旧版 `route_by_intent` 条件边、`CombatSubgraph`、`InvestigationGraph` 已不再被主图使用，由 `dispatch_node` 内联调用对应的规则函数替代。`PHYSICAL_INTERACT` 已升级为三阶段 `physical_interact_subgraph`（`skill_check` → `spatial_physics` → `effect_archivist`），取代了原先的 `skill_node → archivist_node` 双节点链路。
 
 ---
 
@@ -222,9 +222,15 @@ graph TB
 <tr><td style="text-align:center;">🔄</td><td colspan="2">Worker 后台任务（记忆固化 / 世界摘要 / 健康检查备份）</td></tr>
 <tr><td style="text-align:center;">⬜</td><td colspan="2">多世界并行与管理</td></tr>
 <tr><td style="text-align:center;">✅</td><td colspan="2" style="padding-left:2em;">├ known_knowledge未随存档存读而修改</td></tr>
+<tr><td style="text-align:center;">⬜</td><td colspan="2" style="padding-left:2em;">├ 整体整理乱七八糟的多世界管理与存档</td></tr>
+<tr><td style="text-align:center;">✅</td><td colspan="2">条件触发器</td></tr>
+<tr><td style="text-align:center;">✅</td><td colspan="2" style="padding-left:2em;">├ 结团检测与流程</td></tr>
+<tr><td style="text-align:center;">⬜</td><td colspan="2" style="padding-left:2em;">├ 支持更多条件</td></tr>
 <tr>
     <th rowspan="100" style="text-align:center; vertical-align:middle; width:48px; border-top:2px solid #d0d7de;">游戏系统</th>
 </tr>
+<tr><td style="text-align:center;">✅</td><td colspan="2">模组摄入</td>
+<tr><td style="text-align:center;">⬜</td><td colspan="2" style="padding-left:2em;">├ 摄入前检查</td></tr>
 <tr><td style="text-align:center;">✅</td><td colspan="2">角色卡与物品背包系统</td>
 <tr><td style="text-align:center;">✅</td><td colspan="2" style="padding-left:2em;">├ 物品离包逻辑</td></tr>
 <tr><td style="text-align:center;">🔄</td><td colspan="2">调查与线索系统</td></tr>
@@ -236,11 +242,13 @@ graph TB
 <tr><td style="text-align:center;">⬜</td><td colspan="2" style="padding-left:2em;">├ 场景幻觉问题</td></tr>
 <tr><td style="text-align:center;">⬜</td><td colspan="2" style="padding-left:2em;">├ 人设缓存</td></tr>
 <tr><td style="text-align:center;">⬜</td><td colspan="2" style="padding-left:2em;">├ 经npc节点的narrator prompt构造</td></tr>
+<tr><td style="text-align:center;">⬜</td><td colspan="2" style="padding-left:2em;">├ 随行NPC系统</td></tr>
 <tr><td style="text-align:center;">✅</td><td colspan="2">CoC 7版技能检定</td></tr>
 <tr><td style="text-align:center;">⬜</td><td colspan="2">战斗轮与体力系统</td></tr>
 <tr><td style="text-align:center;">⬜</td><td colspan="2">理智与疯狂</td></tr>
 <tr><td style="text-align:center;">✅</td><td colspan="2">场景切换与 location 更新</td></tr>
 <tr><td style="text-align:center;">✅</td><td colspan="2" style="padding-left:2em;">├ 场景切换后的新场景描述</td></tr>
+<tr><td style="text-align:center;">⬜</td><td colspan="2">结团检测</td></tr>
 </table>
 
 > To be continue......
@@ -405,8 +413,9 @@ GlyphKeeper/
 │   └── run_all_tests.py     # 全量测试运行器
 │
 ├── src/                     # 源代码
-│   ├── _protocols.py        # 🔷 统一执行协议（核心契约）
-│   │                        #    NodeInput / NodeOutput / Event / StatePatch
+│   ├── _protocols.py        # 🔷 统一执行协议（历史参考）
+│   │                        #    NodeInput/NodeOutput 为早期设计，
+│   │                        #    当前节点统一用 state: GameState -> dict 签名
 │   │
 │   ├── adapter/             # 🔌 统一接入层
 │   │   ├── protocol.py      # InboundMessage / OutboundMessage 协议

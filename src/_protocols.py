@@ -1,8 +1,10 @@
 # -*- coding: utf-8 -*-
 """
 @File     :   _protocols.py
-@Desc     :   GlyphKeeper 统一执行协议 — graph runtime 的执行语义规范
-@Note     :   定义 NodeInput/NodeOutput/Event/StatePatch/ReducerContract
+@Desc     :   GlyphKeeper 统一执行协议 — 历史参考
+@Note     :   NodeInput/NodeOutput 为早期设计，当前节点统一使用
+              async def node(state: GameState) -> dict 签名。
+              保留此文件供向后兼容参考。
 """
 
 from typing import TypedDict, Any, Optional

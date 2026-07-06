@@ -10,6 +10,5 @@ GlyphKeeper - 基于 Graph Runtime 架构的 CoC 7版 AI 守密人系统
   domain/   - CoC 规则域模型（纯确定性逻辑）
   memory/   - 长期记忆（RAG + Event Store）
   workers/  - 后台任务（记忆固化 / 摘要）
-  api/      - 接口层（WebSocket / HTTP）
-  config/   - 配置管理
+  tools/    - 外部工具与配置管理（含 config 原职责）
 """
