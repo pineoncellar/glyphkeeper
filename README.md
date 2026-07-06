@@ -218,12 +218,11 @@ graph TB
 <tr><td style="text-align:center;">⬜</td><td colspan="2" style="padding-left:2em;">├ 优化是否需要rag的判断</td></tr>
 <tr><td style="text-align:center;">✅</td><td colspan="2">双脑记忆系统</td></tr>
 <tr><td style="text-align:center;">✅</td><td colspan="2">对象名称消岐系统</td></tr>
+<tr><td style="text-align:center;">⬜</td><td colspan="2" style="padding-left:2em;">├ 优化表现</td></tr>
 <tr><td style="text-align:center;">🔄</td><td colspan="2">状态同步模块（state_extractor_node + Tier1/Tier2 提取管线）</td></tr>
 <tr><td style="text-align:center;">✅</td><td colspan="2" style="padding-left:2em;">├ 增加历史消息数</td></tr>
 <tr><td style="text-align:center;">✅</td><td colspan="2">Worker 后台任务</td></tr>
 <tr><td style="text-align:center;">⬜</td><td colspan="2">多世界并行与管理</td></tr>
-<tr><td style="text-align:center;">✅</td><td colspan="2" style="padding-left:2em;">├ known_knowledge未随存档存读而修改</td></tr>
-<tr><td style="text-align:center;">✅</td><td colspan="2" style="padding-left:2em;">├ 整体整理乱七八糟的多世界管理与存档</td></tr>
 <tr><td style="text-align:center;">✅</td><td colspan="2">条件触发器</td></tr>
 <tr><td style="text-align:center;">✅</td><td colspan="2" style="padding-left:2em;">├ 结团检测与流程</td></tr>
 <tr><td style="text-align:center;">⬜</td><td colspan="2" style="padding-left:2em;">├ 支持更多条件</td></tr>
