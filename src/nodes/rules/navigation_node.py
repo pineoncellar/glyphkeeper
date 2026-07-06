@@ -37,16 +37,22 @@ async def _get_store():
     return _store
 
 
-async def _load_location_exits(conn, location_key: str) -> Optional[dict]:
+async def _load_location_exits(conn, location_key: str, world_id: str = "") -> Optional[dict]:
     """从 locations 表加载指定场景的 exits_json
 
     返回:
         exits 字典 {"方向": "目标key", ...}，或 None 表示场景不存在
     """
-    row = await conn.fetchrow(
-        "SELECT exits_json FROM locations WHERE key = $1",
-        location_key,
-    )
+    if world_id:
+        row = await conn.fetchrow(
+            "SELECT exits_json FROM locations WHERE key = $1 AND world_id = $2",
+            location_key, world_id,
+        )
+    else:
+        row = await conn.fetchrow(
+            "SELECT exits_json FROM locations WHERE key = $1",
+            location_key,
+        )
     if not row:
         return None
     raw = row["exits_json"]
@@ -68,10 +74,17 @@ def _match_exit_direction(target: str, exits: dict) -> Optional[str]:
 
 
 def _match_any_location(target: str, location_keys: list[str], location_names: list[str]) -> Optional[str]:
-    """匹配任意已知场景 — Key → 精确名 → 子串模糊
+    """匹配任意已知场景 — 四级递进匹配
 
     coc跑团理念：只要玩家说出了模组中存在的场景名，就直接让他过去，
     不需要出口验证。「能否到达」是事件系统的责任，不是导航的。
+
+    匹配优先级:
+      第一级: location key 精确匹配
+      第二级: 场景名称精确匹配
+      第三级: 完整目标字符串是场景名称的子串（"地下室" → "阴暗的地下室"）
+      第四级: 场景名称是完整目标字符串的子串
+      第五级: 双向 2-字符子串交集匹配（兜底，优先选少命中数的高相关度）
     """
     target_stripped = target.strip()
     if not target_stripped:
@@ -86,28 +99,39 @@ def _match_any_location(target: str, location_keys: list[str], location_names: l
         if name == target_stripped:
             return location_keys[idx]
 
-    # 第三级: 子串模糊匹配（排除单字）
     if len(target_stripped) < 2:
         return None
+
+    # 第三级: 目标字符串是场景名的完整子串
+    # "地下室" → "阴暗的地下室" 优先于 "地下整备室"
+    full_substr_candidates = []
+    for idx, name in enumerate(location_names):
+        if name and target_stripped in name:
+            full_substr_candidates.append((len(name), idx, location_keys[idx]))
+    if full_substr_candidates:
+        full_substr_candidates.sort(key=lambda x: x[0])
+        return full_substr_candidates[0][2]
+
+    # 第四级: 场景名是目标字符串的完整子串
+    for idx, name in enumerate(location_names):
+        if name and len(name) >= 2 and name in target_stripped:
+            return location_keys[idx]
+
+    # 第五级: 双向 2-字符子串交集匹配（兜底）
     candidates = []
     for idx, name in enumerate(location_names):
         if not name or len(name) < 2:
             continue
-        shared = False
-        for start in range(len(target_stripped) - 1):
-            if target_stripped[start:start + 2] in name:
-                shared = True
-                break
-        if not shared:
-            for start in range(len(name) - 1):
-                if name[start:start + 2] in target_stripped:
-                    shared = True
-                    break
-        if shared:
-            candidates.append((len(name), idx, location_keys[idx]))
+        # 计算双向共有 2-字符子串数量，衡量相关度
+        target_bigrams = {target_stripped[i:i+2] for i in range(len(target_stripped) - 1)}
+        name_bigrams = {name[i:i+2] for i in range(len(name) - 1)}
+        shared_count = len(target_bigrams & name_bigrams)
+        if shared_count > 0:
+            # 按负相关度（更多共享字符优先）、正 name 长度（更短名优先）排序
+            candidates.append((-shared_count, len(name), idx, location_keys[idx]))
     if candidates:
-        candidates.sort(key=lambda x: x[0])
-        return candidates[0][2]
+        candidates.sort()
+        return candidates[0][3]
 
     return None
 
@@ -124,12 +148,19 @@ async def _build_location_physical_reality(
 
     time_slot = state.get("time_slot", "AFTERNOON")
     game_phase = state.get("game_phase", "exploration")
+    world_id = state.get("world_id", "")
 
     # 查目标地点
-    loc_row = await conn.fetchrow(
-        "SELECT id, key, name, base_desc, tags, exits_json FROM locations WHERE key = $1",
-        location_key,
-    )
+    if world_id:
+        loc_row = await conn.fetchrow(
+            "SELECT id, key, name, base_desc, tags, exits_json FROM locations WHERE key = $1 AND world_id = $2",
+            location_key, world_id,
+        )
+    else:
+        loc_row = await conn.fetchrow(
+            "SELECT id, key, name, base_desc, tags, exits_json FROM locations WHERE key = $1",
+            location_key,
+        )
     if not loc_row:
         return ""
 
@@ -139,19 +170,32 @@ async def _build_location_physical_reality(
 
     # 批量查邻接场景
     all_loc_keys = [location_key] + adjacent_keys
-    loc_rows = await conn.fetch(
-        "SELECT id, key, name, base_desc, tags, exits_json FROM locations WHERE key = ANY($1)",
-        all_loc_keys,
-    )
+    if world_id:
+        loc_rows = await conn.fetch(
+            "SELECT id, key, name, base_desc, tags, exits_json FROM locations WHERE key = ANY($1) AND world_id = $2",
+            all_loc_keys, world_id,
+        )
+    else:
+        loc_rows = await conn.fetch(
+            "SELECT id, key, name, base_desc, tags, exits_json FROM locations WHERE key = ANY($1)",
+            all_loc_keys,
+        )
     loc_map = {r["key"]: r for r in loc_rows}
 
     # 批量查实体
     all_loc_ids = [r["id"] for r in loc_rows]
-    entity_rows = await conn.fetch(
-        """SELECT e.key, e.name, e.location_id, e.tags FROM entities e
-           WHERE e.location_id = ANY($1)""",
-        all_loc_ids,
-    )
+    if world_id:
+        entity_rows = await conn.fetch(
+            """SELECT e.key, e.name, e.location_id, e.tags FROM entities e
+               WHERE e.location_id = ANY($1) AND e.world_id = $2""",
+            all_loc_ids, world_id,
+        )
+    else:
+        entity_rows = await conn.fetch(
+            """SELECT e.key, e.name, e.location_id, e.tags FROM entities e
+               WHERE e.location_id = ANY($1)""",
+            all_loc_ids,
+        )
     entities_by_loc: dict[str, list[dict]] = {}
     for er in entity_rows:
         lid = str(er["location_id"])
@@ -160,12 +204,20 @@ async def _build_location_physical_reality(
         })
 
     # 查目标地点的物品
-    interactable_rows = await conn.fetch(
-        """SELECT i.key, i.name, i.tags, i.state FROM interactables i
-           JOIN locations l ON i.location_id = l.id
-           WHERE l.key = $1""",
-        location_key,
-    )
+    if world_id:
+        interactable_rows = await conn.fetch(
+            """SELECT i.key, i.name, i.tags, i.state FROM interactables i
+               JOIN locations l ON i.location_id = l.id
+               WHERE l.key = $1 AND l.world_id = $2""",
+            location_key, world_id,
+        )
+    else:
+        interactable_rows = await conn.fetch(
+            """SELECT i.key, i.name, i.tags, i.state FROM interactables i
+               JOIN locations l ON i.location_id = l.id
+               WHERE l.key = $1""",
+            location_key,
+        )
 
     # ── 组装 XML ──
     cur = loc_map.get(location_key, loc_row)
@@ -313,20 +365,30 @@ async def navigation_node(state: GameState) -> dict:
     try:
         store = await _get_store()
         conn = await store._get_conn()
+        world_id = state.get("world_id", "")
 
-        exits = await _load_location_exits(conn, current_loc)
-        all_rows = await conn.fetch("SELECT key, name, exits_json, tags FROM locations")
+        exits = await _load_location_exits(conn, current_loc, world_id)
+        if world_id:
+            all_rows = await conn.fetch(
+                "SELECT key, name, exits_json, tags FROM locations WHERE world_id = $1",
+                world_id,
+            )
+        else:
+            all_rows = await conn.fetch("SELECT key, name, exits_json, tags FROM locations")
         all_keys = [r["key"] for r in all_rows]
         all_names = [r["name"] for r in all_rows]
 
         resolved_key: Optional[str] = None
         bfs_path = None
 
+        # 第一级: 出口方向匹配
         resolved_key = _match_exit_direction(target, exits or {})
 
+        # 第二级: 任意场景四级递进匹配
         if resolved_key is None:
             resolved_key = _match_any_location(target, all_keys, all_names)
 
+        # 第三级: BFS 寻路（跨场景导航）
         if resolved_key is None:
             target_key = _match_any_location(target, all_keys, all_names)
             if target_key and target_key != current_loc:

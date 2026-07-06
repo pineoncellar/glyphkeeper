@@ -47,6 +47,16 @@ class StaticReadStore:
         await self._init_db()
         return self._conn
 
+    async def connect_script(self):
+        """脚本模式连接：绕过 PgManager 生命周期，只做纯客户端连接
+
+        供 trigger_inject.py / trigger_seed_modify.py 等外部脚本使用。
+        不启动/停止 PG，不初始化表结构。
+        """
+        from src.tools.pg_manager import get_script_connection
+        self._conn = await get_script_connection()
+        return self._conn
+
     async def close(self):
         if self._conn and not self._conn.is_closed():
             await self._conn.close()
@@ -123,6 +133,48 @@ class StaticReadStore:
             )
         """)
 
+        # 触发器静态注册表 — 摄入期写入种子工作区，/start 时复制到目标世界
+        # 复合主键 (trigger_id, world_id) 允许多世界中存在同名触发器但不同定义
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS static_triggers (
+                trigger_id      VARCHAR(64) NOT NULL,
+                module_name     VARCHAR(64) NOT NULL,
+                description     TEXT,
+                priority        INT DEFAULT 0,
+                is_one_off      BOOLEAN DEFAULT TRUE,
+                conditions_json JSONB NOT NULL,
+                actions_json    JSONB NOT NULL,
+                world_id        TEXT NOT NULL DEFAULT '',
+                PRIMARY KEY (trigger_id, world_id)
+            )
+        """)
+        await conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_triggers_module
+            ON static_triggers(module_name)
+        """)
+        await conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_triggers_world
+            ON static_triggers(world_id)
+        """)
+        # 为已有行追加 world_id 列（幂等迁移）
+        await conn.execute("""
+            ALTER TABLE static_triggers
+            ADD COLUMN IF NOT EXISTS world_id TEXT NOT NULL DEFAULT ''
+        """)
+
+        # 触发器运行时动态状态表 — 跑团会话级
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS session_trigger_state (
+                session_id      VARCHAR(64) NOT NULL,
+                trigger_id      VARCHAR(64) NOT NULL,
+                fired_count     INT DEFAULT 0,
+                fired_this_turn INT DEFAULT 0,
+                is_disabled     BOOLEAN DEFAULT FALSE,
+                last_fired_at   TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (session_id, trigger_id)
+            )
+        """)
+
         # 为已有表追加 world_id 列（幂等迁移）
         # 再追加 loot_items 列（幂等，已存在时不报错）
         await conn.execute("""
@@ -176,6 +228,8 @@ class StaticReadStore:
             await conn.execute("DELETE FROM entities WHERE world_id = $1", world_id)
             await conn.execute("DELETE FROM interactables WHERE world_id = $1", world_id)
             await conn.execute("DELETE FROM locations WHERE world_id = $1", world_id)
+            await conn.execute("DELETE FROM session_trigger_state WHERE session_id = $1", world_id)
+            # static_triggers 按 module_name 而非 world_id 隔离
             logger.info(f"static_read_store: 已清空世界 {world_id} 的读模型表")
         else:
             await conn.execute("DELETE FROM clue_discoveries")
@@ -183,6 +237,8 @@ class StaticReadStore:
             await conn.execute("DELETE FROM entities")
             await conn.execute("DELETE FROM interactables")
             await conn.execute("DELETE FROM locations")
+            await conn.execute("DELETE FROM static_triggers")
+            await conn.execute("DELETE FROM session_trigger_state")
             logger.info("static_read_store: 已清空所有读模型表")
 
     # ── 批量写入 — 仅在摄入期由 StateProjector 调用 ──
@@ -493,3 +549,308 @@ class StaticReadStore:
         else:
             rows = await conn.fetch("SELECT * FROM knowledge_registry ORDER BY knowledge_id")
         return [dict(r) for r in rows]
+
+    async def bulk_insert_triggers(self, triggers: list[dict], world_id: str = "") -> int:
+        """批量插入静态触发器，trigger_id + world_id 冲突时跳过
+
+        Args:
+            triggers: 触发器列表，每项含 trigger_id/module_name/conditions_json/actions_json 等
+            world_id: 目标工作区 ID。种子写入 '__seed__{module_name}'，运行时写入当前 world_id
+        """
+        conn = await self._get_conn()
+        wid = world_id or self._world_id
+        count = 0
+        for t in triggers:
+            tid = t.get("trigger_id", "")
+            if not tid:
+                continue
+            try:
+                await conn.execute("""
+                    INSERT INTO static_triggers
+                        (trigger_id, module_name, description, priority,
+                         is_one_off, conditions_json, actions_json, world_id)
+                    VALUES ($1,$2,$3,$4,$5,$6::jsonb,$7::jsonb,$8)
+                    ON CONFLICT (trigger_id, world_id) DO NOTHING
+                """,
+                    tid, t.get("module_name", ""),
+                    t.get("description", ""), t.get("priority", 0),
+                    t.get("is_one_off", True),
+                    json.dumps(t.get("conditions_json", {}), ensure_ascii=False),
+                    json.dumps(t.get("actions_json", []), ensure_ascii=False),
+                    wid,
+                )
+                count += 1
+            except Exception as e:
+                logger.warning(f"插入触发器失败 ({tid}): {e}")
+        return count
+
+    # ── 触发器读模型查询 ──
+
+    async def get_triggers_by_module(self, module_name: str, world_id: str = "") -> list[dict]:
+        """按模组名 + 世界 ID 查询静态触发器列表，按 priority 降序
+
+        先查精确 world_id 匹配的行，再回退到空 world_id（旧格式兼容）。
+        运行时查询传入当前 world_id。
+        """
+        conn = await self._get_conn()
+        wid = world_id or self._world_id
+        rows = []
+        if wid:
+            rows = await conn.fetch(
+                "SELECT * FROM static_triggers WHERE module_name=$1 AND world_id=$2 ORDER BY priority DESC",
+                module_name, wid,
+            )
+        # 空 world_id 回退（旧数据或种子数据）
+        if not rows:
+            rows = await conn.fetch(
+                "SELECT * FROM static_triggers WHERE module_name=$1 AND world_id='' ORDER BY priority DESC",
+                module_name,
+            )
+        return [dict(r) for r in rows]
+
+    async def get_trigger_states(self, session_id: str) -> dict[str, dict]:
+        """查询指定会话的所有触发器运行时状态
+
+        返回 {trigger_id: {...}} 映射，方便调用方随机查找。
+        """
+        conn = await self._get_conn()
+        rows = await conn.fetch(
+            "SELECT * FROM session_trigger_state WHERE session_id=$1",
+            session_id,
+        )
+        return {r["trigger_id"]: dict(r) for r in rows}
+
+    async def upsert_trigger_state(
+        self,
+        session_id: str,
+        trigger_id: str,
+        *,
+        increment_fired: bool = False,
+        disable: bool = False,
+        reset_turn_count: bool = False,
+    ) -> None:
+        """原子更新触发器运行时状态
+
+        参数:
+          session_id:       会话 ID
+          trigger_id:       触发器 ID
+          increment_fired:  是否递增 fired_count 和 fired_this_turn
+          disable:          是否将 is_disabled 置为 True
+          reset_turn_count: 是否将 fired_this_turn 归零（每轮推进结束时调用）
+        """
+        conn = await self._get_conn()
+        if increment_fired:
+            await conn.execute("""
+                INSERT INTO session_trigger_state (session_id, trigger_id, fired_count, fired_this_turn, last_fired_at)
+                VALUES ($1, $2, 1, 1, CURRENT_TIMESTAMP)
+                ON CONFLICT (session_id, trigger_id) DO UPDATE SET
+                    fired_count     = session_trigger_state.fired_count + 1,
+                    fired_this_turn = session_trigger_state.fired_this_turn + 1,
+                    last_fired_at   = CURRENT_TIMESTAMP
+            """, session_id, trigger_id)
+        if disable:
+            await conn.execute("""
+                INSERT INTO session_trigger_state (session_id, trigger_id, is_disabled)
+                VALUES ($1, $2, TRUE)
+                ON CONFLICT (session_id, trigger_id) DO UPDATE SET
+                    is_disabled = TRUE
+            """, session_id, trigger_id)
+        if reset_turn_count:
+            await conn.execute("""
+                UPDATE session_trigger_state
+                SET fired_this_turn = 0
+                WHERE session_id = $1
+            """, session_id)
+
+    async def reset_all_turn_counters(self, session_id: str) -> None:
+        """每轮推进结束时调用：清空本轮触发计数"""
+        conn = await self._get_conn()
+        await conn.execute(
+            "UPDATE session_trigger_state SET fired_this_turn = 0 WHERE session_id = $1",
+            session_id,
+        )
+
+    # ── 世界级触发器复制（种子 → 目标世界） ──
+
+    async def copy_triggers_to_world(self, source_world_id: str, target_world_id: str) -> int:
+        """将种子工作区的触发器复制到目标世界
+
+        从 source_world_id 读取，以 target_world_id 写入，跳过已存在的 trigger_id。
+        """
+        conn = await self._get_conn()
+        source_rows = await conn.fetch(
+            "SELECT * FROM static_triggers WHERE world_id=$1",
+            source_world_id,
+        )
+        if not source_rows:
+            return 0
+
+        count = 0
+        for row in source_rows:
+            try:
+                await conn.execute("""
+                    INSERT INTO static_triggers
+                        (trigger_id, module_name, description, priority,
+                         is_one_off, conditions_json, actions_json, world_id)
+                    VALUES ($1,$2,$3,$4,$5,$6::jsonb,$7::jsonb,$8)
+                    ON CONFLICT (trigger_id, world_id) DO NOTHING
+                """,
+                    row["trigger_id"], row["module_name"],
+                    row.get("description", ""), row.get("priority", 0),
+                    row.get("is_one_off", True),
+                    json.dumps(row.get("conditions_json", {}), ensure_ascii=False),
+                    json.dumps(row.get("actions_json", []), ensure_ascii=False),
+                    target_world_id,
+                )
+                count += 1
+            except Exception as e:
+                logger.warning(f"复制触发器失败 ({row['trigger_id']}): {e}")
+        return count
+
+    # ── 运行时触发器增删（世界级） ──
+
+    async def delete_triggers_by_world(self, world_id: str, trigger_ids: list[str] | None = None) -> int:
+        """删除指定世界中的触发器
+
+        trigger_ids 为 None 时删除该世界全部触发器，否则只删除指定的。
+        """
+        conn = await self._get_conn()
+        if trigger_ids:
+            result = await conn.execute(
+                "DELETE FROM static_triggers WHERE world_id=$1 AND trigger_id = ANY($2)",
+                world_id, trigger_ids,
+            )
+        else:
+            result = await conn.execute(
+                "DELETE FROM static_triggers WHERE world_id=$1",
+                world_id,
+            )
+        # 解析 PostgreSQL 的 DELETE count 返回值
+        count = int(result.split()[-1]) if result else 0
+        return count
+
+    # ── 全量静态蓝图复制（种子 → 目标世界） ──
+
+    async def copy_static_data_to_world(self, source_world_id: str, target_world_id: str) -> dict[str, int]:
+        """将种子工作区的全部静态蓝图数据复制到目标世界
+
+        处理 locations/interactables/entities/clue_discoveries/knowledge_registry 间的外键关系：
+          先复制 knowledge_registry 和 locations（无外键依赖），
+          再复制 interactables 和 entities（依赖 location_id），
+          最后复制 clue_discoveries（依赖 interactable_id 和 knowledge_id）。
+        """
+        conn = await self._get_conn()
+        counts: dict[str, int] = {"knowledge": 0, "locations": 0, "interactables": 0,
+                                  "entities": 0, "clues": 0, "triggers": 0}
+
+        # 1. 复制 knowledge_registry（无 FK 依赖，保持 ID 不变）
+        kn_rows = await conn.fetch(
+            "SELECT * FROM knowledge_registry WHERE world_id=$1", source_world_id,
+        )
+        for row in kn_rows:
+            try:
+                await conn.execute("""
+                    INSERT INTO knowledge_registry (id, knowledge_id, rag_key, description, tags_granted, world_id)
+                    VALUES ($1,$2,$3,$4,$5::text[],$6)
+                    ON CONFLICT (knowledge_id, world_id) DO NOTHING
+                """, row["id"], row["knowledge_id"], row.get("rag_key", ""),
+                    row.get("description", ""), row.get("tags_granted", []), target_world_id)
+                counts["knowledge"] += 1
+            except Exception as e:
+                logger.warning(f"复制知识失败 ({row.get('knowledge_id')}): {e}")
+
+        # 2. 复制 locations，重写 id 为新 UUID，构建 old_id → new_id 映射
+        loc_rows = await conn.fetch(
+            "SELECT id, key, name, base_desc, tags, exits_json FROM locations WHERE world_id=$1",
+            source_world_id,
+        )
+        loc_id_map: dict[str, str] = {}
+        for row in loc_rows:
+            try:
+                new_id = str(_uuid.uuid4())
+                loc_id_map[str(row["id"])] = new_id
+                exits_json_str = json.dumps(row.get("exits_json", {}), ensure_ascii=False)
+                await conn.execute("""
+                    INSERT INTO locations (id, key, name, base_desc, tags, exits_json, world_id)
+                    VALUES ($1,$2,$3,$4,$5::text[],$6::jsonb,$7)
+                    ON CONFLICT (key, world_id) DO NOTHING
+                """, new_id, row["key"], row["name"], row.get("base_desc", ""),
+                    row.get("tags", []), exits_json_str, target_world_id)
+                counts["locations"] += 1
+            except Exception as e:
+                logger.warning(f"复制场景失败 ({row.get('key')}): {e}")
+
+        # 3. 复制 interactables，重写 id 和 location_id
+        item_rows = await conn.fetch(
+            "SELECT * FROM interactables WHERE world_id=$1", source_world_id,
+        )
+        item_id_map: dict[str, str] = {}
+        for row in item_rows:
+            try:
+                new_id = str(_uuid.uuid4())
+                item_id_map[str(row["id"])] = new_id
+                new_loc_id = loc_id_map.get(str(row["location_id"]), "")
+                await conn.execute("""
+                    INSERT INTO interactables (id, key, name, location_id, tags, state, world_id)
+                    VALUES ($1,$2,$3,$4,$5::text[],$6,$7)
+                    ON CONFLICT (key, world_id) DO NOTHING
+                """, new_id, row["key"], row["name"], new_loc_id,
+                    row.get("tags", []), row.get("state", ""), target_world_id)
+                counts["interactables"] += 1
+            except Exception as e:
+                logger.warning(f"复制物品失败 ({row.get('key')}): {e}")
+
+        # 4. 复制 entities，重写 id 和 location_id
+        ent_rows = await conn.fetch(
+            "SELECT * FROM entities WHERE world_id=$1", source_world_id,
+        )
+        for row in ent_rows:
+            try:
+                new_id = str(_uuid.uuid4())
+                new_loc_id = loc_id_map.get(str(row["location_id"]), "")
+                stats_str = json.dumps(row.get("stats_json", {}), ensure_ascii=False)
+                await conn.execute("""
+                    INSERT INTO entities (id, key, name, location_id, tags, stats_json, world_id)
+                    VALUES ($1,$2,$3,$4,$5::text[],$6::jsonb,$7)
+                    ON CONFLICT (key, world_id) DO NOTHING
+                """, new_id, row["key"], row["name"], new_loc_id,
+                    row.get("tags", []), stats_str, target_world_id)
+                counts["entities"] += 1
+            except Exception as e:
+                logger.warning(f"复制实体失败 ({row.get('key')}): {e}")
+
+        # 5. 复制 clue_discoveries，重写 interactable_id 和 id
+        clue_rows = await conn.fetch(
+            "SELECT * FROM clue_discoveries WHERE world_id=$1", source_world_id,
+        )
+        for row in clue_rows:
+            try:
+                new_id = str(_uuid.uuid4())
+                new_item_id = item_id_map.get(str(row["interactable_id"]), "")
+                # knowledge_id 直接复用（knowledge_registry 保持 ID 不变）
+                kid = row.get("knowledge_id")
+                req_str = json.dumps(row.get("required_check", {}), ensure_ascii=False)
+                await conn.execute("""
+                    INSERT INTO clue_discoveries
+                        (id, interactable_id, entity_key, knowledge_id,
+                         required_check, flavor_text, loot_items, world_id)
+                    VALUES ($1,$2,$3,$4,$5::jsonb,$6,$7::text[],$8)
+                    ON CONFLICT (id, world_id) DO NOTHING
+                """, new_id, new_item_id or None, row.get("entity_key"),
+                    kid, req_str, row.get("flavor_text", ""),
+                    row.get("loot_items", []), target_world_id)
+                counts["clues"] += 1
+            except Exception as e:
+                logger.warning(f"复制线索失败: {e}")
+
+        # 6. 复制 static_triggers
+        trig_count = await self.copy_triggers_to_world(source_world_id, target_world_id)
+        counts["triggers"] = trig_count
+
+        logger.info(
+            f"copy_static_data_to_world: {source_world_id} → {target_world_id} "
+            f"(locations={counts['locations']}, items={counts['interactables']}, "
+            f"entities={counts['entities']}, clues={counts['clues']}, "
+            f"knowledge={counts['knowledge']}, triggers={counts['triggers']})"
+        )
+        return counts

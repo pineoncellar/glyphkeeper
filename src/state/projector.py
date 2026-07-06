@@ -175,13 +175,22 @@ class StateProjector:
                     })
 
         if all_interactables:
-            await store.bulk_insert_interactables(all_interactables)
+            await store.bulk_insert_interactables(all_interactables, world_id=world_id)
 
         if all_entities:
-            await store.bulk_insert_entities(all_entities)
+            await store.bulk_insert_entities(all_entities, world_id=world_id)
 
         if all_clues:
-            await store.bulk_insert_clues(all_clues)
+            await store.bulk_insert_clues(all_clues, world_id=world_id)
+
+        # ── 触发器投影 ──
+        static_triggers = data.get("static_triggers", [])
+        trig_count = 0
+        if static_triggers:
+            try:
+                trig_count = await store.bulk_insert_triggers(static_triggers, world_id=world_id)
+            except Exception as e:
+                logger.warning(f"projector: 触发器投影失败（非阻塞）: {e}")
 
         loc_count = len(locations_data)
         item_count = len(all_interactables)
@@ -191,7 +200,8 @@ class StateProjector:
         logger.info(
             f"projector: WorldInitialized 投影完成 "
             f"(locations={loc_count}, interactables={item_count}, "
-            f"entities={entity_count}, clues={clue_count}, knowledge={kn_count})"
+            f"entities={entity_count}, clues={clue_count}, "
+            f"knowledge={kn_count}, triggers={trig_count})"
         )
 
     # ── 运行时事件投影（事务解耦，尽力而为） ──

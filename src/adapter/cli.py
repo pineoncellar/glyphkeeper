@@ -106,11 +106,21 @@ class CliAdapter(AbstractAdapter):
     async def parse(self, raw_input: Any) -> InboundMessage:
         """将终端原始输入解析为 InboundMessage"""
         text = str(raw_input).strip() if raw_input else ""
+
+        # 从 scheduler 现有会话中取 world_id，保证 SessionKey 一致性
+        world_id = ""
+        slot = self._scheduler.get_session(self.session_id) if self._scheduler else None
+        if slot and slot.world_id:
+            world_id = slot.world_id
+        else:
+            from src.tools.world_manager import get_active_world
+            world_id = get_active_world()
+
         routing = dict(
             platform="cli",
             channel_id="",
             user_id=os.getlogin(),
-            world_id=get_settings().project.active_world,
+            world_id=world_id,
         )
 
         if not text:
@@ -448,6 +458,7 @@ class CliAdapter(AbstractAdapter):
                     "/quit", "/q", "/help", "/h",
                     "/world", "/archive", "/module", "/card",
                     "/debug", "/d", "/scene", "/sc",
+                    "/events", "/ev",
                 )
                 if msg.type == MessageType.PLAYER_INPUT or not any(
                     lower.startswith(a) for a in allowed
@@ -552,7 +563,13 @@ class CliAdapter(AbstractAdapter):
                 print()
                 continue
 
-            # 处理 /rollback — 回滚到指定事件版本
+
+            # 处理 /events — 列出当前世界的触发器及其状态
+            if msg.type == MessageType.SYSTEM_CMD and msg.text.strip().lower() in ("/events", "/ev"):
+                out = await self._handle_events_cmd(self.session_id)
+                await self.send(out)
+                print()
+                continue
             if msg.type == MessageType.SYSTEM_CMD and msg.text.strip().lower().startswith("/rollback"):
                 out = await self._handle_rollback_cmd(msg.text.strip(), self.session_id)
                 await self.send(out)
@@ -1453,9 +1470,11 @@ class CliAdapter(AbstractAdapter):
             # 全量备份 LightRAG 数据到快照关联目录
             try:
                 from src.memory.vector_store import VectorStore
-                vs = await VectorStore.get_instance("world")
-                lightrag_dir = _ensure_lightrag_backup_dir(snap_id)
-                await vs.backup_to(lightrag_dir)
+                world_id = state.get("world_id", "")
+                if world_id:
+                    vs = await VectorStore.get_instance("world", world_id=world_id)
+                    lightrag_dir = _ensure_lightrag_backup_dir(snap_id)
+                    await vs.backup_to(lightrag_dir)
             except Exception as e:
                 logger.warning(f"存档: LightRAG 备份失败（不影响存档）: {e}")
 
@@ -1505,11 +1524,11 @@ class CliAdapter(AbstractAdapter):
             known_ids = restored.get("known_knowledge_ids", [])
             saved_world = restored_state.get("world_id", "")
 
-            # 先切 active_world，确保后续 session 创建时 world_id 正确
+            # 同步内存中的活跃世界指针，确保后续 parse() 路由到正确会话
             if saved_world:
                 from src.tools.world_manager import set_active_world
                 set_active_world(saved_world)
-                logger.info(f"读档: active_world → {saved_world}")
+                logger.info(f"读档: 活跃世界 -> {saved_world}")
 
             # 写入 scheduler 当前会话
             if self._scheduler:
@@ -1569,12 +1588,13 @@ class CliAdapter(AbstractAdapter):
             # 恢复 LightRAG 数据
             try:
                 from src.memory.vector_store import VectorStore
-                vs = await VectorStore.get_instance("world", force_reinit=False)
-                lightrag_dir = _ensure_lightrag_backup_dir(target_id)
-                if lightrag_dir.exists():
-                    await vs.restore_from(lightrag_dir)
-                    # 重新初始化 VectorStore（读档后首次使用会懒加载）
-                    await VectorStore.get_instance("world", force_reinit=True)
+                if saved_world:
+                    vs = await VectorStore.get_instance("world", world_id=saved_world, force_reinit=False)
+                    lightrag_dir = _ensure_lightrag_backup_dir(target_id)
+                    if lightrag_dir.exists():
+                        await vs.restore_from(lightrag_dir)
+                        # 重新初始化 VectorStore（读档后首次使用会懒加载）
+                        await VectorStore.get_instance("world", world_id=saved_world, force_reinit=True)
             except Exception as e:
                 logger.warning(f"读档: LightRAG 恢复失败（可继续游戏）: {e}")
 
@@ -1994,6 +2014,97 @@ class CliAdapter(AbstractAdapter):
         if len(text) > 3000:
             text = text[:3000] + "\n  ... (截断)"
         return OutboundMessage.system_msg(f"GameState:\n{text}", session_id=session_id)
+
+    # ── 事件列表 ──
+
+    async def _handle_events_cmd(self, session_id: str) -> OutboundMessage:
+        """处理 /events — 列出当前世界的所有触发器及其运行时状态
+
+        从 PG static_triggers 读取触发器定义，
+        从 session_trigger_state 读取本轮触发计数，
+        合并后格式化输出。
+        """
+        state = self._scheduler.get_session_state(session_id) if self._scheduler else None
+        world_id = ""
+        module_name = ""
+        if state:
+            world_id = state.get("world_id", "")
+            module_name = state.get("scenario_name", "")
+        if not world_id:
+            from src.tools.world_manager import get_active_world
+            world_id = get_active_world()
+
+        if not world_id:
+            return OutboundMessage.system_msg(
+                "当前无活跃世界。请先 /world start <模组名> 开始游戏。",
+                level="warn", session_id=session_id,
+            )
+
+        try:
+            from src.state.read_models import StaticReadStore
+            store = StaticReadStore(world_id=world_id)
+            conn = await store.connect_script()
+
+            # 查当前世界触发器
+            rows = await conn.fetch(
+                "SELECT trigger_id, module_name, description, priority, is_one_off, "
+                "       conditions_json, actions_json, world_id "
+                "FROM static_triggers "
+                "WHERE world_id=$1 ORDER BY priority DESC",
+                world_id,
+            )
+            # 回退到空 world_id（种子数据）
+            if not rows:
+                rows = await conn.fetch(
+                    "SELECT trigger_id, module_name, description, priority, is_one_off, "
+                    "       conditions_json, actions_json, world_id "
+                    "FROM static_triggers "
+                    "WHERE world_id='' AND module_name=$1 ORDER BY priority DESC",
+                    module_name or "",
+                )
+
+            if not rows:
+                return OutboundMessage.system_msg(
+                    f"世界 '{world_id}' 中无触发器定义。",
+                    session_id=session_id,
+                )
+
+            # 查运行时状态
+            session_state_rows = await conn.fetch(
+                "SELECT trigger_id, fired_count, fired_this_turn, is_disabled, last_fired_at "
+                "FROM session_trigger_state WHERE session_id=$1",
+                session_id,
+            )
+            state_map = {r["trigger_id"]: r for r in session_state_rows}
+
+            lines = [f"世界: {world_id}  |  触发器数: {len(rows)}"]
+            lines.append("=" * 60)
+            for r in rows:
+                tid = r["trigger_id"]
+                ts = state_map.get(tid, {})
+                fired_count = ts.get("fired_count", 0)
+                fired_this = ts.get("fired_this_turn", 0)
+                disabled = ts.get("is_disabled", False)
+                one_off = "一次性" if r["is_one_off"] else "可重复"
+                status = "已禁用" if disabled else "活跃"
+                desc = r["description"] or "(无描述)"
+                lines.append(
+                    f"  {tid}\n"
+                    f"    描述: {desc}\n"
+                    f"    类型: {one_off}  |  优先级: {r['priority']}  |  状态: {status}\n"
+                    f"    触发: 累计 {fired_count} 次  |  本轮 {fired_this} 次"
+                )
+
+            text = "\n\n".join(lines)
+            await store.close()
+            return OutboundMessage.system_msg(text, session_id=session_id)
+
+        except Exception as e:
+            logger.warning(f"/events 查询失败: {e}")
+            return OutboundMessage.system_msg(
+                f"查询失败: {e}\n提示: 请先确保游戏正在运行（pgembed 已启动）。",
+                level="warn", session_id=session_id,
+            )
 
     # ================================================================
     # Workers 生命周期管理

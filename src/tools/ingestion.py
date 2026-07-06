@@ -237,11 +237,21 @@ class ModuleIngestor:
                                   for i in loc_data.get("interactables", [])],
             })
 
+        # 将 JSON 中的 static_triggers 格式规范化为内部 DSL 格式后传入投影
+        raw_triggers = json_data.get("static_triggers", [])
+        normalized_triggers = self._normalize_triggers(raw_triggers, module_name)
+
+        # 使用种子工作区 ID 作为 world_id，/start 时复制到新世界
+        from src.memory.vector_store import VectorStore
+        seed_ws = VectorStore.seed_workspace_name(module_name)
+
         event_data = {
             "module_name": module_name,
             "locations": locations,
             "raw_locations": raw_locations,
             "knowledge_registry": knowledge_registry,
+            "static_triggers": normalized_triggers,
+            "world_id": seed_ws,
             "timestamp": datetime.now(timezone.utc).isoformat(),
         }
 
@@ -370,6 +380,154 @@ class ModuleIngestor:
             )
 
         return docs
+
+    @staticmethod
+    def _normalize_triggers(raw_triggers: list[dict], module_name: str) -> list[dict]:
+        """将 JSON 中的触发器格式规范化为内部 DSL 格式
+
+        支持两种输入格式：
+          1. 标准化格式 — conditions_json / actions_json 已是内部 DSL 结构
+          2. 兼容格式（mttest.json 风格）— 含 logic/expressions 和 SILENT_ALTER 类型
+
+        转换逻辑：
+          {logic:"AND", expressions:[...]} → {"AND": [...]}
+          CURRENT_LOCATION(location_id)   → AT_LOCATION(params.key)
+          STATE_MATCH(key, value)          → GLOBAL_FLAG(params.key) 或 SANITY_BELOW
+          SILENT_ALTER(state_patch, echo)  → APPEND_ECHO + 平铺 state_patch 字段
+          TRIGGER_ENDING(payload)          → TRIGGER_ENDING(params.ending_id)
+        """
+        normalized = []
+        for t in raw_triggers:
+            tid = t.get("trigger_id", "")
+            if not tid:
+                continue
+
+            conditions = t.get("conditions_json", {})
+            actions = t.get("actions_json", [])
+
+            # ── 条件格式转换：logic/expressions → 内部 AND/OR/NOT ──
+            if "logic" in conditions and "expressions" in conditions:
+                logic = conditions["logic"]
+                exprs = conditions["expressions"]
+                converted = []
+                for expr in exprs:
+                    etype = expr.get("type", "")
+                    if etype == "CURRENT_LOCATION":
+                        converted.append({
+                            "type": "AT_LOCATION",
+                            "params": {"key": expr.get("location_id", "")},
+                        })
+                    elif etype == "STATE_MATCH":
+                        key = expr.get("key", "")
+                        val = expr.get("value")
+                        if key in ("sanity", "san"):
+                            converted.append({
+                                "type": "SANITY_BELOW",
+                                "params": {"threshold": val, "mode": "absolute"},
+                            })
+                        elif val is False:
+                            # value=false → NOT GLOBAL_FLAG
+                            converted.append({
+                                "NOT": {"type": "GLOBAL_FLAG", "params": {"key": key}},
+                            })
+                        else:
+                            converted.append({
+                                "type": "GLOBAL_FLAG",
+                                "params": {"key": key},
+                            })
+                    elif etype in ("HAS_ITEM", "AT_LOCATION", "TAG_ACTIVE",
+                                   "KNOWLEDGE_STATE", "SANITY_BELOW", "GLOBAL_FLAG"):
+                        converted.append({"type": etype, "params": expr.get("params", expr)})
+                    else:
+                        # 未知类型原样保留
+                        converted.append(expr)
+
+                conditions = {logic: converted}
+
+            # ── 动作格式转换 ──
+            converted_actions = []
+            for act in actions:
+                atype = act.get("type", "")
+
+                if atype == "SILENT_ALTER":
+                    state_patch = act.get("state_patch", {})
+                    echo_text = act.get("echo_text")
+
+                    # echo_text 转 APPEND_ECHO
+                    if echo_text:
+                        converted_actions.append({
+                            "type": "APPEND_ECHO",
+                            "params": {"text": echo_text},
+                        })
+                    # state_patch 中的特殊 key 转为标准 action
+                    for sk, sv in state_patch.items():
+                        if sk.startswith("_inventory_append"):
+                            converted_actions.append({
+                                "type": "SPAWN_ITEM",
+                                "params": {"item_key": sv},
+                            })
+                        elif sk.startswith("_inventory_remove"):
+                            converted_actions.append({
+                                "type": "REMOVE_ITEM",
+                                "params": {"key": sv},
+                            })
+                        elif sk == "front_door_locked":
+                            converted_actions.append({
+                                "type": "SET_GLOBAL_FLAG",
+                                "params": {"key": sk},
+                            })
+                        elif sk == "door_mechanism_jammed":
+                            converted_actions.append({
+                                "type": "SET_GLOBAL_FLAG",
+                                "params": {"key": sk},
+                            })
+                        elif sk == "statue_sealed":
+                            # boolean 值转换为 GLOBAL_FLAG
+                            converted_actions.append({
+                                "type": "SET_GLOBAL_FLAG",
+                                "params": {"key": sk},
+                            })
+                        elif sk.startswith("_"):
+                            # 内部字段直接透传
+                            converted_actions.append({
+                                "type": "APPEND_ECHO",
+                                "params": {"text": f"[系统: {sk} = {sv}]"},
+                            })
+                        else:
+                            # 其余未知 key 作为 GLOBAL_FLAG
+                            converted_actions.append({
+                                "type": "SET_GLOBAL_FLAG",
+                                "params": {"key": sk},
+                            })
+
+                elif atype == "TRIGGER_ENDING":
+                    payload = act.get("payload", {})
+                    converted_actions.append({
+                        "type": "TRIGGER_ENDING",
+                        "params": {"ending_id": payload.get("ending_id", tid)},
+                    })
+
+                elif atype in ("APPEND_ECHO", "MODIFY_LOCATION_DESC", "SPAWN_ITEM",
+                               "GRANT_TAG", "SET_GLOBAL_FLAG", "REMOVE_ITEM",
+                               "GRANT_KNOWLEDGE"):
+                    # 已是标准格式
+                    converted_actions.append(act)
+
+                else:
+                    # 未知动作类型原样保留
+                    converted_actions.append(act)
+
+            normalized.append({
+                "trigger_id": tid,
+                "module_name": module_name,
+                "description": t.get("description", ""),
+                "priority": t.get("priority", 0),
+                "is_one_off": t.get("is_one_off", True),
+                "conditions_json": conditions,
+                "actions_json": converted_actions,
+            })
+
+        return normalized
 
     async def _ingest_right_brain(self, json_data: dict, module_name: str) -> bool:
         """构建文档并写入当前 VectorStore"""

@@ -214,6 +214,23 @@ class GraphEngine:
             else:
                 narrative, new_state = await self._run_full(state, ctx)
 
+            # ── 结团检测：触发器评估可能在 reduce_iter 中标记 SUSPEND_ENDING ──
+            if new_state.get("control") == "SUSPEND_ENDING":
+                ending_id = new_state.get("_ending_id", "")
+                ending_narrative = await self._run_game_over(
+                    state=new_state,
+                    ending_id=ending_id,
+                    session_id=session_id,
+                    narrative=narrative,
+                )
+                # 用结团叙事覆盖普通叙事，锁定世界状态
+                narrative = ending_narrative
+                # 清除控制标记，避免下一轮再次触发
+                new_state.pop("control", None)
+                new_state.pop("_ending_id", None)
+                # 在 output 中添加结团标记供 adapter 层识别
+                return narrative, new_state
+
             # ── 执行后：由 navigation_node 处理 MOVE 位置更新，此处只做 WorldManager 同步 ──
             intent = new_state.get("intent") or {}
             resolved_loc = get_current_player(new_state).get("current_location", "")
@@ -311,6 +328,145 @@ class GraphEngine:
             ))
 
         return narrative, result
+
+    # ── 结团处理 ──
+
+    async def _run_game_over(
+        self,
+        state: dict,
+        ending_id: str,
+        session_id: str,
+        narrative: str,
+    ) -> str:
+        """触发结团后的收尾流程：查结局大纲 + 捞关键事件 + LLM 生成谢幕词 + 锁存
+
+        这是 Engine 层的外部干预，不修改 Graph 拓扑，不涉及节点注册。
+        结团叙事失败时以静态文本兜底。
+        """
+        logger.info(f"Engine: 结团触发 ending_id={ending_id}")
+
+        ending_outline = ""
+        recent_events: list[dict] = []
+
+        # 从 StaticReadStore 读结局大纲
+        try:
+            from src.state.read_models import StaticReadStore
+            store = StaticReadStore(world_id=state.get("world_id", ""))
+            conn = await store._get_conn()
+            row = await conn.fetchrow(
+                "SELECT description FROM knowledge_registry WHERE knowledge_id=$1",
+                f"ending_{ending_id}",
+            )
+            if row:
+                ending_outline = row["description"]
+        except Exception as e:
+            logger.warning(f"Engine.game_over: 读结局大纲失败: {e}")
+
+        # 从 EventStore 捞最后几轮关键事件
+        try:
+            from src.memory.event_store import create_event_store
+            es = await create_event_store()
+            recent_events = await es.get_recent_by_session(
+                session_id, limit=5,
+                event_types=["PlayerMoved", "SanityLost", "CombatResolved",
+                             "ItemStateChanged", "ClueDiscovered", "EntityKilled"],
+            )
+        except Exception as e:
+            logger.warning(f"Engine.game_over: 捞关键事件失败: {e}")
+
+        # LLM 生成个性化谢幕词
+        ending_narrative = await self._generate_ending_narrative(
+            state=state,
+            ending_id=ending_id,
+            ending_outline=ending_outline,
+            recent_events=recent_events,
+            current_narrative=narrative,
+        )
+
+        # 锁存世界状态
+        if self._snapshot_mgr:
+            try:
+                snap_id = await self._snapshot_mgr.create(state, label=f"ending_{ending_id}")
+                logger.info(f"Engine.game_over: 结局快照已创建 {snap_id[:8]}")
+            except Exception as e:
+                logger.warning(f"Engine.game_over: 快照创建失败: {e}")
+
+        # 向 EventStore 写入结团事件
+        if self._event_store:
+            try:
+                await self._event_store.append(
+                    session_id=session_id,
+                    event_type="GameEnded",
+                    data={"ending_id": ending_id, "narrative": ending_narrative},
+                    source_node="engine.game_over",
+                )
+            except Exception as e:
+                logger.warning(f"Engine.game_over: 结团事件写入失败: {e}")
+
+        logger.info(f"Engine: 结团完成 ending_id={ending_id}")
+        return ending_narrative
+
+    async def _generate_ending_narrative(
+        self,
+        state: dict,
+        ending_id: str,
+        ending_outline: str,
+        recent_events: list[dict],
+        current_narrative: str,
+    ) -> str:
+        """调用 Smart LLM 生成个性化结团谢幕词，失败时以静态模板兜底"""
+        try:
+            from src.tools.llm_client import call_llm
+
+            # 组装关键事件摘要
+            events_summary = ""
+            for evt in recent_events[-5:]:
+                et = evt.get("type", "")
+                ed = evt.get("data", {})
+                events_summary += f"  [{et}] {ed}\n"
+
+            system_prompt = (
+                '你是一个克苏鲁的呼唤跑团的守密人（Keeper），'
+                '现在游戏已经结束。请根据以下结局标识、结局大纲、'
+                '以及本局最后几轮的关键事件，生成一段极具克苏鲁风味、'
+                '个性化且富有仪式感的结团谢幕词。\n\n'
+                '要求：语气沉静而宏大，回顾调查员在本局中的遭遇与命运，'
+                '以第三人称叙述。不要提及「游戏结束」或「跑团」等元概念，'
+                '保持沉浸感。如果你的最后叙事已有内容，将其自然融合进去。'
+            )
+
+            user_prompt = (
+                f"结局标识: {ending_id}\n\n"
+                f"结局大纲: {ending_outline or '（无预设大纲，请根据上下文自由发挥）'}\n\n"
+                f"本局最后几轮关键事件:\n{events_summary or '（无关键事件记录）'}\n\n"
+                f"本轮叙事:\n{current_narrative or '（无本轮叙事）'}\n\n"
+                f"请生成结团谢幕词。"
+            )
+
+            result = await call_llm(
+                tier="smart",
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt},
+                ],
+                max_tokens=2048,
+                temperature=0.8,
+            )
+            ending_text = result.content if hasattr(result, "content") else str(result)
+            if ending_text and len(ending_text) > 50:
+                return ending_text
+
+        except Exception as e:
+            logger.warning(f"Engine.game_over: LLM 谢幕词生成失败: {e}")
+
+        # 静态文本兜底
+        fallback = (
+            f"故事到此告一段落。"
+            f"（结局: {ending_id}）"
+        )
+        if ending_outline:
+            fallback += f"\n\n{ending_outline}"
+        return fallback
 
     # ── full 模式 ──
 
