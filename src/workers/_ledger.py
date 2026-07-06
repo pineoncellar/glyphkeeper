@@ -65,20 +65,26 @@ async def get_world_lock(world_id: str) -> asyncio.Lock:
 class Gatekeeper:
     """状态评估判定引擎 — 组合三种策略判定是否放水收网
 
+    参数:
+        token_threshold:     TokenCount 策略阈值
+        time_idle_threshold: TimeBased 兜底策略阈值（秒）
+        min_flush_interval:  最小刷盘间隔（秒）
+
     使用方式:
-        gate = Gatekeeper()
-        if await gate.should_flush(bucket, flush_interval):
+        gate = Gatekeeper(token_threshold=2000, min_flush_interval=180)
+        if await gate.should_flush(bucket, now, last_flush_at):
             ...
     """
 
-    TOKEN_THRESHOLD = 2500
-    """TokenCount 策略阈值：积压超过此值触发固化"""
-
-    TIME_IDLE_THRESHOLD = 600
-    """TimeBased 策略阈值：系统静默超过此秒数触发固化（兜底）"""
-
-    MIN_FLUSH_INTERVAL = 120
-    """两次刷盘之间的最小间隔秒数，防止频繁刷盘"""
+    def __init__(
+        self,
+        token_threshold: int = 2000,
+        time_idle_threshold: int = 600,
+        min_flush_interval: int = 180,
+    ):
+        self.token_threshold = token_threshold
+        self.time_idle_threshold = time_idle_threshold
+        self.min_flush_interval = min_flush_interval
 
     async def should_flush(
         self,
@@ -103,7 +109,7 @@ class Gatekeeper:
         # 最小间隔保护
         if last_flush_at is not None:
             elapsed_since_flush = now - last_flush_at
-            if elapsed_since_flush < self.MIN_FLUSH_INTERVAL:
+            if elapsed_since_flush < self.min_flush_interval:
                 return False
 
         # 策略 A: TopicEnd — 边界信号触发
@@ -112,13 +118,13 @@ class Gatekeeper:
             return True
 
         # 策略 B: TokenCount — 积压超标触发
-        if bucket.unread_tokens >= self.TOKEN_THRESHOLD:
+        if bucket.unread_tokens >= self.token_threshold:
             logger.debug("Gatekeeper: TokenCount 策略触发")
             return True
 
         # 策略 C: TimeBased — 长考/挂机兜底
         idle_seconds = now - bucket.last_signal_at
-        if idle_seconds >= self.TIME_IDLE_THRESHOLD and bucket.target_version > 0:
+        if idle_seconds >= self.time_idle_threshold and bucket.target_version > 0:
             logger.debug("Gatekeeper: TimeBased 策略触发")
             return True
 

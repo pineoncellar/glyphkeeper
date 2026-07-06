@@ -11,16 +11,10 @@ from __future__ import annotations
 
 from typing import Optional
 from src.state.game_state import GameState, get_current_player
-from src.tools import get_logger
+from src.tools import get_logger, get_settings
 from src.memory.vector_store import VectorStore
 
 logger = get_logger(__name__)
-
-
-# ── 三档检索常量 ──
-
-_CLUE_PROBE_TOP_K = 15      # A 档：线索埋点硬唤醒，宽口径捕获
-_RECALL_TOP_K = 8            # B 档：主动回忆，聚焦命中
 
 
 async def _has_undiscovered_clues_at_location(state: GameState) -> bool:
@@ -95,10 +89,11 @@ async def rag_lookup_node(state: GameState) -> dict:
             return {}
         try:
             world_id = state.get("world_id", "")
+            cfg = get_settings().rag_retrieval
             vs = await VectorStore.get_instance(
                 knowledge_space="world", world_id=world_id,
             )
-            ctx_text = await vs.query(question=query, mode="naive", top_k=_CLUE_PROBE_TOP_K)
+            ctx_text = await vs.query(question=query, mode=cfg.clue_probe_mode, top_k=cfg.clue_probe_top_k)
             if ctx_text.strip():
                 result = f"<semantic_knowledge>\n{ctx_text}\n</semantic_knowledge>"
                 logger.info(f"rag_lookup_node[A]: query={query[:30]}... len={len(ctx_text)}")
@@ -117,10 +112,11 @@ async def rag_lookup_node(state: GameState) -> dict:
             return {}
         try:
             world_id = state.get("world_id", "")
+            cfg = get_settings().rag_retrieval
             vs = await VectorStore.get_instance(
                 knowledge_space="world", world_id=world_id,
             )
-            ctx_text = await vs.query(question=query, mode="naive", top_k=_RECALL_TOP_K)
+            ctx_text = await vs.query(question=query, mode=cfg.recall_mode, top_k=cfg.recall_top_k)
             if ctx_text.strip():
                 result = f"<semantic_knowledge>\n{ctx_text}\n</semantic_knowledge>"
                 logger.info(f"rag_lookup_node[B]: query={query[:30]}... len={len(ctx_text)}")

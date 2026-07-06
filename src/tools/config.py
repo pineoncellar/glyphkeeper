@@ -98,6 +98,63 @@ class LangSmithConfig(BaseModel):
 
 
 # ====================================================================
+# RAG 检索配置
+# ====================================================================
+
+
+class RagRetrievalConfig(BaseModel):
+    """RAG 检索三档弹性唤醒参数
+
+    映射 rag_lookup_node 内部的三档检索矩阵：
+      A 档：线索埋点硬唤醒（SQL 探针触发）
+      B 档：主动回忆（intent needs_rag 触发）
+      C 档：静默跳过（无配置项）
+    """
+    clue_probe_top_k: int = Field(15, description="A 档线索唤醒检索宽度")
+    clue_probe_mode: str = Field("naive", description="A 档 LightRAG 查询模式")
+    recall_top_k: int = Field(8, description="B 档主动回忆聚焦度")
+    recall_mode: str = Field("naive", description="B 档 LightRAG 查询模式")
+
+
+# ====================================================================
+# Worker 后台任务配置
+# ====================================================================
+
+
+class WorkerConfig(BaseModel):
+    """后台记忆固化 Worker 参数
+
+    对应蓄水刷盘模式的三个可调阈值和间隔。
+    """
+    # MemorizerWorker
+    memorizer_token_threshold: int = Field(
+        2000, description="TokenCount 策略阈值，约 4-5 轮触发一次刷盘",
+    )
+    memorizer_min_flush_interval: int = Field(
+        180, description="Memorizer 最小刷盘间隔（秒）",
+    )
+    memorizer_poll_interval: int = Field(
+        60, description="Memorizer 守护循环轮询间隔（秒）",
+    )
+
+    # WorldSummarizer
+    summarizer_token_threshold: int = Field(
+        4000, description="WorldSummarizer TokenCount 阈值（编年史）",
+    )
+    summarizer_min_flush_interval: int = Field(
+        600, description="WorldSummarizer 最小刷盘间隔（秒）",
+    )
+    summarizer_poll_interval: int = Field(
+        60, description="WorldSummarizer 守护循环轮询间隔（秒）",
+    )
+
+    # 共有
+    time_idle_threshold: int = Field(
+        600, description="TimeBased 兜底策略：静默超过此秒数触发固化",
+    )
+
+
+# ====================================================================
 # 主配置类
 # ====================================================================
 
@@ -108,7 +165,9 @@ class Settings(BaseModel):
     providers: Dict[str, ProviderConfig] = Field(default_factory=dict)
     model_tiers: Dict[str, ModelConfig] = Field(default_factory=dict)
     vector_store: VectorStoreConfig = Field(default_factory=VectorStoreConfig)
+    rag_retrieval: RagRetrievalConfig = Field(default_factory=RagRetrievalConfig)
     langsmith: LangSmithConfig = Field(default_factory=LangSmithConfig)
+    worker: WorkerConfig = Field(default_factory=WorkerConfig)
 
     @property
     def PROJECT_NAME(self) -> str:

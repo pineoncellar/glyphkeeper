@@ -1,9 +1,9 @@
 # -*- coding: utf-8 -*-
 """
 @File     :   world_summarizer.py
-@Desc     :   世界状态压缩后台任务 — 蓄水刷盘模式
+@Desc     :   世界状态压缩后台任务 — 增量轮询固化模式
 @Note     :   与 MemorizerWorker 共享同一份 LedgerManager 账本和判定引擎，
-              但刷盘频率更低（更高 Token 阈值），产出为宏观编年史摘要而非微观事实。
+              但固化频率更低（更高 Token 阈值），产出为宏观编年史摘要而非微观事实。
 """
 
 from __future__ import annotations
@@ -33,15 +33,21 @@ class WorldSummarizerGatekeeper(Gatekeeper):
     世界摘要的产出频率应当低于微观记忆固化 —— 编年史不应急于每轮都写。
     """
 
-    TOKEN_THRESHOLD = 5000
-    """TokenCount 阈值翻倍，减少宏观编年史的刷盘频率"""
-
-    MIN_FLUSH_INTERVAL = 600
-    """两次刷盘之间的最小间隔延长到 10 分钟"""
+    def __init__(
+        self,
+        token_threshold: int = 4000,
+        min_flush_interval: int = 600,
+        time_idle_threshold: int = 600,
+    ):
+        super().__init__(
+            token_threshold=token_threshold,
+            time_idle_threshold=time_idle_threshold,
+            min_flush_interval=min_flush_interval,
+        )
 
 
 class WorldSummarizer:
-    """世界状态摘要 Worker — 蓄水刷盘模式
+    """世界状态摘要 Worker — 增量轮询固化模式
 
     与 MemorizerWorker 共享同一份 LedgerManager，但使用更高判定阈值。
     产出为第三人称宏观编年史，刷入 VectorStore 供 Narrator 检索世界大局。
@@ -84,7 +90,7 @@ class WorldSummarizer:
         self._checkpoint_store = StaticReadStore()
         logger.info(
             f"WorldSummarizer 启动: interval={self.interval}s, "
-            f"token_threshold={self._gatekeeper.TOKEN_THRESHOLD}"
+            f"token_threshold={self._gatekeeper.token_threshold}"
         )
 
         self._task = asyncio.current_task()
