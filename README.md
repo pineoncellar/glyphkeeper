@@ -222,7 +222,7 @@ graph TB
 <tr><td style="text-align:center;">🔄</td><td colspan="2">Worker 后台任务（记忆固化 / 世界摘要 / 健康检查备份）</td></tr>
 <tr><td style="text-align:center;">⬜</td><td colspan="2">多世界并行与管理</td></tr>
 <tr><td style="text-align:center;">✅</td><td colspan="2" style="padding-left:2em;">├ known_knowledge未随存档存读而修改</td></tr>
-<tr><td style="text-align:center;">⬜</td><td colspan="2" style="padding-left:2em;">├ 整体整理乱七八糟的多世界管理与存档</td></tr>
+<tr><td style="text-align:center;">✅</td><td colspan="2" style="padding-left:2em;">├ 整体整理乱七八糟的多世界管理与存档</td></tr>
 <tr><td style="text-align:center;">✅</td><td colspan="2">条件触发器</td></tr>
 <tr><td style="text-align:center;">✅</td><td colspan="2" style="padding-left:2em;">├ 结团检测与流程</td></tr>
 <tr><td style="text-align:center;">⬜</td><td colspan="2" style="padding-left:2em;">├ 支持更多条件</td></tr>
@@ -264,18 +264,18 @@ graph TB
     subgraph "写入管线"
         Ingestion["ModuleIngestor<br/>模组摄入（双脑分流）"]
         EventLog["EventLog<br/>事件溯源日志"]
-        Projector["StateProjector<br/>事件→CQRS 读模型"]
     end
 
-    subgraph "左脑 - 结构化存储"
-        ES[("EventStore<br/>不可变事件流")]
+    subgraph "存储层 — world_id 隔离，PgManager 连接池"
+        ES[("EventStore<br/>不可变事件流<br/>按 world_id 查询")]
         PG[("PostgreSQL(pgembed)<br/>嵌入式 PG 17.9 + pgvector")]
-        CQRS["StaticReadStore<br/>locations / interactables<br/>knowledge_registry / clue_discoveries"]
+        CQRS["StaticReadStore<br/>locations / interactables<br/>knowledge_registry / clue_discoveries<br/>module_meta / static_triggers"]
         SKS["SessionKnowledgeState<br/>已发现知识追踪"]
+        Snap["SnapshotManager<br/>原子存读档<br/>save_checkpoints"]
     end
 
     subgraph "右脑 - 非结构化存储"
-        VS[("VectorStore<br/>LightRAG 封装")]
+        VS[("VectorStore<br/>LightRAG 封装<br/>knowledge_space 分区")]
     end
 
     subgraph "读取管线"
@@ -291,36 +291,47 @@ graph TB
         BS["BackgroundSync<br/>健康检查/备份"]
     end
 
-    Ingestion --> ES
+    Ingestion -.->|左脑:直接写| CQRS
     Ingestion --> VS
-    ES --> Projector
-    Projector --> CQRS
-    Projector --> SKS
+    EventLog --> ES
+    ES -.->|StateProjector| CQRS
+    ES -.->|StateProjector| SKS
     DBLookup --> CQRS
     RAGLookup --> VS
     Retriever --> VS
     Summarizer --> ES
     MW -.-> ES
     MW -.-> VS
-    WS -.-> VS
+    Snap --> ES
+    Snap --> CQRS
 ```
 
 ### 左脑 - 结构化记忆 (PostgreSQL)
 
-基于 **pgembed** 的嵌入式 PostgreSQL 17.9（自动捆绑，无需系统预装），存储精确的、逻辑严密的游戏数据：
+基于 **pgembed** 的嵌入式 PostgreSQL 17.9（自动捆绑，无需系统预装），通过 **PgManager 连接池**（`asyncpg.Pool`）统一管理所有组件连接。
 
 **CQRS 读模型表**（`src/state/read_models.py`）：
-- **locations**: 场景定义、出口映射、氛围标签（摄入期写入，运行时只读）
+- **locations**: 场景定义、出口映射、氛围标签（摄入期写入选定，运行时只读）
 - **interactables**: 可交互物品（书桌、窗户、门等），关联到所属场景
+- **entities**: NPC/实体，关联到所属场景，供消歧系统使用
 - **knowledge_registry**: 知识本体注册表，`knowledge_id` 是跨系统的逻辑标识符
 - **clue_discoveries**: 多对多线索映射，连接物品/NPC 到知识，定义检定条件和发现叙事
+- **module_meta**: 模组注册表（替代旧 `TEMPLATE_SESSION_ID` 方案），存储模组元数据和开场配置
+- **static_triggers**: 条件触发器静态注册表
 
-**运行时动态表**（`src/state/session_state.py`）：
-- **session_knowledge_state**: 玩家会话中已发现的知识追踪，用于防剧透过滤
+**运行时动态表**：
+- **session_knowledge_state**（`src/state/session_state.py`）: 玩家会话中已发现的知识追踪
+- **session_trigger_state**（`src/state/read_models.py`）: 触发器运行时状态
+- **characters**（`src/state/player_state.py`）: 角色存储，`(scope, key)` 复合主键，`scope='template'` 为种子卡
 
 **EventStore**（`src/memory/event_store.py`）：
-- 不可变事件流存储，所有状态变更的权威来源
+- 不可变事件流存储，按 `world_id` 标识事件流（`session_id` 已移除）
 - 支持基于 version 的增量查询和状态回放
+
+**SnapshotManager**（`src/state/snapshot.py`）：
+- 原子存档/读档，ACID 事务保护
+- `snapshots` 表以 `(world_id, snapshot_id)` 复合主键
+- `save_checkpoints` 表记录存档时刻的知识/触发器完整状态
 
 ### 右脑 - 非结构化记忆 (LightRAG)
 
@@ -339,10 +350,15 @@ graph TB
 
 ### 模组摄入管线（`src/tools/ingestion.py`）
 
-**双脑分流摄入流程**：
-1. **左脑管线**: 解析 intermediate JSON → 写入 EventStore（`WorldInitialized` 事件）→ StateProjector 投影到 CQRS 读模型表
-2. **右脑管线**: 合并全局知识和风味文本 → 去重降噪 → 写入 LightRAG（关闭 gleaning）
-3. **幂等设计**: 同名模组可重复摄入，不产生重复数据
+**双脑分流摄入流程**（跳过 EventStore 中间层）：
+1. **左脑管线**: 解析 intermediate JSON → 直接写入 StaticReadStore 读模型表（locations/interactables/entities/clue_discoveries/knowledge_registry/static_triggers），同时写入 `module_meta` 表记录模组元数据和开场配置
+2. **右脑管线**: 合并全局知识和风味文本 → 去重降噪 → 写入 LightRAG 种子工作区（`__seed__{name}`），供 `/start` 时 PG 级复制
+3. **幂等设计**: 同名模组可重复摄入，`ON CONFLICT` 机制确保不产生重复数据
+
+**与旧架构的关键区别**：
+- 不再使用 `TEMPLATE_SESSION_ID` 在 EventStore 中存储种子数据
+- `StateProjector` 仅在运行时处理事件投影，摄入期不再经过投影管线
+- 模组数据以 `world_id=__seed__{name}` 隔离，`/start` 时通过 `copy_static_data_to_world()` PG 级批量复制
 
 ---
 
@@ -356,7 +372,9 @@ graph TB
 | **Graph 框架** | LangGraph 0.4+ | StateGraph 驱动的 Agent 编排引擎 |
 | **LLM 集成** | OpenAI-compatible API (aiohttp) | 直接调用，不依赖第三方 SDK |
 | **数据库** | PostgreSQL 17.9 (pgembed 嵌入式) + pgvector | 自动捆绑，无需系统预装 |
-| **CQRS 读模型** | asyncpg + 自定义表结构 | locations / interactables / clue_discoveries |
+| **连接池** | PgManager (asyncpg.Pool) | 统一连接管理，消除各自独立连接 |
+| **CQRS 读模型** | asyncpg + 自定义表结构 | locations / interactables / module_meta / clue_discoveries |
+| **快照系统** | 原子 ACID 事务 | snapshots + save_checkpoints 双表保障存档一致性 |
 | **RAG 引擎** | LightRAG-HKU | 图谱增强的高级 RAG |
 | **配置管理** | PyYAML + Pydantic | 类型安全的配置系统 |
 | **日志系统** | Python logging + RotatingFileHandler | 结构化日志，支持分级日志 |
