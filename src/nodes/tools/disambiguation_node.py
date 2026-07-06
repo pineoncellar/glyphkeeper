@@ -108,6 +108,19 @@ async def _build_candidates(
                 clean = re.sub(r"\s*\(含线索\)", "", item)
                 candidates.append({"id": clean, "name": clean, "source": "scene"})
 
+        # 补充背包物品作为候选（玩家可以对自有物品执行操作）
+        inv = get_current_player(state).get("character", {}).get("inventory") or []
+        for item_name in inv:
+            if isinstance(item_name, str) and item_name not in {c["id"] for c in candidates}:
+                candidates.append({"id": item_name, "name": item_name, "source": "inventory"})
+
+        # 补充当前场景的掉落物作为候选
+        current_loc = get_current_player(state).get("current_location", "")
+        dropped = state.get("_dropped_items", {}).get(current_loc, [])
+        for item_name in dropped:
+            if isinstance(item_name, str) and item_name not in {c["id"] for c in candidates}:
+                candidates.append({"id": item_name, "name": item_name, "source": "dropped"})
+
     elif target_type == "location":
         # 从 physical_reality XML 中解析出口映射
         pr = state.get("physical_reality") or state.get("world_context") or ""
