@@ -40,13 +40,9 @@ def list_worlds():
     
     worlds = [d.name for d in worlds_dir.iterdir() if d.is_dir()]
     
-    config = load_yaml_config()
-    active_world = config.get("project", {}).get("active_world", "")
-    
     print("\n=== 可用的世界 ===")
     for w in worlds:
-        status = "*" if w == active_world else " "
-        print(f"[{status}] {w}")
+        print(f"    {w}")
     print("==================\n")
     return worlds
 
@@ -100,10 +96,10 @@ def switch_world(world_name: str):
         print(f"错误: 世界 '{world_name}' 不存在。")
         return
 
-    config = load_yaml_config()
-    config["project"]["active_world"] = world_name
-    save_yaml_config(config)
-    print(f"已切换当前世界为: {world_name}")
+    # active_world 已在配置中弃用，运行时通过 set_active_world() 在内存中设置。
+    # 此处仅打印提示，不再写 config.yaml。
+    print(f"提示: 已标记切换目标为 '{world_name}'。")
+    print("请在游戏 CLI 中使用 /world start 或 /archive load 进入此世界。")
 
 async def delete_world(world_name: str):
     confirm = input(f"警告: 此操作将永久删除世界 '{world_name}' 的所有存档和数据！\n请输入 '{world_name}' 确认删除: ")

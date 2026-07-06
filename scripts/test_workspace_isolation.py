@@ -76,7 +76,8 @@ async def test_workspace_isolation():
     
     # 步骤 6: 切换回 book workspace 并查询
     logger.info("\n[步骤 5] 切换回 book workspace...")
-    settings.project.active_world = "book"
+    from src.tools.world_manager import set_active_world
+    set_active_world("book")
     
     book_engine_2 = await RAGEngine.get_instance(
         domain="world",

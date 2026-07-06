@@ -35,33 +35,32 @@ async def cleanup_database():
     print("\n[1] 正在连接数据库...")
     db_manager = DatabaseManager()
     settings = get_settings()
-    active_world = settings.project.active_world
-    world_schema = f"world_{active_world}"
-    
+    from src.tools.world_manager import list_worlds
+    all_worlds = list_worlds()
+    print(f"    发现 {len(all_worlds)} 个世界目录: {', '.join(all_worlds) if all_worlds else '(无)'}")
+
     try:
         async with db_manager.engine.begin() as conn:
-            
+
             # === 清理世界数据 ===
             if args.target in ["all", "world"]:
-                print(f"\n[2] 正在清理世界数据 (Schema: {world_schema})...")
-                
-                # 1. 删除数据库 Schema
-                print(f"    -> 删除 Schema {world_schema}...")
-                await conn.execute(text(f"DROP SCHEMA IF EXISTS {world_schema} CASCADE"))
-                
-                # 2. 重新创建 Schema 和表结构
-                print(f"    -> 重建 Schema 和业务表...")
-                await conn.execute(text(f"CREATE SCHEMA IF NOT EXISTS {world_schema}"))
-                # 临时设置 search_path 以便 create_all 在正确的位置创建表
-                await conn.execute(text(f"SET search_path TO {world_schema}, public"))
-                await conn.run_sync(Base.metadata.create_all)
-                
-                # 3. 清理本地文件
-                print(f"    -> 清理本地文件...")
-                world_dir = PROJECT_ROOT / "data" / "worlds" / active_world
-                if world_dir.exists():
-                    shutil.rmtree(world_dir)
-                world_dir.mkdir(parents=True, exist_ok=True)
+                print(f"\n[2] 正在清理所有世界数据和目录...")
+                for wid in all_worlds:
+                    schema_name = f"world_{wid}"
+                    try:
+                        await conn.execute(text(f"DROP SCHEMA IF EXISTS {schema_name} CASCADE"))
+                        print(f"    -> Schema {schema_name} 已删除")
+                        await conn.execute(text(f"CREATE SCHEMA IF NOT EXISTS {schema_name}"))
+                        await conn.execute(text(f"SET search_path TO {schema_name}, public"))
+                        await conn.run_sync(Base.metadata.create_all)
+                    except Exception as e:
+                        print(f"    -> Schema {schema_name} 处理失败: {e}")
+
+                    world_dir = PROJECT_ROOT / "data" / "worlds" / wid
+                    if world_dir.exists():
+                        shutil.rmtree(world_dir)
+                    world_dir.mkdir(parents=True, exist_ok=True)
+                    print(f"    -> 世界 '{wid}' 目录已重置")
                 print("    世界数据清理完成。")
 
             # === 清理规则库数据 ===

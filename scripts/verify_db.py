@@ -7,12 +7,12 @@ from sqlalchemy import text
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from src.memory.database import DatabaseManager
-from src.core.config import get_settings
+from src.tools.world_manager import list_worlds
 
 async def verify():
-    settings = get_settings()
-    active_world = settings.project.active_world
-    schema = f"world_{active_world}"
+    worlds = list_worlds()
+    active_world = worlds[0] if worlds else ""
+    schema = f"world_{active_world}" if active_world else "public"
     
     db = DatabaseManager()
     print(f"Connecting to DB: {db.engine.url}")
