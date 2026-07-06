@@ -90,20 +90,18 @@ class EventLog:
         返回:
           (new_state, event_record)
         """
-        session_id = current.get("session_id", "")
-        if not session_id:
-            raise ValueError("session_id 不能为空")
+        world_id = current.get("world_id", "")
+        if not world_id:
+            raise ValueError("world_id 不能为空，事件溯源需 world_id 标识事件流")
 
-        # 应用 Reducer
         new_state = reduce_state(current, patch)
 
-        # 构建事件记录
         event_data: dict = {"patch": patch}
         if extra_data:
             event_data.update(extra_data)
 
         event_record = await self._store.append(
-            session_id=session_id,
+            world_id=world_id,
             event_type=event_type,
             data=event_data,
             source_node=source_node,
@@ -118,74 +116,48 @@ class EventLog:
     # ── 查询与回放 ──
 
     async def get_events(
-        self, session_id: str, since_version: int = 0
+        self, world_id: str, since_version: int = 0
     ) -> list[dict]:
-        """获取会话的事件流"""
-        return await self._store.get_events(session_id, since_version)
+        """获取指定世界的事件流"""
+        return await self._store.get_events(world_id, since_version)
 
     async def replay_to_state(
         self,
-        session_id: str,
+        world_id: str,
         base_state: Optional[GameState] = None,
     ) -> GameState:
-        """
-        回放全部事件重建状态。
-
-        参数:
-          session_id: 会话 ID
-          base_state: 起始状态（None 则从空状态开始）
-
-        返回:
-          重建后的完整 GameState
-        """
+        """回放指定世界的全部事件重建状态"""
         if base_state is None:
-            base_state = create_initial_state(session_id)
-        events = await self._store.get_events(session_id, since_version=0)
+            base_state = create_initial_state(world_id=world_id)
+        events = await self._store.get_events(world_id, since_version=0)
         return apply_events_to_state(base_state, events)
 
-    async def get_latest_version(self, session_id: str) -> int:
-        """获取会话的最新版本号"""
-        return await self._store.get_latest_version(session_id)
+    async def get_latest_version(self, world_id: str) -> int:
+        """获取指定世界的最新版本号"""
+        return await self._store.get_latest_version(world_id)
 
-    async def get_event_count(self, session_id: str) -> int:
-        """获取会话的事件总数"""
-        return await self._store.get_event_count(session_id)
+    async def get_event_count(self, world_id: str) -> int:
+        """获取指定世界的事件总数"""
+        return await self._store.get_event_count(world_id)
 
     async def rollback_to_version(
         self,
-        session_id: str,
+        world_id: str,
         target_version: int,
         base_state: Optional[GameState] = None,
     ) -> Optional[GameState]:
-        """回滚到指定事件版本，返回重建后的 GameState
-
-        优先使用 NarrativeOutput 事件中保存的完整状态快照（state_snapshot）。
-        若快照不可用，降级到从空状态逐事件回放。
-
-        参数:
-          session_id:     会话 ID
-          target_version: 目标版本号（含）
-          base_state:     起始状态（None 则不使用）
-
-        返回:
-          重建后的 GameState，或 None（版本越界）
-        """
-        latest = await self._store.get_latest_version(session_id)
+        """回滚到指定事件版本，返回重建后的 GameState"""
+        latest = await self._store.get_latest_version(world_id)
         if target_version > latest or target_version < 0:
             return None
 
-        events = await self._store.get_events(
-            session_id, since_version=0,
-        )
-        # 只取 target_version 之前的事件
+        events = await self._store.get_events(world_id, since_version=0)
         events = [e for e in events if e.get("version", 0) <= target_version]
 
-        # 从后往前找最近的完整状态快照
         for evt in reversed(events):
             data = evt.get("data", {})
             snapshot = data.get("state_snapshot") if isinstance(data, dict) else None
             if snapshot:
-                # 把快照的运行时字段补齐为默认值（保持状态一致）
                 snapshot["player_input"] = ""
                 snapshot["intent"] = None
                 snapshot["resolution"] = None
@@ -194,9 +166,8 @@ class EventLog:
                 snapshot["executed_actions"] = []
                 return snapshot
 
-        # 没有快照 → 降级到从空状态逐事件回放
         if base_state is None:
-            base_state = create_initial_state(session_id)
+            base_state = create_initial_state(world_id=world_id)
         return apply_events_to_state(base_state, events)
 
     # ── 订阅机制 ──
@@ -240,9 +211,9 @@ class EventLog:
 
     # ── 工具方法 ──
 
-    async def clear_session(self, session_id: str):
-        """清空会话事件（仅测试用）"""
-        await self._store.clear_session(session_id)
+    async def clear_world(self, world_id: str):
+        """清空指定世界的事件（仅测试用）"""
+        await self._store.clear_world(world_id)
 
     async def close(self):
         """关闭底层存储连接"""

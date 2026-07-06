@@ -123,7 +123,7 @@ async def seed_world_lightrag(world_id: str, module_name: str) -> bool:
     """
     from src.memory.vector_store import VectorStore
 
-    target_vs = await VectorStore.get_instance(domain="world", world_id=world_id)
+    target_vs = await VectorStore.get_instance(knowledge_space="world", world_id=world_id)
     seed_ws = VectorStore.seed_workspace_name(module_name)
 
     # 先检查种子工作区在 PG 中是否有数据

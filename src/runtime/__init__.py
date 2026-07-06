@@ -17,13 +17,22 @@
 """
 
 from src.runtime.engine import GraphEngine, ENGINE_MODE_FULL, ENGINE_MODE_LANGGRAPH
-from src.runtime.scheduler import InputScheduler
 from src.runtime.context import ExecutionContext
 from src.runtime.dispatcher import (
     dispatch_with_retry,
     NodeDispatcher,
     ExecutionResult,
 )
+
+# InputScheduler 延迟导入（避免 adapter ↔ runtime 循环引用）
+_InputScheduler = None
+
+def get_scheduler():
+    global _InputScheduler
+    if _InputScheduler is None:
+        from src.runtime.scheduler import InputScheduler
+        _InputScheduler = InputScheduler
+    return _InputScheduler
 
 __all__ = [
     # engine

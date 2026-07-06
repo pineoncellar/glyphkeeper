@@ -3,6 +3,7 @@
 @File     :   read_models.py
 @Desc     :   静态读模型存储 — CQRS 读端，含 locations/interactables/entities/clue_discoveries/knowledge_registry
 @Note     :   摄入期由 StateProjector 唯一写入，运行时只读；不可变世界蓝图
+             连接统一走 PgManager 连接池，不再复用 EventStore 连接
 """
 
 from __future__ import annotations
@@ -18,7 +19,7 @@ logger = get_logger(__name__)
 
 
 class StaticReadStore:
-    """静态读模型存储
+    """静态读模型存储（PgManager 连接池版）
 
     管理一组只读表：所有写入在模组摄入期由 StateProjector 完成，
     运行时仅执行 SELECT 查询。这些表是不可变的世界蓝图。
@@ -28,23 +29,23 @@ class StaticReadStore:
     def __init__(self, world_id: str = ""):
         self._conn = None
         self._world_id = world_id
+        self._inited = False
 
     # ── 连接管理 ──
 
     async def _get_conn(self):
-        """获取 asyncpg 连接（与 EventStore 共用 PgManager）"""
+        """从 PgManager 连接池获取连接，延迟建表"""
         if self._conn and not self._conn.is_closed():
             return self._conn
         from src.tools.pg_manager import PgManager
         mgr = await PgManager.get_instance()
-        if mgr.available:
-            await mgr.start()
-            from src.memory.event_store import create_event_store
-            es = await create_event_store()
-            self._conn = await es._get_conn()
-        else:
+        if not mgr.available:
             raise RuntimeError("pgembed 不可用")
-        await self._init_db()
+        await mgr.start()
+        self._conn = await mgr.get_conn()
+        if not self._inited:
+            await self._init_db()
+            self._inited = True
         return self._conn
 
     async def connect_script(self):
@@ -58,26 +59,30 @@ class StaticReadStore:
         return self._conn
 
     async def close(self):
+        """归还连接到 PgManager 连接池"""
         if self._conn and not self._conn.is_closed():
-            await self._conn.close()
+            from src.tools.pg_manager import PgManager
+            mgr = await PgManager.get_instance()
+            await mgr.release_conn(self._conn)
             self._conn = None
 
-    # ── 建表 ──
+    # ── 建表（纯净版：无历史兼容迁移代码） ──
 
     async def _init_db(self):
-        """幂等地创建所有静态读模型表，含 world_id 列和索引"""
+        """幂等地创建所有静态读模型表"""
         conn = await self._get_conn()
 
         # 场景拓扑表 — 房间定义、出口映射、氛围标签
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS locations (
                 id UUID PRIMARY KEY,
-                key TEXT UNIQUE NOT NULL,
+                key TEXT NOT NULL,
                 name TEXT NOT NULL,
                 base_desc TEXT NOT NULL DEFAULT '',
                 tags TEXT[] DEFAULT '{}',
                 exits_json JSONB DEFAULT '{}'::jsonb,
-                world_id TEXT NOT NULL DEFAULT ''
+                world_id TEXT NOT NULL DEFAULT '',
+                UNIQUE (key, world_id)
             )
         """)
 
@@ -85,12 +90,13 @@ class StaticReadStore:
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS interactables (
                 id UUID PRIMARY KEY,
-                key TEXT UNIQUE NOT NULL,
+                key TEXT NOT NULL,
                 name TEXT NOT NULL,
                 location_id UUID REFERENCES locations(id),
                 tags TEXT[] DEFAULT '{}',
                 state TEXT DEFAULT '',
-                world_id TEXT NOT NULL DEFAULT ''
+                world_id TEXT NOT NULL DEFAULT '',
+                UNIQUE (key, world_id)
             )
         """)
 
@@ -98,12 +104,13 @@ class StaticReadStore:
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS entities (
                 id UUID PRIMARY KEY,
-                key TEXT UNIQUE NOT NULL,
+                key TEXT NOT NULL,
                 name TEXT NOT NULL,
                 location_id UUID REFERENCES locations(id),
                 tags TEXT[] DEFAULT '{}',
                 stats_json JSONB DEFAULT '{}'::jsonb,
-                world_id TEXT NOT NULL DEFAULT ''
+                world_id TEXT NOT NULL DEFAULT '',
+                UNIQUE (key, world_id)
             )
         """)
 
@@ -111,30 +118,33 @@ class StaticReadStore:
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS knowledge_registry (
                 id UUID PRIMARY KEY,
-                knowledge_id TEXT UNIQUE NOT NULL,
+                knowledge_id TEXT NOT NULL,
                 rag_key TEXT NOT NULL DEFAULT '',
                 description TEXT NOT NULL DEFAULT '',
                 tags_granted TEXT[] DEFAULT '{}',
-                world_id TEXT NOT NULL DEFAULT ''
+                world_id TEXT NOT NULL DEFAULT '',
+                UNIQUE (knowledge_id, world_id)
             )
         """)
 
         # 多对多线索映射
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS clue_discoveries (
-                id UUID PRIMARY KEY,
+                id UUID NOT NULL,
                 interactable_id UUID REFERENCES interactables(id),
                 entity_key TEXT,
                 knowledge_id UUID REFERENCES knowledge_registry(id),
                 required_check JSONB DEFAULT '{}'::jsonb,
                 flavor_text TEXT NOT NULL DEFAULT '',
                 loot_items TEXT[] DEFAULT '{}',
-                world_id TEXT NOT NULL DEFAULT ''
+                required_item TEXT DEFAULT '',
+                deterministic_changes JSONB DEFAULT '{}'::jsonb,
+                world_id TEXT NOT NULL DEFAULT '',
+                PRIMARY KEY (id, world_id)
             )
         """)
 
-        # 触发器静态注册表 — 摄入期写入种子工作区，/start 时复制到目标世界
-        # 复合主键 (trigger_id, world_id) 允许多世界中存在同名触发器但不同定义
+        # 触发器静态注册表
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS static_triggers (
                 trigger_id      VARCHAR(64) NOT NULL,
@@ -156,13 +166,8 @@ class StaticReadStore:
             CREATE INDEX IF NOT EXISTS idx_triggers_world
             ON static_triggers(world_id)
         """)
-        # 为已有行追加 world_id 列（幂等迁移）
-        await conn.execute("""
-            ALTER TABLE static_triggers
-            ADD COLUMN IF NOT EXISTS world_id TEXT NOT NULL DEFAULT ''
-        """)
 
-        # 触发器运行时动态状态表 — 跑团会话级
+        # 触发器运行时动态状态表
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS session_trigger_state (
                 session_id      VARCHAR(64) NOT NULL,
@@ -175,76 +180,93 @@ class StaticReadStore:
             )
         """)
 
-        # 为已有表追加 world_id 列（幂等迁移）
-        # 再追加 loot_items 列（幂等，已存在时不报错）
+        # 模组注册表 — 替代旧 TEMPLATE_SESSION_ID EventStore 方案
         await conn.execute("""
-            ALTER TABLE clue_discoveries
-            ADD COLUMN IF NOT EXISTS loot_items TEXT[] DEFAULT '{}'
-        """)
-        await conn.execute("""
-            ALTER TABLE clue_discoveries
-            ADD COLUMN IF NOT EXISTS required_item TEXT DEFAULT ''
-        """)
-        await conn.execute("""
-            ALTER TABLE clue_discoveries
-            ADD COLUMN IF NOT EXISTS deterministic_changes JSONB DEFAULT '{}'::jsonb
-        """)
-        logger.debug("read_models: 确保 required_item/deterministic_changes 列存在")
-        for tbl in ("locations", "interactables", "entities", "knowledge_registry", "clue_discoveries"):
-            col = await conn.fetchval(f"""
-                SELECT data_type FROM information_schema.columns
-                WHERE table_name='{tbl}' AND column_name='world_id'
-            """)
-            if not col:
-                logger.info(f"read_models: 为 {tbl} 追加 world_id 列...")
-                await conn.execute(f"ALTER TABLE {tbl} ADD COLUMN world_id TEXT NOT NULL DEFAULT ''")
-
-        # 将单列 UNIQUE 升级为复合 UNIQUE (key, world_id)，使 copy_static_data_to_world 的 ON CONFLICT 生效
-        for tbl, col_name, constraint_name in [
-            ("locations", "key", "locations_key_key"),
-            ("interactables", "key", "interactables_key_key"),
-            ("entities", "key", "entities_key_key"),
-            ("knowledge_registry", "knowledge_id", "knowledge_registry_knowledge_id_key"),
-        ]:
-            try:
-                await conn.execute(f"ALTER TABLE {tbl} DROP CONSTRAINT IF EXISTS {constraint_name}")
-                await conn.execute(
-                    f"ALTER TABLE {tbl} ADD CONSTRAINT {constraint_name} UNIQUE ({col_name}, world_id)"
-                )
-            except Exception as e:
-                logger.debug(f"read_models: 迁移约束 {constraint_name} 跳过 ({e})")
-        # clue_discoveries 主键从 (id) 升级为 (id, world_id)，匹配 ON CONFLICT (id, world_id)
-        try:
-            await conn.execute("ALTER TABLE clue_discoveries DROP CONSTRAINT IF EXISTS clue_discoveries_pkey")
-            await conn.execute(
-                "ALTER TABLE clue_discoveries ADD PRIMARY KEY (id, world_id)"
+            CREATE TABLE IF NOT EXISTS module_meta (
+                module_name     TEXT PRIMARY KEY,
+                world_id        TEXT NOT NULL DEFAULT '',
+                description     TEXT NOT NULL DEFAULT '',
+                opening_json    JSONB DEFAULT '{}'::jsonb,
+                created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
             )
-        except Exception as e:
-            logger.debug(f"read_models: 迁移 clue_discoveries 主键跳过 ({e})")
+        """)
 
         # 索引加速运行时查询
-        await conn.execute("""
-            CREATE INDEX IF NOT EXISTS idx_clue_interactable
-            ON clue_discoveries(interactable_id)
-        """)
-        await conn.execute("""
-            CREATE INDEX IF NOT EXISTS idx_clue_entity
-            ON clue_discoveries(entity_key)
-        """)
-        await conn.execute("""
-            CREATE INDEX IF NOT EXISTS idx_interactable_location
-            ON interactables(location_id)
-        """)
-        await conn.execute("""
-            CREATE INDEX IF NOT EXISTS idx_entity_location
-            ON entities(location_id)
-        """)
-        await conn.execute("""
-            CREATE INDEX IF NOT EXISTS idx_locations_world
-            ON locations(world_id, key)
-        """)
+        await conn.execute("""CREATE INDEX IF NOT EXISTS idx_clue_interactable ON clue_discoveries(interactable_id)""")
+        await conn.execute("""CREATE INDEX IF NOT EXISTS idx_clue_entity ON clue_discoveries(entity_key)""")
+        await conn.execute("""CREATE INDEX IF NOT EXISTS idx_interactable_location ON interactables(location_id)""")
+        await conn.execute("""CREATE INDEX IF NOT EXISTS idx_entity_location ON entities(location_id)""")
+        await conn.execute("""CREATE INDEX IF NOT EXISTS idx_locations_world ON locations(world_id, key)""")
 
         logger.debug("static_read_store: 读模型表已就绪")
+
+    # ── 模组元数据（替代旧 TEMPLATE_SESSION_ID EventStore 方案） ──
+
+    async def insert_module_meta(
+        self, module_name: str, world_id: str,
+        description: str = "", opening: Optional[dict] = None,
+    ) -> bool:
+        """记录模组元数据（幂等，重复调用会覆盖）"""
+        conn = await self._get_conn()
+        try:
+            import json
+            await conn.execute("""
+                INSERT INTO module_meta (module_name, world_id, description, opening_json, created_at)
+                VALUES ($1, $2, $3, $4::jsonb, NOW())
+                ON CONFLICT (module_name) DO UPDATE SET
+                    world_id = $2, description = $3, opening_json = $4::jsonb, created_at = NOW()
+            """, module_name, world_id, description,
+                json.dumps(opening or {}, ensure_ascii=False))
+            return True
+        except Exception as e:
+            logger.warning(f"insert_module_meta 失败: {e}")
+            return False
+
+    async def list_module_metas(self) -> list[dict]:
+        """列出所有已摄入的模组"""
+        conn = await self._get_conn()
+        rows = await conn.fetch(
+            "SELECT module_name, world_id, description, opening_json FROM module_meta ORDER BY created_at DESC"
+        )
+        result = []
+        for r in rows:
+            opening = r["opening_json"] or {}
+            if isinstance(opening, str):
+                import json as _json
+                opening = _json.loads(opening) if opening else {}
+            result.append({
+                "name": r["module_name"],
+                "world_id": r["world_id"],
+                "description": r["description"],
+                "start_location": opening.get("start_location_key", ""),
+                "time_slot": opening.get("start_time_slot", "MORNING"),
+                "intro_text": opening.get("intro_text_template", ""),
+                "required_tags": opening.get("required_tags", []),
+            })
+        return result
+
+    async def get_module_meta(self, module_name: str) -> Optional[dict]:
+        """获取指定模组的元数据"""
+        conn = await self._get_conn()
+        row = await conn.fetchrow(
+            "SELECT module_name, world_id, description, opening_json FROM module_meta WHERE module_name = $1",
+            module_name,
+        )
+        if not row:
+            return None
+        opening = row["opening_json"] or {}
+        if isinstance(opening, str):
+            import json as _json
+            opening = _json.loads(opening) if opening else {}
+        return {
+            "name": row["module_name"],
+            "world_id": row["world_id"],
+            "description": row["description"],
+            "start_location": opening.get("start_location_key", ""),
+            "time_slot": opening.get("start_time_slot", "MORNING"),
+            "intro_text": opening.get("intro_text_template", ""),
+            "required_tags": opening.get("required_tags", []),
+        }
 
     # ── 清除 — 测试或重摄入时调用 ──
 

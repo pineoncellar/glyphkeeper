@@ -19,7 +19,7 @@ from src.state.game_state import create_initial_state, GameState
 
 def _make_state(**overrides) -> GameState:
     """构建测试用 GameState"""
-    base = dict(create_initial_state("test-session"))
+    base = dict(create_initial_state())
     base.update(overrides)
     return base
 

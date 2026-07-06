@@ -86,6 +86,7 @@ class TestConfig:
 # EventStore 测试
 # ====================================================================
 
+@pytest.mark.pg
 class TestEventStore:
     @pytest.fixture
     async def store(self):
@@ -96,7 +97,7 @@ class TestEventStore:
         if not mgr.available:
             pytest.skip("pgembed 不可用，跳过 PG 测试")
         await mgr.start()
-        es = EventStore(pg_uri=mgr.uri)
+        es = EventStore()
         await es.clear_all()
         yield es
         await es.close()
@@ -422,6 +423,7 @@ class TestRetriever:
         assert "recent_events" in result
         assert "rules" in result
 
+    @pytest.mark.pg
     async def test_retrieve_history_empty(self):
         """空会话返回空列表"""
         from src.memory.retriever import Retriever
@@ -432,7 +434,7 @@ class TestRetriever:
         if not mgr.available:
             pytest.skip("pgembed 不可用")
         await mgr.start()
-        store = EventStore(pg_uri=mgr.uri)
+        store = EventStore()
         r = Retriever(event_store=store)
         events = await r.retrieve_history("nonexistent")
         assert events == []
@@ -458,6 +460,7 @@ class TestRetriever:
 # VectorStore 配置测试
 # ====================================================================
 
+@pytest.mark.pg
 class TestVectorStoreConfig:
     """VectorStore 纯逻辑方法测试（需要 PG 可用，否则测试会跳过）"""
 

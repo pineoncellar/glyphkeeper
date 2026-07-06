@@ -134,6 +134,7 @@ class WorldSummarizer:
             has_new_data = False
             for session_id, last_ver in list(self._last_version.items()):
                 current_ver = await self._event_store.get_latest_version(session_id)
+        # TODO Phase 2: 改用 world_id
                 if current_ver > last_ver:
                     has_new_data = True
                     break

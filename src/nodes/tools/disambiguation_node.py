@@ -32,7 +32,7 @@ async def _get_embedding_func():
     global _embedding_func
     if _embedding_func is None:
         from src.memory.vector_store import VectorStore
-        vs = await VectorStore.get_instance(domain="world")
+        vs = await VectorStore.get_instance(knowledge_space="world")
         _embedding_func = vs._create_embedding_func()
     return _embedding_func
 

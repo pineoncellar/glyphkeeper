@@ -1,26 +1,35 @@
 # -*- coding: utf-8 -*-
 """
 @File     :   pg_manager.py
-@Desc     :   PgManager — 嵌入式 PostgreSQL 连接管理器
+@Desc     :   PgManager — 嵌入式 PostgreSQL 连接管理器 + 连接池
 @Note     :   基于 pgembed，自动捆绑 PostgreSQL 17.9 + pgvector
-             无需系统预装，开箱即用，适合打包发布
+             所有存储组件通过 get_conn()/release_conn() 共享连接池。
 
 使用方式:
-    mgr = PgManager.get_instance()
+    mgr = await PgManager.get_instance()
     await mgr.start()
-    url = mgr.uri  # "postgresql://postgres@localhost:PORT/glyphkeeper"
-    await mgr.stop()
+    conn = await mgr.get_conn()
+    try:
+        ...
+    finally:
+        await mgr.release_conn(conn)
+
+    # 事务上下文管理器
+    async with mgr.transaction() as conn:
+        await conn.execute(...)
+        # 自动 COMMIT 或 ROLLBACK
 """
 
 from __future__ import annotations
 
 import asyncio
 import asyncpg
+import contextlib
 import os
 import sys
 from enum import Enum
 from pathlib import Path
-from typing import Optional
+from typing import AsyncIterator, Optional
 
 import psutil
 
@@ -44,20 +53,21 @@ class PgBackend(str, Enum):
 
 
 # ====================================================================
-# PgManager
+# PgManager — 连接池版
 # ====================================================================
 
 
 class PgManager:
-    """嵌入式 PostgreSQL 连接管理器（单例）
+    """嵌入式 PostgreSQL 连接管理器（单例 + 连接池）
 
     基于 pgembed 捆绑的 PostgreSQL，自动管理进程生命周期。
-    开箱即用，无需系统预装数据库服务。
+    所有存储组件共享同一连接池，消除各自独立连接的旧模式。
 
     职责:
       - 检测 pgembed 可用性
       - 管理嵌入式 PG 的进程生命周期（initdb → start → stop）
-      - 提供统一的连接 URI
+      - 提供统一连接池（get_conn / release_conn）
+      - 提供事务上下文管理器（transaction）
       - 自动安装 pgvector 扩展
       - 提供健康检查
     """
@@ -75,6 +85,7 @@ class PgManager:
         self._pg_server = None  # pgembed.PostgresServer 实例
         self._pgdata_dir: Optional[Path] = None
         self._started: bool = False
+        self._pool: Optional[asyncpg.Pool] = None
 
     # ── 单例 ──
 
@@ -165,9 +176,17 @@ class PgManager:
         self._started = True
 
     async def stop(self):
-        """停止嵌入式 PostgreSQL"""
+        """停止嵌入式 PostgreSQL — 先关闭连接池，再停 PG 进程"""
         if not self._started:
             return
+        # 先关闭连接池，确保无残留连接
+        if self._pool is not None:
+            try:
+                await self._pool.close()
+                self._pool = None
+                logger.debug("pgembed: 连接池已关闭")
+            except Exception as e:
+                logger.debug(f"pgembed: 连接池关闭异常: {e}")
         if self._backend == PgBackend.LOCAL:
             await self._stop_local()
         self._started = False
@@ -248,7 +267,11 @@ class PgManager:
                 logger.info(f"pgembed: pgvector v{ver} 扩展已安装")
             except Exception as e:
                 logger.info(f"pgembed: pgvector 不可用 ({e})，使用本地向量存储降级")
-
+            # ── 创建连接池 ──
+            self._pool = await asyncpg.create_pool(
+                self._uri, min_size=2, max_size=10,
+            )
+            logger.info(f"pgembed: 连接池已就绪 (min=2, max=10)")
         except Exception as e:
             logger.error(f"pgembed: 启动失败: {e}")
             self._backend = PgBackend.NONE
@@ -364,6 +387,104 @@ class PgManager:
 
         logger.info("pgembed: PostgreSQL 已停止")
 
+    # ── 连接池 ──
+
+    async def get_conn(self) -> asyncpg.Connection:
+        """从连接池获取一个连接（调用方用完后必须 release_conn）"""
+        if self._pool is None:
+            raise RuntimeError("连接池未初始化，请先调用 start()")
+        return await self._pool.acquire()
+
+    async def release_conn(self, conn: Optional[asyncpg.Connection]):
+        """归还连接到连接池"""
+        if self._pool is not None and conn is not None and not conn.is_closed():
+            await self._pool.release(conn)
+
+    @contextlib.asynccontextmanager
+    async def transaction(self) -> AsyncIterator[asyncpg.Connection]:
+        """事务上下文管理器
+
+        进入时从池获取连接、开启事务；
+        退出时自动 COMMIT 或 ROLLBACK。
+        """
+        conn = await self.get_conn()
+        try:
+            async with conn.transaction():
+                yield conn
+        finally:
+            await self.release_conn(conn)
+
+    # ── 测试数据库支持 ──
+
+    async def ensure_test_database(self, test_dbname: str):
+        """创建并切换到测试数据库（测试会话使用，不污染生产数据）
+
+        若 test_dbname 已存在则先 DROP 重建。
+        """
+        uri_postgres = self._uri.rsplit("/", 1)[0] + "/postgres"
+        conn = await asyncpg.connect(uri_postgres)
+        try:
+            exists = await conn.fetchval(
+                "SELECT 1 FROM pg_database WHERE datname=$1", test_dbname,
+            )
+            if exists:
+                await conn.execute(
+                    f"SELECT pg_terminate_backend(pid) FROM pg_stat_activity "
+                    f"WHERE datname='{test_dbname}' AND pid <> pg_backend_pid()"
+                )
+                await conn.execute(f"DROP DATABASE {test_dbname}")
+            await conn.execute(f"CREATE DATABASE {test_dbname}")
+        finally:
+            await conn.close()
+
+        if self._pool is not None:
+            await self._pool.close()
+            self._pool = None
+        self._original_dbname = self._dbname
+        self._dbname = test_dbname
+        self._uri = self._build_uri()
+        self._pool = await asyncpg.create_pool(self._uri, min_size=2, max_size=10)
+        logger.info(f"测试数据库: 已切换到 '{test_dbname}'")
+
+    async def drop_test_database(self, test_dbname: str):
+        """恢复生产库并删除测试数据库"""
+        old_pool = self._pool
+        self._pool = None
+
+        self._dbname = self._original_dbname
+        self._uri = self._build_uri()
+
+        # 直接连接 postgres 库（绕过池，池可能已被关闭）
+        uri_postgres = self._uri.rsplit("/", 1)[0] + "/postgres"
+        try:
+            conn = await asyncpg.connect(uri_postgres, timeout=5.0)
+        except Exception:
+            # PG 已停止，正常跳过
+            return
+        try:
+            await conn.execute(
+                f"SELECT pg_terminate_backend(pid) FROM pg_stat_activity "
+                f"WHERE datname='{test_dbname}' AND pid <> pg_backend_pid()"
+            )
+            await conn.execute(f"DROP DATABASE IF EXISTS {test_dbname}")
+            logger.info(f"测试数据库: 已删除 '{test_dbname}'")
+        except Exception as e:
+            logger.debug(f"测试数据库: 删除跳过 ({e})")
+        finally:
+            await conn.close()
+
+        # 恢复连接池（如果 PG 仍在运行）
+        if old_pool is not None:
+            try:
+                await old_pool.close()
+            except Exception:
+                pass
+        if self._started:
+            try:
+                self._pool = await asyncpg.create_pool(self._uri, min_size=2, max_size=10)
+            except Exception:
+                self._pool = None
+
     # ── 实例属性 ──
 
     @property
@@ -400,17 +521,17 @@ class PgManager:
         }
         if self.available and self._started:
             try:
-                conn = await asyncpg.connect(
-                    self._uri, timeout=3.0,
-                )
-                version = await conn.fetchval("SELECT version()")
-                ext_count = await conn.fetchval(
-                    "SELECT count(*) FROM pg_extension"
-                )
-                await conn.close()
-                result["pg_version"] = version
-                result["extensions"] = ext_count
-                result["status"] = "healthy"
+                conn = await self.get_conn()
+                try:
+                    version = await conn.fetchval("SELECT version()")
+                    ext_count = await conn.fetchval(
+                        "SELECT count(*) FROM pg_extension"
+                    )
+                    result["pg_version"] = version
+                    result["extensions"] = ext_count
+                    result["status"] = "healthy"
+                finally:
+                    await self.release_conn(conn)
             except Exception as e:
                 result["status"] = "unhealthy"
                 result["error"] = str(e)

@@ -19,8 +19,16 @@ import os
 from src.state.game_state import get_current_player
 from src.tools import get_logger
 from src.runtime.engine import GraphEngine
-from src.runtime.scheduler import InputScheduler
 from src.adapter.base import AbstractAdapter
+
+# InputScheduler 延迟导入（避免 adapter ↔ runtime 循环引用）
+_InputScheduler = None
+def _get_scheduler():
+    global _InputScheduler
+    if _InputScheduler is None:
+        from src.runtime.scheduler import InputScheduler
+        _InputScheduler = InputScheduler
+    return _InputScheduler
 from src.adapter.protocol import InboundMessage, OutboundMessage, MessageType
 from src.domain.character import (
     Occupation, OCCUPATIONS, Stats, Character,
@@ -84,9 +92,12 @@ class CliAdapter(AbstractAdapter):
     def __init__(
         self,
         engine: Optional[GraphEngine] = None,
-        scheduler: Optional[InputScheduler] = None,
-        session_id: str = "cli-default",
+        scheduler: Optional["InputScheduler"] = None,
+        session_id: str = "",
     ):
+        if not session_id:
+            import uuid
+            session_id = f"cli_{uuid.uuid4().hex[:8]}"
         super().__init__(engine, scheduler, session_id)
         self._turn_count = 0
         self._game_started: bool = False
@@ -327,7 +338,7 @@ class CliAdapter(AbstractAdapter):
 
         self._character = character
         if self._player_loader:
-            await self._player_loader.save(self.session_id, character)
+            await self._player_loader.save("world", self.session_id, character)
 
         print()
         print(_color("═" * 50, _GREEN))
@@ -714,7 +725,7 @@ class CliAdapter(AbstractAdapter):
         # 角色名为空时用文件名兜底，确保可被 /delete 定位
         card_name = char.name or path.stem
         try:
-            await self._player_loader.save_card(card_name, char)
+            await self._player_loader.save_template(card_name, char)
         except Exception as e:
             return OutboundMessage.system_msg(
                 f"种子卡保存失败: {e}", level="error", session_id=session_id,
@@ -784,21 +795,21 @@ class CliAdapter(AbstractAdapter):
         if self._player_loader is None:
             self._player_loader = CharacterStore()
         try:
-            cards = await self._player_loader.list_cards()
+            templates = await self._player_loader.list_templates()
         except Exception as e:
             return OutboundMessage.system_msg(
                 f"读取种子卡库失败: {e}", level="error", session_id=session_id,
             )
 
-        if not cards:
+        if not templates:
             return OutboundMessage.system_msg(
                 "种子卡库为空。使用 /card import <名称> 从 xlsx 文件导入角色卡。",
                 session_id=session_id,
             )
 
-        lines = [f"种子卡库 ({len(cards)} 张):"]
-        for c in cards:
-            cname = c.get("character_name", c.get("card_name", "?"))
+        lines = [f"种子卡库 ({len(templates)} 张):"]
+        for c in templates:
+            cname = c.get("character_name", c.get("key", "?"))
             occ = c.get("occupation", "")
             ts = str(c.get("saved_at", ""))[:19]
             suffix = f" ({occ})" if occ else ""
@@ -819,7 +830,7 @@ class CliAdapter(AbstractAdapter):
         if self._player_loader is None:
             self._player_loader = CharacterStore()
         try:
-            char = await self._player_loader.load_card(card_name)
+            char = await self._player_loader.load_template(card_name)
         except Exception as e:
             return OutboundMessage.system_msg(
                 f"加载种子卡失败: {e}", level="error", session_id=session_id,
@@ -858,24 +869,24 @@ class CliAdapter(AbstractAdapter):
 
         # ── 清空全部 ──
         if arg == "--all":
-            cards = await self._player_loader.list_cards()
-            if not cards:
+            templates = await self._player_loader.list_templates()
+            if not templates:
                 return OutboundMessage.system_msg(
                     "种子卡库已为空。", session_id=session_id,
                 )
             raw = await asyncio.get_event_loop().run_in_executor(
                 None, lambda: input(
-                    f"  确认清空全部 {len(cards)} 张种子卡? "
+                    f"  确认清空全部 {len(templates)} 张种子卡? "
                     f"{_color('(y/N)', _GREEN)} > "
                 )
             )
             if raw.strip().lower() not in ("y", "yes", "是"):
                 return OutboundMessage.system_msg("已取消删除。", session_id=session_id)
 
-            for c in cards:
-                sid = c.get("session_id", "")
-                if sid:
-                    await self._player_loader.delete(sid)
+            for c in templates:
+                k = c.get("key", "")
+                if k:
+                    await self._player_loader.delete("template", k)
             logger.info("种子卡库已清空 (%d 张)", len(cards))
             return OutboundMessage.system_msg(
                 f"种子卡库已清空 ({len(cards)} 张)。", session_id=session_id,
@@ -883,9 +894,8 @@ class CliAdapter(AbstractAdapter):
 
         # ── 删除单张 ──
         card_name = arg
-        # 修复期兼容：修复前空卡存为 __card__，尝试用空名加载
         if not card_name:
-            char = await self._player_loader.load_card("")
+            char = await self._player_loader.load_template("")
             if char:
                 raw = await asyncio.get_event_loop().run_in_executor(
                     None, lambda: input(
@@ -893,7 +903,7 @@ class CliAdapter(AbstractAdapter):
                     )
                 )
                 if raw.strip().lower() in ("y", "yes", "是"):
-                    await self._player_loader.delete_card("")
+                    await self._player_loader.delete_template("")
                     return OutboundMessage.system_msg(
                         "空名种子卡已删除。", session_id=session_id,
                     )
@@ -901,13 +911,13 @@ class CliAdapter(AbstractAdapter):
                     "已取消删除。", session_id=session_id,
                 )
 
-        if not await self._player_loader.card_exists(card_name):
+        if not await self._player_loader.template_exists(card_name):
             return OutboundMessage.system_msg(
                 f"未找到种子卡「{card_name}」。使用 /card list 查看所有可用卡片。",
                 level="warn", session_id=session_id,
             )
 
-        char = await self._player_loader.load_card(card_name)
+        char = await self._player_loader.load_template(card_name)
         brief = f"{char.name} ({char.occupation})" if char else card_name
         raw = await asyncio.get_event_loop().run_in_executor(
             None, lambda: input(
@@ -917,7 +927,7 @@ class CliAdapter(AbstractAdapter):
         if raw.strip().lower() not in ("y", "yes", "是"):
             return OutboundMessage.system_msg("已取消删除。", session_id=session_id)
 
-        await self._player_loader.delete_card(card_name)
+        await self._player_loader.delete_template(card_name)
         logger.info("种子卡已删除: %s", card_name)
         return OutboundMessage.system_msg(
             f"种子卡「{brief}」已删除。", session_id=session_id,
@@ -927,15 +937,15 @@ class CliAdapter(AbstractAdapter):
         """交互式从种子卡库选择角色，返回选中的 Character 或 None"""
         if self._player_loader is None:
             self._player_loader = CharacterStore()
-        cards = await self._player_loader.list_cards()
-        if not cards:
+        templates = await self._player_loader.list_templates()
+        if not templates:
             print(_color("  种子卡库为空。", _YELLOW))
             return None
 
         print()
         print(_color("─ 种子卡库 ───────────────────────", _BOLD))
-        for i, c in enumerate(cards, 1):
-            cname = c.get("character_name", c.get("card_name", f"card_{i}"))
+        for i, c in enumerate(templates, 1):
+            cname = c.get("character_name", c.get("key", f"card_{i}"))
             occ = c.get("occupation", "")
             suffix = f" ({occ})" if occ else ""
             print(f"  {i:>2}. {_color(cname, _CYAN)}{suffix}")
@@ -943,20 +953,18 @@ class CliAdapter(AbstractAdapter):
 
         while True:
             raw = await asyncio.get_event_loop().run_in_executor(
-                None, lambda: input(f"  {_color('选择角色编号', _GREEN)} (1-{len(cards)}) > ")
+                None, lambda: input(f"  {_color('选择角色编号', _GREEN)} (1-{len(templates)}) > ")
             )
             try:
                 idx = int(raw.strip()) - 1
-                if 0 <= idx < len(cards):
+                if 0 <= idx < len(templates):
                     break
             except ValueError:
                 pass
 
-        entry = cards[idx]
-        card_name = entry.get("card_name") or entry.get("session_id", "")
-        if card_name.startswith("__card__"):
-            card_name = card_name[len("__card__"):]
-        char = await self._player_loader.load_card(card_name)
+        entry = templates[idx]
+        card_name = entry.get("key", "")
+        char = await self._player_loader.load_template(card_name)
         if char:
             print(f"  已选择: {_color(char.name, _CYAN)} ({char.occupation})")
         return char
@@ -970,9 +978,9 @@ class CliAdapter(AbstractAdapter):
         if self._player_loader is None:
             self._player_loader = CharacterStore()
 
-        exists = await self._player_loader.exists(session_id)
+        exists = await self._player_loader.exists("world", session_id)
         if exists:
-            loaded = await self._player_loader.load(session_id)
+            loaded = await self._player_loader.load("world", session_id)
             if loaded:
                 print(_color(f"\n  检测到已有角色: {loaded.name} ({loaded.occupation})", _DIM))
                 raw = await asyncio.get_event_loop().run_in_executor(
@@ -984,16 +992,16 @@ class CliAdapter(AbstractAdapter):
                 if choice in ("r", "重建", "新建"):
                     self._character = await self._character_creation_wizard()
                     if self._player_loader:
-                        await self._player_loader.save(session_id, self._character)
+                        await self._player_loader.save("world", session_id, self._character)
                 elif choice in ("c", "卡", "种子"):
                     self._character = await self._pick_card_interactive()
                 else:
                     self._character = loaded
         else:
             # 没有会话角色时，先问是否从种子卡库选
-            cards = await self._player_loader.list_cards()
-            if cards:
-                print(_color(f"\n  种子卡库有 {len(cards)} 张可用角色卡", _DIM))
+            templates = await self._player_loader.list_templates()
+            if templates:
+                print(_color(f"\n  种子卡库有 {len(templates)} 张可用角色卡", _DIM))
                 raw = await asyncio.get_event_loop().run_in_executor(
                     None, lambda: input(
                         f"  {_color('从种子卡库选(c) / 新建角色(r)', _GREEN)} > "
@@ -1476,11 +1484,10 @@ class CliAdapter(AbstractAdapter):
     # ================================================================
 
     async def _handle_save_cmd(self, cmd: str, session_id: str) -> OutboundMessage:
-        """处理 /archive save [存档名] — 创建游戏快照。
+        """处理 /archive save [存档名] — 原子存档（GameState + 知识 + 触发器 + LightRAG）
 
-        先获取当前会话的 GameState，再用 SnapshotManager 创建快照。
-        存档名缺省时使用时间戳标签。保留策略由 SnapshotManager 内部
-        的 MAX_SNAPSHOTS_PER_SESSION 控制（默认 20 个）。
+        先等待引擎的异步状态追赶完成，再用 SnapshotManager.create_atomic()
+        事务内写入快照和检查点，最后对 LightRAG 做 PG 级快照。
         """
         parts = cmd.split(maxsplit=1)
         label = parts[1].strip() if len(parts) > 1 else ""
@@ -1489,25 +1496,29 @@ class CliAdapter(AbstractAdapter):
         if state is None:
             return OutboundMessage.system_msg("当前无活跃会话，无法存档", level="warn", session_id=session_id)
 
+        world_id = state.get("world_id", session_id)
         from datetime import datetime
         snap_label = label or f"auto_{datetime.now().strftime('%m%d_%H%M')}"
 
         try:
-            snap_id = await self._snapshot_mgr.create(state, label=snap_label)
+            # 先等异步状态追赶冲刷完毕
+            if self._engine:
+                await self._engine.wait_for_pending()
 
-            # 全量备份 LightRAG 数据到快照关联目录
+            # 原子存档：事务内 GameState + 知识 + 触发器 + 事件版本
+            snap_id = await self._snapshot_mgr.create_atomic(state, world_id, label=snap_label)
+
+            # PG 级 LightRAG 快照（取代旧的文件系统备份）
             try:
                 from src.memory.vector_store import VectorStore
-                world_id = state.get("world_id", "")
                 if world_id:
-                    vs = await VectorStore.get_instance("world", world_id=world_id)
-                    lightrag_dir = _ensure_lightrag_backup_dir(snap_id)
-                    await vs.backup_to(lightrag_dir)
+                    vs = await VectorStore.get_instance(knowledge_space="world", world_id=world_id)
+                    await vs.snapshot_workspace(world_id, snap_id)
             except Exception as e:
-                logger.warning(f"存档: LightRAG 备份失败（不影响存档）: {e}")
+                logger.warning(f"存档: LightRAG 快照失败（不影响存档）: {e}")
 
             return OutboundMessage.system_msg(
-                f"存档完成: [{snap_label}] (ID: {snap_id[:8]}...)",
+                f"原子存档完成: [{snap_label}] (ID: {snap_id[:8]}...)",
                 session_id=session_id,
             )
         except Exception as e:
@@ -1530,8 +1541,8 @@ class CliAdapter(AbstractAdapter):
                 return OutboundMessage.system_msg("没有找到存档", level="warn", session_id=session_id)
 
             target_id = ""
+            saved_world = session_id  # 兜底用 session_id
             if label:
-                # 按标签匹配（排除结团存档）
                 matches = [s for s in snapshots if s.get("label", "") == label]
                 if not matches:
                     available = ", ".join(s.get("label", "?") for s in snapshots[:10] if not s.get("label", "").startswith("__ENDING__"))
@@ -1544,12 +1555,13 @@ class CliAdapter(AbstractAdapter):
                         "结团存档为只读存档，无法加载。",
                         level="warn", session_id=session_id,
                     )
-                target_id = matches[0]["id"]
+                target_id = matches[0].get("snapshot_id") or matches[0].get("id", "")
+                saved_world = matches[0].get("world_id", session_id)
             else:
-                # 取最新
-                target_id = snapshots[0]["id"]
+                target_id = snapshots[0].get("snapshot_id") or snapshots[0].get("id", "")
+                saved_world = snapshots[0].get("world_id", session_id)
 
-            restored = await self._snapshot_mgr.restore(target_id)
+            restored = await self._snapshot_mgr.restore_atomic(target_id, saved_world)
             if restored is None:
                 return OutboundMessage.system_msg("存档数据损坏，无法读取", level="error", session_id=session_id)
 
@@ -1557,28 +1569,18 @@ class CliAdapter(AbstractAdapter):
             known_ids = restored.get("known_knowledge_ids", [])
             saved_world = restored_state.get("world_id", "")
 
-            # 同步内存中的活跃世界指针，确保后续 parse() 路由到正确会话
             if saved_world:
                 from src.tools.world_manager import set_active_world
                 set_active_world(saved_world)
-                logger.info(f"读档: 活跃世界 -> {saved_world}")
 
-            # 写入 scheduler 当前会话
             if self._scheduler:
-                # 若存档中无角色数据（旧存档），用当前角色兜底
                 if not get_current_player(restored_state).get("character") and self._character:
                     from dataclasses import asdict
                     get_current_player(restored_state)["character"] = asdict(self._character)
-                platform = msg.platform if msg else "cli"
-                channel_id = msg.channel_id if msg else ""
                 await self._scheduler.restore_session_state(
-                    session_id, restored_state,
-                    platform=platform,
-                    channel_id=channel_id,
-                    world_id=saved_world,
+                    saved_world, restored_state, user_id=session_id,
                 )
-                # 兜底：若存档丢失 current_location，从模组开场配置中恢复
-                slot = self._scheduler.get_session(session_id)
+                slot = self._scheduler.get_session(saved_world)
                 if slot:
                     current_loc = get_current_player(slot.state).get("current_location", "")
                     if not current_loc:
@@ -1586,9 +1588,6 @@ class CliAdapter(AbstractAdapter):
                         if not scenario and saved_world:
                             scenario = saved_world.rsplit("_", 1)[0]
                         if scenario:
-                            logger.info(
-                                f"读档: current_location 为空，尝试从模组 '{scenario}' 恢复"
-                            )
                             from src.state.module_loader import ModuleLoader
                             loader = ModuleLoader()
                             modules = await loader.list_modules()
@@ -1597,11 +1596,8 @@ class CliAdapter(AbstractAdapter):
                                     start_loc = m.get("start_location", "")
                                     if start_loc:
                                         get_current_player(slot.state)["current_location"] = start_loc
-                                        logger.info(
-                                            f"读档: 已恢复 start_location='{start_loc}'"
-                                        )
                                     break
-                # 恢复角色引用
+
                 char_data = get_current_player(restored_state).get("character")
                 if char_data and self._player_loader:
                     from src.state.player_state import _dict_to_character
@@ -1609,42 +1605,23 @@ class CliAdapter(AbstractAdapter):
                     if loaded_char:
                         self._character = loaded_char
 
-            # 恢复 session_knowledge_state 至存档时的状态
-            try:
-                from src.state.session_state import SessionKnowledgeState
-                sks = SessionKnowledgeState()
-                char_name = self._character.name if self._character else ""
-                await sks.restore_from_ids(session_id, known_ids, character_name=char_name)
-            except Exception as e:
-                logger.warning(f"读档: 恢复知识状态失败: {e}")
-
-            # 恢复触发器运行时状态至存档时的状态
-            trigger_states = restored.get("trigger_states", {})
-            if trigger_states:
-                try:
-                    from src.state.read_models import StaticReadStore
-                    ts_store = StaticReadStore()
-                    await ts_store.restore_trigger_states(session_id, trigger_states)
-                except Exception as e:
-                    logger.warning(f"读档: 恢复触发器状态失败: {e}")
-
-            # 恢复 LightRAG 数据
+            # 恢复 LightRAG 数据（PG 级 workspace 快照恢复）
             try:
                 from src.memory.vector_store import VectorStore
                 if saved_world:
-                    vs = await VectorStore.get_instance("world", world_id=saved_world, force_reinit=False)
-                    lightrag_dir = _ensure_lightrag_backup_dir(target_id)
-                    if lightrag_dir.exists():
-                        await vs.restore_from(lightrag_dir)
-                        # 重新初始化 VectorStore（读档后首次使用会懒加载）
-                        await VectorStore.get_instance("world", world_id=saved_world, force_reinit=True)
+                    vs = await VectorStore.get_instance(knowledge_space="world", world_id=saved_world, force_reinit=True)
+                    snap_ws = f"__snap__{target_id[:8]}"
+                    await vs.drop_workspace(saved_world)
+                    await vs.copy_workspace_from(snap_ws)
+                    # 重新初始化 VectorStore
+                    await VectorStore.get_instance(knowledge_space="world", world_id=saved_world, force_reinit=True)
             except Exception as e:
                 logger.warning(f"读档: LightRAG 恢复失败（可继续游戏）: {e}")
 
             self._game_started = True
 
             return OutboundMessage.system_msg(
-                f"读档完成: [{label or snapshots[0].get('label', 'latest')}] "
+                f"原子读档完成: [{label or snapshots[0].get('label', 'latest')}] "
                 f"(轮次 {restored_state.get('beat_counter', 0)})",
                 session_id=session_id,
             )
@@ -1834,11 +1811,11 @@ class CliAdapter(AbstractAdapter):
 
         try:
             from src.memory.vector_store import VectorStore
-            vs = await VectorStore.get_instance(domain=domain)
+            vs = await VectorStore.get_instance(knowledge_space=domain)
 
             # 显示搜索提示
             print()
-            print(_color(f"  🔍 RAG 搜索: domain={domain} mode={mode}", _DIM))
+            print(_color(f"  RAG 搜索: knowledge_space={domain} mode={mode}", _DIM))
             print(_color(f"     查询: {query[:80]}", _DIM))
             print()
 

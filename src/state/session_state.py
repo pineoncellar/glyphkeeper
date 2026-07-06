@@ -17,7 +17,7 @@ logger = get_logger(__name__)
 
 
 class SessionKnowledgeState:
-    """动态状态存储 — 追踪玩家会话中已发现的知识
+    """动态状态存储 — 追踪玩家会话中已发现的知识（PgManager 连接池版）
 
     运行时由 ClueDiscovered 事件投影写入，采用尽力而为模式。
     投影失败不影响事件存储本身，只影响后续防剧透过滤的精确性。
@@ -25,6 +25,7 @@ class SessionKnowledgeState:
 
     def __init__(self):
         self._conn = None
+        self._inited = False
 
     # ── 连接管理 ──
 
@@ -33,18 +34,20 @@ class SessionKnowledgeState:
             return self._conn
         from src.tools.pg_manager import PgManager
         mgr = await PgManager.get_instance()
-        if mgr.available:
-            await mgr.start()
-            import asyncpg
-            self._conn = await asyncpg.connect(mgr.uri)
-        else:
+        if not mgr.available:
             raise RuntimeError("pgembed 不可用")
-        await self._init_db()
+        await mgr.start()
+        self._conn = await mgr.get_conn()
+        if not self._inited:
+            await self._init_db()
+            self._inited = True
         return self._conn
 
     async def close(self):
         if self._conn and not self._conn.is_closed():
-            await self._conn.close()
+            from src.tools.pg_manager import PgManager
+            mgr = await PgManager.get_instance()
+            await mgr.release_conn(self._conn)
             self._conn = None
 
     # ── 建表 ──

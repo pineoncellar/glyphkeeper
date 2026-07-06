@@ -2,9 +2,9 @@
 """
 @File     :   ingestion.py
 @Desc     :   模组数据摄入 — 双脑分流管线
-@Note     :   左脑: locations/entities/interactables/clues → EventStore + CQRS 投影 → PG
+@Note     :   左脑: locations/entities/interactables/clues → 直接写 PG 读模型表（跳过 EventStore）
               右脑: global_knowledge + NPC 深度人设 → 合并降噪 → LightRAG (gleaning 关闭)
-@TODO     :   实现断点续传、优化rag输入的拼接（？）逻辑
+              模组元数据写入 module_meta 表，不再使用 TEMPLATE_SESSION_ID。
 使用方式:
     uv run python -m src.tools.ingestion --name book
     uv run python -m src.tools.ingestion --list
@@ -21,33 +21,23 @@ from typing import Any, Optional
 
 from src.tools import get_logger, get_settings, PROJECT_ROOT
 
-# EventStore / VectorStore 延迟导入避免循环依赖
-
 logger = get_logger(__name__)
 
 
 # ====================================================================
-# 常量
-# ====================================================================
-
-TEMPLATE_SESSION_ID = "00000000-0000-0000-0000-000000000000"
-
-
-# ====================================================================
-# ModuleIngestor
+# ModuleIngestor — 跳过 EventStore，直接写读模型表
 # ====================================================================
 
 
 class ModuleIngestor:
     """模组数据摄入器 — 双脑分流
 
-    左脑管线写入 EventStore + CQRS 读模型表（结构化数据不掉 LLM）。
-    右脑管线合并叙事文本后集中写入 LightRAG（关闭 gleaning 减少 API 调用）。
+    左脑管线直接写入 StaticReadStore 读模型表（skipping EventStore 中间层）。
+    右脑管线合并叙事文本后集中写入 LightRAG 种子工作区。
     """
 
-    def __init__(self, vector_store=None, event_store=None):
+    def __init__(self, vector_store=None):
         self._vector_store = vector_store
-        self._event_store = event_store
 
     # ── 属性（延迟导入） ──
 
@@ -55,22 +45,15 @@ class ModuleIngestor:
     async def vector_store(self):
         if self._vector_store is None:
             from src.memory.vector_store import VectorStore
-            self._vector_store = await VectorStore.get_instance(domain="world")
+            self._vector_store = await VectorStore.get_instance(knowledge_space="world")
         return self._vector_store
-
-    @property
-    async def event_store(self):
-        if self._event_store is None:
-            from src.memory.event_store import create_event_store
-            self._event_store = await create_event_store()
-        return self._event_store
 
     # ── 主入口 ──
 
     async def ingest(self, json_data: dict) -> bool:
         """全流程摄入 — 先左脑（结构化）再右脑（叙事）
 
-        左脑: 知识注册表 + 场景/物品/NPC/线索 → EventStore + 投影到 PG
+        左脑: 知识注册表 + 场景/物品/NPC/线索 → 直接写 PG 读模型表
               写完就返回，不需要等右脑。
         右脑: 将 global_knowledge 和大段风味文本合并为大文档 → LightRAG
               关闭 gleaning 减少 LLM 调用。
@@ -81,35 +64,163 @@ class ModuleIngestor:
         logger.info(f"开始摄入模组: {module_name}")
         logger.info(f"  描述: {meta.get('description', '')}")
 
-        # ── 左脑管线：结构化数据 → EventStore + PG 读模型 ──
+        from src.memory.vector_store import VectorStore
+        seed_ws = VectorStore.seed_workspace_name(module_name)
+        import uuid as _uuid
+
+        # ── 左脑管线：结构化数据 → 直接写 PG 读模型表 ──
         left_ok = True
         knowledge_registry = self._build_knowledge_registry(json_data)
+        locations, raw_locations = [], []
 
-        if "opening" in json_data:
-            ok = await self._ingest_opening(module_name, json_data["opening"])
-            left_ok = left_ok and ok
+        for loc_data in json_data.get("locations", []):
+            loc_key = loc_data.get("key", "unknown")
+            loc_id = str(_uuid.uuid4())
 
-        ok = await self._record_world_initialized(
-            module_name, json_data, knowledge_registry,
-        )
-        left_ok = left_ok and ok
+            raw_interactables = []
+            for item in loc_data.get("interactables", []):
+                item_copy = dict(item)
+                item_copy["id"] = str(_uuid.uuid4())
+                raw_interactables.append(item_copy)
 
-        if left_ok:
+            raw_locations.append({
+                "id": loc_id, "key": loc_key,
+                "name": loc_data.get("name", ""),
+                "base_desc": loc_data.get("base_desc", ""),
+                "tags": loc_data.get("tags", []),
+                "exits": loc_data.get("exits", {}),
+                "entities": loc_data.get("entities", []),
+                "interactables": raw_interactables,
+            })
+
+            locations.append({
+                "id": loc_id, "key": loc_key,
+                "name": loc_data.get("name", ""),
+                "base_desc": loc_data.get("base_desc", ""),
+                "tags": loc_data.get("tags", []),
+                "exits": loc_data.get("exits", {}),
+                "entities": [e.get("key", e.get("name", ""))
+                             for e in loc_data.get("entities", [])],
+                "interactables": [i.get("key", i.get("name", ""))
+                                  for i in loc_data.get("interactables", [])],
+            })
+
+        # 直接调用 StaticReadStore 写入（跳过 EventStore + Projector 中间层）
+        from src.state.read_models import StaticReadStore
+        store = StaticReadStore()
+        conn = await store._get_conn()
+
+        try:
+            # 写知识注册表
+            if knowledge_registry:
+                await store.bulk_insert_knowledge(knowledge_registry, world_id=seed_ws)
+
+            # 写场景和物品 NPC
+            loc_id_map = await store.bulk_insert_locations(locations, world_id=seed_ws)
+
+            all_interactables, all_entities, all_clues = [], [], []
+            for loc_data in raw_locations:
+                loc_key = loc_data.get("key", "")
+                location_id = loc_id_map.get(loc_key)
+
+                for entity_data in loc_data.get("entities", []):
+                    all_entities.append({
+                        "id": entity_data.get("id", str(_uuid.uuid4())),
+                        "key": entity_data.get("key", ""),
+                        "name": entity_data.get("name", ""),
+                        "location_id": location_id,
+                        "tags": entity_data.get("tags", []),
+                        "stats": entity_data.get("stats", {}),
+                    })
+
+                for item_data in loc_data.get("interactables", []):
+                    item_id = item_data.get("id", "")
+                    all_interactables.append({
+                        "id": item_id,
+                        "key": item_data.get("key", ""),
+                        "name": item_data.get("name", ""),
+                        "location_id": location_id,
+                        "tags": item_data.get("tags", []),
+                        "state": item_data.get("state", ""),
+                    })
+
+                    for clue in item_data.get("clues", []):
+                        target_knowledge = clue.get("target_knowledge")
+                        knowledge_id = None
+                        if target_knowledge:
+                            for kr in knowledge_registry:
+                                if kr["knowledge_id"] == target_knowledge:
+                                    knowledge_id = kr["id"]
+                                    break
+                        all_clues.append({
+                            "interactable_id": item_id,
+                            "entity_key": None,
+                            "knowledge_id": knowledge_id,
+                            "required_check": clue.get("required_check", {}),
+                            "flavor_text": clue.get("flavor_text", ""),
+                            "loot_items": clue.get("loot_items", []),
+                            "required_item": clue.get("required_item", ""),
+                            "deterministic_changes": clue.get("deterministic_changes", {}),
+                        })
+
+                for entity_data in loc_data.get("entities", []):
+                    entity_key = entity_data.get("key", "")
+                    for clue in entity_data.get("dialogue_clues", []):
+                        target_knowledge = clue.get("target_knowledge")
+                        knowledge_id = None
+                        if target_knowledge:
+                            for kr in knowledge_registry:
+                                if kr["knowledge_id"] == target_knowledge:
+                                    knowledge_id = kr["id"]
+                                    break
+                        all_clues.append({
+                            "interactable_id": None,
+                            "entity_key": entity_key,
+                            "knowledge_id": knowledge_id,
+                            "required_check": clue.get("required_check", {}),
+                            "flavor_text": clue.get("flavor_text", ""),
+                            "loot_items": clue.get("loot_items", []),
+                        })
+
+            if all_interactables:
+                await store.bulk_insert_interactables(all_interactables, world_id=seed_ws)
+            if all_entities:
+                await store.bulk_insert_entities(all_entities, world_id=seed_ws)
+            if all_clues:
+                await store.bulk_insert_clues(all_clues, world_id=seed_ws)
+
+            # 写触发器
+            raw_triggers = json_data.get("static_triggers", [])
+            normalized_triggers = self._normalize_triggers(raw_triggers, module_name)
+            if normalized_triggers:
+                await store.bulk_insert_triggers(normalized_triggers, world_id=seed_ws)
+
+            # 写模组元数据（含开场配置）
+            opening_data = json_data.get("opening", {})
+            await store.insert_module_meta(
+                module_name=module_name,
+                world_id=seed_ws,
+                description=meta.get("description", ""),
+                opening=opening_data,
+            )
+
             logger.info(f"  [OK] 左脑管线完成: {len(knowledge_registry)} 条知识, "
                         f"{len(json_data.get('locations', []))} 个场景")
+            left_ok = True
+        except Exception as e:
+            logger.error(f"  [FAIL] 左脑管线写入失败: {e}")
+            left_ok = False
+        finally:
+            await store.close()
 
         # ── 右脑管线：叙事文本 → 合并降噪 → LightRAG ──
-        # 只写入种子工作区（__seed__{module_name}），不写 active_world
-        # /start 时通过 PG 级复制从种子拷贝到新世界，避免重复 API 调用
         docs = self._build_right_brain_docs(json_data, module_name)
         right_ok = False
 
         if docs:
             try:
-                from src.memory.vector_store import VectorStore
-                seed_ws = VectorStore.seed_workspace_name(module_name)
                 seed_vs = await VectorStore.get_instance(
-                    domain="world", world_id=seed_ws,
+                    knowledge_space="world", world_id=seed_ws,
                 )
                 await seed_vs.insert(docs, source_type="narrative_seed")
                 logger.info(f"  [OK] 种子工作区 '{seed_ws}' 已写入 ({len(docs)} 篇)")
@@ -128,28 +239,6 @@ class ModuleIngestor:
 
         logger.info(f"═" * 50)
         return left_ok and right_ok
-
-    # ── 左脑管线：开场 ──
-
-    async def _ingest_opening(self, module_name: str, opening_data: dict) -> bool:
-        """开场配置写入 EventStore"""
-        es = await self.event_store
-        try:
-            await es.append(
-                session_id=TEMPLATE_SESSION_ID,
-                event_type="OpeningTemplateSet",
-                data={
-                    "module_name": module_name,
-                    "opening": opening_data,
-                    "timestamp": datetime.now(timezone.utc).isoformat(),
-                },
-                source_node="ingestion",
-            )
-            logger.info(f"  [OK] 开场配置已写入 EventStore")
-            return True
-        except Exception as e:
-            logger.error(f"  [FAIL] 开场配置写入失败: {e}")
-            return False
 
     # ── 左脑管线：世界初始化事件 + 投影 ──
 
@@ -197,80 +286,8 @@ class ModuleIngestor:
 
         return list(registry_map.values())
 
-    async def _record_world_initialized(
-        self, module_name: str, json_data: dict, knowledge_registry: list[dict],
-    ) -> bool:
-        """写入 WorldInitialized 事件 → 投影到 PG 读模型表"""
-        es = await self.event_store
-        import uuid as _uuid
-
-        locations, raw_locations = [], []
-        for loc_data in json_data.get("locations", []):
-            loc_key = loc_data.get("key", "unknown")
-            loc_id = str(_uuid.uuid4())
-
-            raw_interactables = []
-            for item in loc_data.get("interactables", []):
-                item_copy = dict(item)
-                item_copy["id"] = str(_uuid.uuid4())
-                raw_interactables.append(item_copy)
-
-            raw_locations.append({
-                "id": loc_id, "key": loc_key,
-                "name": loc_data.get("name", ""),
-                "base_desc": loc_data.get("base_desc", ""),
-                "tags": loc_data.get("tags", []),
-                "exits": loc_data.get("exits", {}),
-                "entities": loc_data.get("entities", []),
-                "interactables": raw_interactables,
-            })
-
-            locations.append({
-                "id": loc_id, "key": loc_key,
-                "name": loc_data.get("name", ""),
-                "base_desc": loc_data.get("base_desc", ""),
-                "tags": loc_data.get("tags", []),
-                "exits": loc_data.get("exits", {}),
-                "entities": [e.get("key", e.get("name", ""))
-                             for e in loc_data.get("entities", [])],
-                "interactables": [i.get("key", i.get("name", ""))
-                                  for i in loc_data.get("interactables", [])],
-            })
-
-        # 将 JSON 中的 static_triggers 格式规范化为内部 DSL 格式后传入投影
-        raw_triggers = json_data.get("static_triggers", [])
-        normalized_triggers = self._normalize_triggers(raw_triggers, module_name)
-
-        # 使用种子工作区 ID 作为 world_id，/start 时复制到新世界
-        from src.memory.vector_store import VectorStore
-        seed_ws = VectorStore.seed_workspace_name(module_name)
-
-        event_data = {
-            "module_name": module_name,
-            "locations": locations,
-            "raw_locations": raw_locations,
-            "knowledge_registry": knowledge_registry,
-            "static_triggers": normalized_triggers,
-            "world_id": seed_ws,
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-        }
-
-        try:
-            event = await es.append(
-                session_id=TEMPLATE_SESSION_ID,
-                event_type="WorldInitialized",
-                data=event_data, source_node="ingestion",
-            )
-            logger.info(f"  [OK] WorldInitialized 已记录 ({len(locations)} 场景)")
-
-            from src.state.projector import StateProjector
-            projector = StateProjector()
-            await projector.handle(event)
-            logger.info(f"  [OK] 读模型投影完成")
-            return True
-        except Exception as e:
-            logger.error(f"  [FAIL] WorldInitialized 记录/投影失败: {e}")
-            return False
+    # _record_world_initialized 已合并到 ingest() 中直接写读模型表
+    # 不再经过 EventStore + StateProjector 中间层
 
     # ── 右脑管线：叙事文本合并 → LightRAG ──
 

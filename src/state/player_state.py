@@ -1,17 +1,9 @@
 """
 @File     :   player_state.py
 @Desc     :   玩家/调查员状态管理 — 从 GameState 到持久化的读写接口
-@Note     :   适配旧 entity_repo + investigator_profile_repo 到新的 state 架构
-
-职责:
-  - 管理单个调查员的完整状态（属性、技能、物品、位置）
-  - 提供状态查询接口（供 Nodes 读取）
-  - 提供 JSON 文件持久化（无需数据库即可使用）
-
-使用方式:
-    loader = PlayerLoader()
-    char = loader.load_character("session-001")
-    loader.save_character("session-001", character)
+@Note     :   characters 表改用 (scope, key) 复合主键替代 session_id。
+              scope='template' 为种子卡（可被多世界复用），scope='world' 为游戏实例。
+              CARD_PREFIX 已移除，改用显式 save_template/load_template API。
 """
 
 from __future__ import annotations
@@ -31,15 +23,8 @@ from src.tools import PROJECT_ROOT, get_logger
 logger = get_logger(__name__)
 
 
-# ── 玩家数据键名常量 ──
-
 PLAYER_DATA_KEY = "player_data"
-"""GameState 中存储玩家数据的字段前缀"""
 
-# ── 种子卡前缀：角色卡导入后先存为种子，/start 时才拷贝到会话 ──
-CARD_PREFIX = "__card__"
-
-# ── 角色 JSON 持久化路径 ──
 _CHARACTER_DIR = PROJECT_ROOT / "data" / "characters"
 
 
@@ -49,52 +34,39 @@ def _char_dir() -> Path:
 
 
 class CharacterStore:
-    """角色存储 — 优先使用 PG，不可用时自动降级到 JSON 文件持久化
+    """角色存储（PgManager 连接池版）— scope='template' 为种子卡，scope='world' 为游戏实例
 
-    使用方式:
-        store = CharacterStore()
-        await store.save("session-1", character)
-        char = await store.load("session-1")
+    characters 表结构: (scope, key) 复合主键。
+    scope='template' 的角色卡可被多个世界复用（/card import 后 /start 时拷贝）。
+    scope='world' 的角色卡与特定游戏世界绑定。
     """
 
-    def __init__(self, pg_uri: Optional[str] = None):
-        self._uri = pg_uri or ""
+    def __init__(self):
         self._conn = None
         self._file_fallback = False
+        self._inited = False
 
     async def _ensure_pg(self) -> bool:
-        """检测 PG 是否可用，返回 True 表示 PG 可用"""
         if self._conn is not None and not self._conn.is_closed():
             return True
-
-        uri = self._uri
-        if not uri:
-            try:
-                from src.tools.pg_manager import PgManager
-                mgr = await PgManager.get_instance()
-                if mgr.available:
-                    await mgr.start()
-                    uri = mgr.uri
-            except Exception:
-                return False
-
-        if not uri:
-            return False
-
         try:
-            import asyncpg
-            self._conn = await asyncpg.connect(uri)
-            await self._init_db()
+            from src.tools.pg_manager import PgManager
+            mgr = await PgManager.get_instance()
+            if not mgr.available:
+                return False
+            await mgr.start()
+            self._conn = await mgr.get_conn()
+            if not self._inited:
+                await self._init_db()
+                self._inited = True
             return True
         except Exception as e:
             logger.warning(f"CharacterStore: PG 不可用，降级到 JSON 文件存储: {e}")
             return False
 
     async def _get_conn(self):
-        """获取 PG 连接，如果不可用则触发降级到文件存储"""
         if self._file_fallback:
             raise RuntimeError("PG 不可用")
-
         ok = await self._ensure_pg()
         if not ok:
             self._file_fallback = True
@@ -104,30 +76,30 @@ class CharacterStore:
     async def _init_db(self):
         if not self._conn or self._conn.is_closed():
             return
+        # scope='template'/scope='world' 隔离存储，不再依赖 session_id 前缀 hack
         await self._conn.execute("""
             CREATE TABLE IF NOT EXISTS characters (
-                session_id TEXT PRIMARY KEY,
+                scope TEXT NOT NULL,
+                key TEXT NOT NULL,
                 character_data JSONB NOT NULL,
-                saved_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                saved_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                PRIMARY KEY (scope, key)
             )
         """)
-        logger.info("CharacterStore: PG 表已就绪")
+        logger.info("CharacterStore: PG 表已就绪 (scope, key)")
 
     # ── 文件存储辅助 ──
 
-    def _file_path(self, session_id: str) -> Path:
-        return _char_dir() / f"{session_id}.json"
+    def _file_path(self, scope: str, key: str) -> Path:
+        return _char_dir() / f"{scope}__{key}.json"
 
-    async def _save_file(self, session_id: str, char_dict: dict):
-        path = self._file_path(session_id)
-        path.write_text(
-            json.dumps(char_dict, ensure_ascii=False, default=str),
-            encoding="utf-8",
-        )
+    async def _save_file(self, scope: str, key: str, char_dict: dict):
+        path = self._file_path(scope, key)
+        path.write_text(json.dumps(char_dict, ensure_ascii=False, default=str), encoding="utf-8")
         logger.debug(f"CharacterStore: 角色已保存至 {path}")
 
-    async def _load_file(self, session_id: str) -> Optional[dict]:
-        path = self._file_path(session_id)
+    async def _load_file(self, scope: str, key: str) -> Optional[dict]:
+        path = self._file_path(scope, key)
         if not path.exists():
             return None
         try:
@@ -136,23 +108,26 @@ class CharacterStore:
             logger.warning(f"CharacterStore: 读取文件失败 {path}: {e}")
             return None
 
-    async def _exists_file(self, session_id: str) -> bool:
-        return self._file_path(session_id).exists()
+    async def _exists_file(self, scope: str, key: str) -> bool:
+        return self._file_path(scope, key).exists()
 
-    async def _delete_file(self, session_id: str):
-        path = self._file_path(session_id)
+    async def _delete_file(self, scope: str, key: str):
+        path = self._file_path(scope, key)
         if path.exists():
             path.unlink()
 
-    async def _list_all_files(self) -> list[dict]:
-        files = sorted(_char_dir().glob("*.json"))
+    async def _list_files(self, scope: str = "") -> list[dict]:
+        pattern = f"{scope}__*.json" if scope else "*.json"
+        files = sorted(_char_dir().glob(pattern))
         result = []
         for f in files:
             try:
                 data = json.loads(f.read_text(encoding="utf-8"))
                 saved_at = data.get("_saved_at", "")
+                stem_scope, stem_key = f.stem.split("__", 1) if "__" in f.stem else ("", f.stem)
                 result.append({
-                    "session_id": f.stem,
+                    "scope": stem_scope,
+                    "key": stem_key,
                     "saved_at": saved_at,
                     "character_name": data.get("name", ""),
                 })
@@ -162,37 +137,38 @@ class CharacterStore:
 
     async def close(self):
         if self._conn and not self._conn.is_closed():
-            await self._conn.close()
+            from src.tools.pg_manager import PgManager
+            mgr = await PgManager.get_instance()
+            await mgr.release_conn(self._conn)
             self._conn = None
 
-    # ── 核心操作（带降级） ──
+    # ── 核心操作（scope + key 复合主键） ──
 
-    async def save(self, session_id: str, character: Character):
-        """保存角色 — 优先 PG，降级到 JSON 文件"""
+    async def save(self, scope: str, key: str, character: Character):
+        """保存角色到指定 scope"""
         char_dict = _character_to_dict(character)
         char_dict["_saved_at"] = datetime.now(timezone.utc).isoformat()
-
         try:
             conn = await self._get_conn()
             await conn.execute(
-                """INSERT INTO characters (session_id, character_data, saved_at)
-                   VALUES ($1, $2::jsonb, $3::timestamptz)
-                   ON CONFLICT (session_id)
-                   DO UPDATE SET character_data = $2::jsonb, saved_at = $3::timestamptz""",
-                session_id,
+                """INSERT INTO characters (scope, key, character_data, saved_at)
+                   VALUES ($1, $2, $3::jsonb, $4::timestamptz)
+                   ON CONFLICT (scope, key)
+                   DO UPDATE SET character_data = $3::jsonb, saved_at = $4::timestamptz""",
+                scope, key,
                 json.dumps(char_dict, ensure_ascii=False),
                 datetime.now(timezone.utc),
             )
         except RuntimeError:
-            await self._save_file(session_id, char_dict)
+            await self._save_file(scope, key, char_dict)
 
-    async def load(self, session_id: str) -> Optional[Character]:
-        """加载角色 — 优先 PG，降级到 JSON 文件"""
+    async def load(self, scope: str, key: str) -> Optional[Character]:
+        """加载指定 scope+key 的角色"""
         try:
             conn = await self._get_conn()
             row = await conn.fetchrow(
-                "SELECT character_data FROM characters WHERE session_id = $1",
-                session_id,
+                "SELECT character_data FROM characters WHERE scope = $1 AND key = $2",
+                scope, key,
             )
             if row is None:
                 return None
@@ -201,102 +177,66 @@ class CharacterStore:
                 char_data = json.loads(char_data)
             return _dict_to_character(char_data)
         except RuntimeError:
-            data = await self._load_file(session_id)
+            data = await self._load_file(scope, key)
             return _dict_to_character(data) if data else None
 
-    async def exists(self, session_id: str) -> bool:
-        """检查角色是否存在 — 优先 PG，降级到 JSON 文件"""
+    async def exists(self, scope: str, key: str) -> bool:
+        """检查角色是否存在"""
         try:
             conn = await self._get_conn()
             val = await conn.fetchval(
-                "SELECT 1 FROM characters WHERE session_id = $1", session_id,
+                "SELECT 1 FROM characters WHERE scope = $1 AND key = $2", scope, key,
             )
             return val is not None
         except RuntimeError:
-            return await self._exists_file(session_id)
+            return await self._exists_file(scope, key)
 
-    async def delete(self, session_id: str):
-        """删除角色 — 优先 PG，降级到 JSON 文件"""
+    async def delete(self, scope: str, key: str):
+        """删除角色"""
         try:
             conn = await self._get_conn()
             await conn.execute(
-                "DELETE FROM characters WHERE session_id = $1", session_id,
+                "DELETE FROM characters WHERE scope = $1 AND key = $2", scope, key,
             )
         except RuntimeError:
-            await self._delete_file(session_id)
+            await self._delete_file(scope, key)
 
-    async def list_all(self) -> list[dict]:
-        """列出所有角色 — 优先 PG，降级到 JSON 文件"""
+    async def list_scope(self, scope: str) -> list[dict]:
+        """列出指定 scope 的所有角色"""
         try:
             conn = await self._get_conn()
             rows = await conn.fetch(
-                "SELECT session_id, saved_at FROM characters ORDER BY saved_at DESC"
+                "SELECT scope, key, saved_at,"
+                " character_data->>'name' AS character_name,"
+                " character_data->>'occupation' AS occupation"
+                " FROM characters WHERE scope = $1 ORDER BY saved_at DESC",
+                scope,
             )
             return [dict(row) for row in rows]
         except RuntimeError:
-            return await self._list_all_files()
+            return await self._list_files(scope=scope)
 
-    # ------- 种子卡库（/import → 种子 → /start 拷贝到会话） -------
+    # ------- 种子卡 template API（scope='template'） -------
 
-    async def save_card(self, card_name: str, character: Character):
-        """将角色保存为种子卡（独立于会话，可被多个世界复用）"""
-        seed_id = f"{CARD_PREFIX}{card_name}"
-        await self.save(seed_id, character)
+    async def save_template(self, name: str, character: Character):
+        """将角色保存为种子卡（scope='template'，可被多个世界复用）"""
+        await self.save("template", name, character)
 
-    async def load_card(self, card_name: str) -> Optional[Character]:
+    async def load_template(self, name: str) -> Optional[Character]:
         """加载指定名称的种子卡"""
-        return await self.load(f"{CARD_PREFIX}{card_name}")
+        return await self.load("template", name)
 
-    async def card_exists(self, card_name: str) -> bool:
+    async def template_exists(self, name: str) -> bool:
         """检查种子卡是否存在"""
-        return await self.exists(f"{CARD_PREFIX}{card_name}")
+        return await self.exists("template", name)
 
-    async def delete_card(self, card_name: str):
+    async def delete_template(self, name: str):
         """删除指定种子卡"""
-        await self.delete(f"{CARD_PREFIX}{card_name}")
+        await self.delete("template", name)
 
-    async def list_cards(self) -> list[dict]:
-        """列出所有种子卡（过滤 __card__ 前缀）"""
-        try:
-            conn = await self._get_conn()
-            rows = await conn.fetch(
-                "SELECT session_id, saved_at,"
-                " character_data->>'name' AS character_name,"
-                " character_data->>'occupation' AS occupation"
-                " FROM characters"
-                " WHERE session_id LIKE $1 ORDER BY saved_at DESC",
-                f"{CARD_PREFIX}%",
-            )
-            result = []
-            for row in rows:
-                d = dict(row)
-                sid = d.get("session_id", "")
-                d["card_name"] = sid[len(CARD_PREFIX):] if sid.startswith(CARD_PREFIX) else sid
-                result.append(d)
-            return result
-        except RuntimeError:
-            return await self._list_card_files()
-
-    async def _list_card_files(self) -> list[dict]:
-        """文件降级：列出所有 __card__ 前缀的 JSON 文件"""
-        prefix = f"{CARD_PREFIX}"
-        result: list[dict] = []
-        for f in sorted(_char_dir().glob(f"{prefix}*.json")):
-            try:
-                data = json.loads(f.read_text(encoding="utf-8"))
-                saved_at = data.get("_saved_at", "")
-                # 从文件名剥离前缀得到卡片名
-                card_name = f.stem[len(prefix):] if f.stem.startswith(prefix) else f.stem
-                result.append({
-                    "session_id": f.stem,
-                    "card_name": card_name,
-                    "saved_at": saved_at,
-                    "character_name": data.get("name", ""),
-                    "occupation": data.get("occupation", ""),
-                })
-            except (json.JSONDecodeError, OSError):
-                continue
-        return result
+    async def list_templates(self) -> list[dict]:
+        """列出所有种子卡"""
+        return await self.list_scope("template")
 
 
 # ====================================================================

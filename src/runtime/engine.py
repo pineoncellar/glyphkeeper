@@ -96,14 +96,12 @@ class GraphEngine:
       4. 管理事件溯源（EventLog）
       5. 管理状态快照（SnapshotManager）
       6. 提供统一的 run() 接口
+      7. 追踪异步状态追赶任务，存档前可等待冲刷完毕
 
     使用方式:
         engine = GraphEngine(keeper_graph)
-        narrative = await engine.run("我搜索书桌", session_id="abc-123")
-
-    模式说明:
-      - full（默认）: 使用 Engine 内部流程，支持 suspend/resume/retry
-      - langgraph: 委托给 CompiledGraph.ainvoke()，LangGraph 管理全部流程
+        narrative = await engine.run("我搜索书桌", world_id="abc-123")
+        await engine.wait_for_pending()  # 存档前等待状态追赶完成
     """
 
     def __init__(
@@ -116,16 +114,6 @@ class GraphEngine:
         world_mgr: Optional[WorldManager] = None,
         dispatcher: Optional[NodeDispatcher] = None,
     ):
-        """
-        Args:
-            graph:        编译好的 LangGraph CompiledGraph
-            mode:         引擎模式（full / langgraph）
-            event_store:  事件溯源存储（None 则自动创建）
-            event_log:    事件日志管理器（None 则自动创建）
-            snapshot_mgr: 状态快照管理器（None 则自动创建）
-            world_mgr:    世界状态管理器（None 则懒加载）
-            dispatcher:   Node 分发器（None 则自动创建，仅 full 模式使用）
-        """
         self.graph = graph
         self.mode = mode
         self._event_store = event_store
@@ -136,6 +124,7 @@ class GraphEngine:
             default_max_retries=3,
             default_timeout=30.0,
         )
+        self._pending_catchup: Optional[asyncio.Task] = None  # 追踪异步追赶任务
 
     # ── 属性 ──
 
@@ -146,6 +135,24 @@ class GraphEngine:
     @property
     def snapshot_mgr(self) -> Optional[SnapshotManager]:
         return self._snapshot_mgr
+
+    # ── 异步追赶任务追踪 ──
+
+    async def wait_for_pending(self, timeout: float = 30.0):
+        """等待异步状态追赶任务完成（存档前调用确保持久化完整）
+
+        在 /archive save 前调用，确保 Tier1/Tier2 状态变更已全部刷入存储。
+        """
+        if self._pending_catchup is None or self._pending_catchup.done():
+            return
+        try:
+            await asyncio.wait_for(self._pending_catchup, timeout=timeout)
+        except asyncio.TimeoutError:
+            logger.warning("Engine.wait_for_pending: 状态追赶超时，继续存档")
+        except Exception as e:
+            logger.warning(f"Engine.wait_for_pending: 状态追赶异常: {e}")
+        finally:
+            self._pending_catchup = None
 
     @property
     def world_manager(self) -> Optional[WorldManager]:
@@ -322,13 +329,14 @@ class GraphEngine:
             await self._record_graph_event(result, ctx)
 
         # 状态追赶：异步执行 Tier 1 写入 + Tier 2 索引，不阻塞返回
+        # 追踪 task 供存档前 wait_for_pending() 等待冲刷完毕
         tier1_events = result.get("pending_tier1_events", [])
         tier2_facts = result.get("pending_tier2_facts", [])
         if tier1_events or tier2_facts:
-            asyncio.create_task(self._async_state_catchup(
+            self._pending_catchup = asyncio.create_task(self._async_state_catchup(
                 tier1_events=tier1_events,
                 tier2_facts=tier2_facts,
-                session_id=state.get("session_id", ""),
+                session_id=state.get("world_id", ""),
                 world_id=state.get("world_id", ""),
                 current_state=result,
             ))
@@ -369,10 +377,11 @@ class GraphEngine:
             logger.warning(f"Engine.game_over: 读结局大纲失败: {e}")
 
         # 从 EventStore 捞最后几轮关键事件
+        world_id = state.get("world_id", session_id)  # 优先用 state 中的 world_id
         try:
             from src.memory.event_store import create_event_store
             es = await create_event_store()
-            all_events = await es.get_events(session_id, since_version=0)
+            all_events = await es.get_events(world_id, since_version=0)
             filtered = [
                 e for e in all_events
                 if e.get("type") in ("PlayerMoved", "SanityLost", "CombatResolved",

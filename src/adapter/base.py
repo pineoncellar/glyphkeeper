@@ -22,9 +22,18 @@ from typing import Any, Optional
 from src.state.game_state import get_current_player
 from src.tools import get_logger
 from src.runtime.engine import GraphEngine, ENGINE_MODE_LANGGRAPH
-from src.runtime.scheduler import InputScheduler
 from src.graph.keeper_graph import keeper_graph
 from src.adapter.protocol import InboundMessage, OutboundMessage, MessageType
+
+# InputScheduler 延迟导入（避免 runtime/adapter 循环引用）
+_InputScheduler = None
+
+def _get_scheduler():
+    global _InputScheduler
+    if _InputScheduler is None:
+        from src.runtime.scheduler import InputScheduler
+        _InputScheduler = InputScheduler
+    return _InputScheduler
 
 logger = get_logger(__name__)
 
@@ -45,8 +54,8 @@ class AbstractAdapter(ABC):
     def __init__(
         self,
         engine: Optional[GraphEngine] = None,
-        scheduler: Optional[InputScheduler] = None,
-        session_id: str = "default",
+        scheduler: Optional["InputScheduler"] = None,
+        session_id: str = "",
     ):
         self.session_id = session_id
         self._engine = engine
@@ -687,8 +696,8 @@ class AbstractAdapter(ABC):
         if msg:
             msg.world_id = world_id
 
-        # 加载模组
-        state = await loader.load(session_id, module_name)
+        # 加载模组 — world_id 继承 adapter 层的 session_id
+        state = await loader.load(world_id=session_id, module_name=module_name)
         if state is None:
             return OutboundMessage.system_msg(
                 f"模组 '{module_name}' 未找到。使用 /module list 查看已摄入的模组。",
@@ -771,7 +780,7 @@ class AbstractAdapter(ABC):
                 enable_snapshot=True,
             )
         if self._scheduler is None:
-            self._scheduler = InputScheduler(self._engine)
+            self._scheduler = _get_scheduler()(self._engine)
 
     async def _cleanup(self):
         """清理资源"""
