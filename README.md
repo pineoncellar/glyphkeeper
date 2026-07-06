@@ -215,6 +215,7 @@ graph TB
 <tr><td style="text-align:center;">⬜</td><td colspan="2">大语言模型云提供方适配</td></tr>
 <tr><td style="text-align:center;">✅</td><td colspan="2">CQRS 读模型表与写入管线</td></tr>
 <tr><td style="text-align:center;">✅</td><td colspan="2">LightRAG 接入</td></tr>
+<tr><td style="text-align:center;">⬜</td><td colspan="2" style="padding-left:2em;">├ 优化是否需要rag的判断</td></tr>
 <tr><td style="text-align:center;">✅</td><td colspan="2">双脑记忆系统</td></tr>
 <tr><td style="text-align:center;">✅</td><td colspan="2">对象名称消岐系统</td></tr>
 <tr><td style="text-align:center;">🔄</td><td colspan="2">状态同步模块（state_extractor_node + Tier1/Tier2 提取管线）</td></tr>
