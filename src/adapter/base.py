@@ -236,7 +236,8 @@ class AbstractAdapter(ABC):
         try:
             submit_msg = msg or InboundMessage.player_input(text, session_id)
             narrative = await self._scheduler.submit(submit_msg)
-            state = self._scheduler.get_session_state(session_id)
+            lookup_id = submit_msg.world_id or session_id
+            state = self._scheduler.get_session_state(lookup_id)
             game_phase = state.get("game_phase", "") if state else ""
 
             if narrative and narrative != "（系统异常：...）":
@@ -675,11 +676,13 @@ class AbstractAdapter(ABC):
                 )
 
         # ── 为新游戏创建独立世界 ──
+        logger.info(f"_handle_start_cmd: 开始创建世界 module={module_name}")
         from src.tools.world_manager import (
             generate_world_id, create_world, set_active_world,
             seed_world_lightrag, copy_static_data_to_world,
         )
         world_id = generate_world_id(module_name)
+        logger.info(f"_handle_start_cmd: world_id={world_id}")
         dir_ok = await create_world(world_id)
         if not dir_ok:
             return OutboundMessage.system_msg(
@@ -687,9 +690,27 @@ class AbstractAdapter(ABC):
                 level="error", session_id=session_id,
             )
         # 先播种 LightRAG（模组基线知识），再切 active_world
-        seed_ok = await seed_world_lightrag(world_id, module_name)
+        logger.info(f"_handle_start_cmd: 开始 seed_world_lightrag")
+        try:
+            seed_ok = await seed_world_lightrag(world_id, module_name)
+            logger.info(f"_handle_start_cmd: seed_world_lightrag 完成, ok={seed_ok}")
+        except Exception as e:
+            logger.critical(f"_handle_start_cmd: seed_world_lightrag 异常: {e}", exc_info=True)
+            return OutboundMessage.system_msg(
+                f"LightRAG 播种失败: {type(e).__name__}: {e}",
+                level="error", session_id=session_id,
+            )
         # 从种子复制全部静态蓝图数据到新世界（locations/entities/items/clues/triggers）
-        await copy_static_data_to_world(world_id, module_name)
+        logger.info(f"_handle_start_cmd: 开始 copy_static_data_to_world")
+        try:
+            await copy_static_data_to_world(world_id, module_name)
+            logger.info(f"_handle_start_cmd: copy_static_data_to_world 完成")
+        except Exception as e:
+            logger.critical(f"_handle_start_cmd: copy_static_data_to_world 异常: {e}", exc_info=True)
+            return OutboundMessage.system_msg(
+                f"静态数据复制失败: {type(e).__name__}: {e}",
+                level="error", session_id=session_id,
+            )
         set_active_world(world_id)
 
         # 更新 msg 中的 world_id，使后续 SessionKey 和 GameState 使用新世界的隔离键
@@ -697,7 +718,16 @@ class AbstractAdapter(ABC):
             msg.world_id = world_id
 
         # 加载模组 — world_id 继承 adapter 层的 session_id
-        state = await loader.load(world_id=session_id, module_name=module_name)
+        logger.info(f"_handle_start_cmd: 开始 loader.load, module={module_name}")
+        try:
+            state = await loader.load(world_id=session_id, module_name=module_name)
+            logger.info(f"_handle_start_cmd: loader.load 完成, state={'OK' if state else 'None'}")
+        except Exception as e:
+            logger.critical(f"_handle_start_cmd: loader.load 异常: {e}", exc_info=True)
+            return OutboundMessage.system_msg(
+                f"模组加载异常: {type(e).__name__}: {e}",
+                level="error", session_id=session_id,
+            )
         if state is None:
             return OutboundMessage.system_msg(
                 f"模组 '{module_name}' 未找到。使用 /module list 查看已摄入的模组。",
@@ -722,29 +752,35 @@ class AbstractAdapter(ABC):
             logger.debug(f"world_start: 清空触发器状态失败（非阻塞）: {e}")
 
         # 将会话状态注入 scheduler
+        logger.info("_handle_start_cmd: 开始注入会话到 scheduler")
         await self._ensure_engine()
         from src.runtime.scheduler import SessionSlot
         from src.runtime.context import ExecutionContext as ECtx
 
+        logger.info(f"_handle_start_cmd: 移除旧会话 session_id={session_id}")
         await self._scheduler.remove_session(session_id)
-        # ⚠ key 必须是 SessionKey tuple，不是纯字符串！
-        # 否则 get_session() 遍历时 key[3] 取不到 session_id
-        # 使用 msg 中的真实 routing 信息，确保与后续玩家输入的 _make_key() 一致
+        # key 必须与 scheduler._make_key() 一致 — 单元素元组 (world_id,)
+        # 这样才能被后续 get_session(world_id) 和 _get_or_create_session() 找到
         from src.runtime.scheduler import SessionKey
-        platform = msg.platform if msg else ""
-        channel_id = msg.channel_id if msg else ""
         user_id = msg.user_id if msg else ""
-        key: SessionKey = (platform, channel_id, world_id, session_id)
-        slot = SessionSlot(
-            session_id=session_id,
-            state=state,
-            ctx=ECtx(session_id=session_id),
-            platform=platform,
-            channel_id=channel_id,
-            user_id=user_id,
-            world_id=world_id,
-        )
+        key: SessionKey = (world_id,)
+        logger.info(f"_handle_start_cmd: 创建 SessionSlot, world_id={world_id}, key={key}")
+        try:
+            slot = SessionSlot(
+                state=state,
+                ctx=ECtx(session_id=session_id),
+                user_id=user_id,
+                world_id=world_id,
+            )
+            logger.info("_handle_start_cmd: SessionSlot 创建成功")
+        except Exception as e:
+            logger.critical(f"_handle_start_cmd: SessionSlot 创建异常: {e}", exc_info=True)
+            return OutboundMessage.system_msg(
+                f"会话槽创建失败: {type(e).__name__}: {e}",
+                level="error", session_id=session_id,
+            )
         self._scheduler._sessions[key] = slot
+        logger.info(f"_handle_start_cmd: 会话已注入 scheduler, sessions_count={len(self._scheduler._sessions)}")
 
         # 通知玩家世界信息
         seed_note = "" if seed_ok else "（LightRAG 基线知识播种失败）"

@@ -264,9 +264,24 @@ class InputScheduler:
             return slot
 
     def get_session(self, world_id: str) -> Optional[SessionSlot]:
-        """按 world_id 查询会话"""
+        """按 world_id 查询会话
+
+        支持多重降级匹配：
+          1. 精确 key 匹配 (world_id,)
+          2. 遍历匹配 slot.world_id
+          3. 遍历匹配 slot.ctx.session_id（兼容 CLI 传入 session_id 的用法）
+        """
         key = (world_id,)
-        return self._sessions.get(key)
+        slot = self._sessions.get(key)
+        if slot is not None:
+            return slot
+        # 降级：遍历所有槽位
+        for s in self._sessions.values():
+            if s.world_id == world_id:
+                return s
+            if s.ctx and s.ctx.session_id == world_id:
+                return s
+        return None
 
     def get_session_state(self, world_id: str) -> Optional[GameState]:
         """获取指定世界的 GameState"""
@@ -338,6 +353,22 @@ class InputScheduler:
                     f"remaining={len(self._sessions)}"
                 )
                 return True
+            # 降级：按 slot.world_id / ctx.session_id 匹配
+            for sk, sv in list(self._sessions.items()):
+                if sv.world_id == world_id:
+                    del self._sessions[sk]
+                    logger.info(
+                        f"Scheduler: 删除会话 (world_id fallback) world={world_id[:8]} "
+                        f"remaining={len(self._sessions)}"
+                    )
+                    return True
+                if sv.ctx and sv.ctx.session_id == world_id:
+                    del self._sessions[sk]
+                    logger.info(
+                        f"Scheduler: 删除会话 (ctx.session_id fallback) session={world_id[:8]} "
+                        f"remaining={len(self._sessions)}"
+                    )
+                    return True
             return False
 
     async def clear_all_sessions(self):

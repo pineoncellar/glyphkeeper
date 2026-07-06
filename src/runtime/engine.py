@@ -775,13 +775,16 @@ class GraphEngine:
             world_id = result.get("world_id", "")
             if world_id:
                 latest_version = result.get("beat_counter", 0)
-                turn_tokens = len(narrative or "") + len(player_input or "")
+                char_count = len(narrative or "") + len(player_input or "")
+                # 跑团场景以中文为主（~2.15 tokens/char），混少量英文名（~0.3 tokens/char）
+                # 综合取 1.5x 系数作为 token 估算值，用于 Gatekeeper 的 TokenCount 策略判定
+                estimated_tokens = char_count * 3 // 2
                 await self._event_log.emit_signal(
                     signal_type="TurnRecordCommitted",
                     world_id=world_id,
                     payload={
                         "latest_msg_id": latest_version,
-                        "turn_tokens": turn_tokens // 4,  # 字符到 token 的粗略估算
+                        "turn_tokens": estimated_tokens,
                     },
                 )
 

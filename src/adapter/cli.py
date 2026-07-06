@@ -111,6 +111,7 @@ class CliAdapter(AbstractAdapter):
         self._summarizer: Optional[WorldSummarizer] = None
         self._sync: Optional[BackgroundSync] = None
         self._worker_tasks: list[asyncio.Task] = []
+        self._current_world_id: str = ""  # 缓存当前 world_id，避免重复调度器查询
 
     # ── AbstractAdapter 接口实现 ──
 
@@ -118,12 +119,9 @@ class CliAdapter(AbstractAdapter):
         """将终端原始输入解析为 InboundMessage"""
         text = str(raw_input).strip() if raw_input else ""
 
-        # 从 scheduler 现有会话中取 world_id，保证 SessionKey 一致性
-        world_id = ""
-        slot = self._scheduler.get_session(self.session_id) if self._scheduler else None
-        if slot and slot.world_id:
-            world_id = slot.world_id
-        else:
+        # 优先用缓存的 world_id，其次查 active_world 配置
+        world_id = self._current_world_id
+        if not world_id:
             from src.tools.config import get_settings
             world_id = get_settings().project.active_world
 
@@ -594,7 +592,11 @@ class CliAdapter(AbstractAdapter):
 
             # 处理 /world（不是游戏回合）
             if msg.type == MessageType.SYSTEM_CMD and msg.text.strip().lower().startswith("/world"):
-                out = await self.handle(msg)
+                try:
+                    out = await self.handle(msg)
+                except Exception as e:
+                    logger.critical(f"handle(/world) 异常: {e}", exc_info=True)
+                    out = OutboundMessage.system_msg(f"处理失败: {type(e).__name__}: {e}", level="error")
                 await self.send(out)
                 print()
                 continue
@@ -1015,15 +1017,27 @@ class CliAdapter(AbstractAdapter):
                 self._character = await self._character_creation_wizard()
 
             if self._character and self._player_loader:
-                await self._player_loader.save(session_id, self._character)
+                await self._player_loader.save("world", session_id, self._character)
 
         # ── 加载模组（委托给 base 类） ──
-        result = await super()._handle_start_cmd(cmd, session_id, msg)
+        logger.info("_handle_start_cmd(CLI): 准备调用 super._handle_start_cmd")
+        try:
+            result = await super()._handle_start_cmd(cmd, session_id, msg)
+            logger.info(f"_handle_start_cmd(CLI): super 返回 OK, msg.world_id={msg.world_id if msg else 'N/A'}")
+        except Exception as e:
+            logger.critical(f"_handle_start_cmd(CLI): super 调用异常: {e}", exc_info=True)
+            return OutboundMessage.system_msg(
+                f"世界创建失败: {type(e).__name__}: {e}",
+                level="error", session_id=session_id,
+            )
 
         # ── 确认模组已加载（scheduler 中有该会话） ──
+        # 会话的 key 是 (world_id,)，需要从 msg 中获取 super 设置的新 world_id
+        world_id = msg.world_id if msg else session_id
+        self._current_world_id = world_id
         session_exists = (
             self._scheduler is not None
-            and self._scheduler.get_session(session_id) is not None
+            and self._scheduler.get_session(world_id) is not None
         )
         if not session_exists:
             return result
@@ -1031,9 +1045,9 @@ class CliAdapter(AbstractAdapter):
         # ── 将角色注入 GameState ──
         if self._character and self._scheduler:
             from dataclasses import asdict
-            slot = self._scheduler.get_session(session_id)
+            slot = self._scheduler.get_session(world_id)
             if not slot:
-                logger.warning("注入角色: scheduler 中未找到会话 %s", session_id)
+                logger.warning("注入角色: scheduler 中未找到会话 world=%s", world_id)
             if slot:
                 char_dict = asdict(self._character)
                 get_current_player(slot.state)["character"] = char_dict
@@ -1070,7 +1084,7 @@ class CliAdapter(AbstractAdapter):
                             # copy_workspace_from 后缓存实例已被 close() 无效化，
                             # 用 force_reinit=True 强制重建
                             vs = await VectorStore.get_instance(
-                                domain="world", world_id=world_id, force_reinit=True,
+                                knowledge_space="world", world_id=world_id, force_reinit=True,
                             )
                             backstory_doc = (
                                 f"【调查员背景】{self._character.name}的人设信息\n"
@@ -1089,7 +1103,7 @@ class CliAdapter(AbstractAdapter):
                     from src.memory.event_store import create_event_store
                     es = await create_event_store()
                     await es.append(
-                        session_id=session_id,
+                        world_id=world_id,
                         event_type="CharacterImported",
                         data={
                             "character": char_dict,
@@ -1097,6 +1111,7 @@ class CliAdapter(AbstractAdapter):
                             "world_id": world_id,
                         },
                         source_node="cli_adapter",
+                        parent_event_id=session_id,
                     )
                     logger.info(f"CharacterImported 事件已记录 (session={session_id[:8]})")
                 except Exception as e:
@@ -1243,7 +1258,8 @@ class CliAdapter(AbstractAdapter):
         流程：先检测 pending_dice 并显示请求信息，再等待玩家输入掷骰值。
         超时后自动掷骰，无效输入走自动掷骰，最后注入 roll_value 并重提交引擎。
         """
-        state = self._scheduler.get_session_state(session_id) if self._scheduler else None
+        lookup_id = self._current_world_id or session_id
+        state = self._scheduler.get_session_state(lookup_id) if self._scheduler else None
         if not state:
             return
 
@@ -1492,7 +1508,8 @@ class CliAdapter(AbstractAdapter):
         parts = cmd.split(maxsplit=1)
         label = parts[1].strip() if len(parts) > 1 else ""
 
-        state = self._scheduler.get_session_state(session_id) if self._scheduler else None
+        lookup_id = self._current_world_id or session_id
+        state = self._scheduler.get_session_state(lookup_id) if self._scheduler else None
         if state is None:
             return OutboundMessage.system_msg("当前无活跃会话，无法存档", level="warn", session_id=session_id)
 
@@ -1507,15 +1524,6 @@ class CliAdapter(AbstractAdapter):
 
             # 原子存档：事务内 GameState + 知识 + 触发器 + 事件版本
             snap_id = await self._snapshot_mgr.create_atomic(state, world_id, label=snap_label)
-
-            # PG 级 LightRAG 快照（取代旧的文件系统备份）
-            try:
-                from src.memory.vector_store import VectorStore
-                if world_id:
-                    vs = await VectorStore.get_instance(knowledge_space="world", world_id=world_id)
-                    await vs.snapshot_workspace(world_id, snap_id)
-            except Exception as e:
-                logger.warning(f"存档: LightRAG 快照失败（不影响存档）: {e}")
 
             return OutboundMessage.system_msg(
                 f"原子存档完成: [{snap_label}] (ID: {snap_id[:8]}...)",
@@ -1535,13 +1543,15 @@ class CliAdapter(AbstractAdapter):
         label = parts[1].strip() if len(parts) > 1 else ""
 
         try:
-            snapshots = await self._snapshot_mgr.list_snapshots(session_id)
+            # 优先用当前活跃世界查存档，没有活跃世界时列出所有存档
+            world_id = self._current_world_id or ""
+            snapshots = await self._snapshot_mgr.list_snapshots(world_id)
 
             if not snapshots:
                 return OutboundMessage.system_msg("没有找到存档", level="warn", session_id=session_id)
 
             target_id = ""
-            saved_world = session_id  # 兜底用 session_id
+            saved_world = world_id or session_id  # 兜底用 session_id
             if label:
                 matches = [s for s in snapshots if s.get("label", "") == label]
                 if not matches:
@@ -1556,10 +1566,10 @@ class CliAdapter(AbstractAdapter):
                         level="warn", session_id=session_id,
                     )
                 target_id = matches[0].get("snapshot_id") or matches[0].get("id", "")
-                saved_world = matches[0].get("world_id", session_id)
+                saved_world = matches[0].get("world_id", world_id) or world_id
             else:
                 target_id = snapshots[0].get("snapshot_id") or snapshots[0].get("id", "")
-                saved_world = snapshots[0].get("world_id", session_id)
+                saved_world = snapshots[0].get("world_id", world_id) or world_id
 
             restored = await self._snapshot_mgr.restore_atomic(target_id, saved_world)
             if restored is None:
@@ -1572,6 +1582,7 @@ class CliAdapter(AbstractAdapter):
             if saved_world:
                 from src.tools.world_manager import set_active_world
                 set_active_world(saved_world)
+                self._current_world_id = saved_world
 
             if self._scheduler:
                 if not get_current_player(restored_state).get("character") and self._character:
@@ -1605,15 +1616,10 @@ class CliAdapter(AbstractAdapter):
                     if loaded_char:
                         self._character = loaded_char
 
-            # 恢复 LightRAG 数据（PG 级 workspace 快照恢复）
+            # 恢复 LightRAG 数据（重新初始化即可，数据已在 PG 中）
             try:
                 from src.memory.vector_store import VectorStore
                 if saved_world:
-                    vs = await VectorStore.get_instance(knowledge_space="world", world_id=saved_world, force_reinit=True)
-                    snap_ws = f"__snap__{target_id[:8]}"
-                    await vs.drop_workspace(saved_world)
-                    await vs.copy_workspace_from(snap_ws)
-                    # 重新初始化 VectorStore
                     await VectorStore.get_instance(knowledge_space="world", world_id=saved_world, force_reinit=True)
             except Exception as e:
                 logger.warning(f"读档: LightRAG 恢复失败（可继续游戏）: {e}")
@@ -1645,7 +1651,8 @@ class CliAdapter(AbstractAdapter):
     async def _handle_list_saves_cmd(self, session_id: str) -> OutboundMessage:
         """处理 /archive list — 列出当前会话的所有存档。"""
         try:
-            snapshots = await self._snapshot_mgr.list_snapshots(session_id)
+            world_id = self._current_world_id or ""
+            snapshots = await self._snapshot_mgr.list_snapshots(world_id)
             if not snapshots:
                 return OutboundMessage.system_msg(
                     "没有存档。使用 /archive save <存档名> 创建存档。",
@@ -1875,7 +1882,8 @@ class CliAdapter(AbstractAdapter):
         从 state 或角色数据中读取 inventory 字段。若角色数据中
         无物品信息，返回空背包提示。
         """
-        state = self._scheduler.get_session_state(session_id) if self._scheduler else None
+        lookup_id = self._current_world_id or session_id
+        state = self._scheduler.get_session_state(lookup_id) if self._scheduler else None
         items = []
 
         if state:
@@ -1902,7 +1910,8 @@ class CliAdapter(AbstractAdapter):
 
         调试用命令，从 PG 读模型表查询当前所在场景的结构化数据。
         """
-        state = self._scheduler.get_session_state(session_id) if self._scheduler else None
+        lookup_id = self._current_world_id or session_id
+        state = self._scheduler.get_session_state(lookup_id) if self._scheduler else None
         if state is None:
             return OutboundMessage.system_msg("当前无活跃会话", level="warn", session_id=session_id)
 
@@ -2008,7 +2017,8 @@ class CliAdapter(AbstractAdapter):
 
     async def _handle_time_cmd(self, session_id: str) -> OutboundMessage:
         """处理 /time — 显示游戏内时间。"""
-        state = self._scheduler.get_session_state(session_id) if self._scheduler else None
+        lookup_id = self._current_world_id or session_id
+        state = self._scheduler.get_session_state(lookup_id) if self._scheduler else None
         if state is None:
             return OutboundMessage.system_msg("当前无活跃会话", level="warn", session_id=session_id)
 
@@ -2034,7 +2044,8 @@ class CliAdapter(AbstractAdapter):
 
         调试用命令，输出当前会话状态的所有字段。
         """
-        state = self._scheduler.get_session_state(session_id) if self._scheduler else None
+        lookup_id = self._current_world_id or session_id
+        state = self._scheduler.get_session_state(lookup_id) if self._scheduler else None
         if state is None:
             return OutboundMessage.system_msg("当前无活跃会话", level="warn", session_id=session_id)
 
@@ -2064,7 +2075,8 @@ class CliAdapter(AbstractAdapter):
         从 session_trigger_state 读取本轮触发计数，
         合并后格式化输出。
         """
-        state = self._scheduler.get_session_state(session_id) if self._scheduler else None
+        lookup_id = self._current_world_id or session_id
+        state = self._scheduler.get_session_state(lookup_id) if self._scheduler else None
         world_id = ""
         module_name = ""
         if state:
@@ -2194,7 +2206,8 @@ class CliAdapter(AbstractAdapter):
         try:
             from src.memory.event_store import create_event_store
             from src.memory.vector_store import VectorStore
-            from src.workers._ledger import LedgerManager
+            from src.workers._ledger import LedgerManager, Gatekeeper
+            from src.workers.world_summarizer import WorldSummarizerGatekeeper
             from src.state.event_log import (
                 SIGNAL_TURN_RECORD_COMMITTED,
                 SIGNAL_BOUNDARY_ENCOUNTERED,
@@ -2207,10 +2220,13 @@ class CliAdapter(AbstractAdapter):
             vector_store = None
             try:
                 vector_store = await VectorStore.get_instance(
-                    domain="world", llm_tier="standard",
+                    knowledge_space="world", llm_tier="standard",
                 )
             except (ValueError, RuntimeError) as e:
                 logger.info(f"VectorStore 暂不可用（游戏开始后自动就绪）: {e}")
+
+            # 读取 Worker 配置
+            wc = get_settings().worker
 
             # 创建共享账本管理器 — MemorizerWorker 和 WorldSummarizer 共用
             ledger = LedgerManager()
@@ -2225,13 +2241,27 @@ class CliAdapter(AbstractAdapter):
                 ):
                     elog.subscribe(sig_type, ledger.feed_signal)
 
+            # 构建判定引擎（从 config.yaml 读取阈值）
+            memorizer_gate = Gatekeeper(
+                token_threshold=wc.memorizer_token_threshold,
+                min_flush_interval=wc.memorizer_min_flush_interval,
+                time_idle_threshold=wc.time_idle_threshold,
+            )
+            summarizer_gate = WorldSummarizerGatekeeper(
+                token_threshold=wc.summarizer_token_threshold,
+                min_flush_interval=wc.summarizer_min_flush_interval,
+                time_idle_threshold=wc.time_idle_threshold,
+            )
+
             self._memorizer = MemorizerWorker(
                 event_store=event_store, vector_store=vector_store,
-                ledger=ledger, interval=60,
+                ledger=ledger, gatekeeper=memorizer_gate,
+                interval=wc.memorizer_poll_interval,
             )
             self._summarizer = WorldSummarizer(
                 event_store=event_store, vector_store=vector_store,
-                ledger=ledger, interval=60,
+                ledger=ledger, gatekeeper=summarizer_gate,
+                interval=wc.summarizer_poll_interval,
             )
             self._sync = BackgroundSync(
                 event_store=event_store, vector_store=vector_store,

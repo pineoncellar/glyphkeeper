@@ -233,10 +233,16 @@ class StaticReadStore:
             return False
 
     async def list_module_metas(self) -> list[dict]:
-        """列出所有已摄入的模组"""
+        """列出所有已摄入的模组（含场景数量）"""
         conn = await self._get_conn()
         rows = await conn.fetch(
-            "SELECT module_name, world_id, description, opening_json FROM module_meta ORDER BY created_at DESC"
+            """SELECT m.module_name, m.world_id, m.description, m.opening_json,
+                      COALESCE(l.cnt, 0) AS location_count
+               FROM module_meta m
+               LEFT JOIN (
+                   SELECT world_id, COUNT(*) AS cnt FROM locations GROUP BY world_id
+               ) l ON m.world_id = l.world_id
+               ORDER BY m.created_at DESC"""
         )
         result = []
         for r in rows:
@@ -248,6 +254,7 @@ class StaticReadStore:
                 "name": r["module_name"],
                 "world_id": r["world_id"],
                 "description": r["description"],
+                "locations": r["location_count"],
                 "start_location": opening.get("start_location_key", ""),
                 "time_slot": opening.get("start_time_slot", "MORNING"),
                 "intro_text": opening.get("intro_text_template", ""),

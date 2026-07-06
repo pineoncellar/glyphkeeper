@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
 @File     :   memorizer_worker.py
-@Desc     :   长期记忆提取后台任务 — 蓄水刷盘模式
+@Desc     :   长期记忆提取后台任务 — 增量轮询固化模式
 @Note     :   前台通过 EventLog.emit_signal 投递轻量信号，Worker 记账不持文本；
               判定引擎评估达标后，从 EventStore 增量捞取原始发言，提炼后刷入 LightRAG。
 """
@@ -28,12 +28,12 @@ logger = get_logger(__name__)
 
 
 class MemorizerWorker:
-    """后台记忆固化 Worker — 蓄水刷盘模式
+    """后台记忆固化 Worker — 增量轮询固化模式
 
     生命周期:
         start()  -> 守护循环等待 asyncio.Event 唤醒
                     -> 对每个有账本的世界运行判定引擎
-                    -> 达标则调用 _flush_world() 增量收网
+                    -> 达标则调用 _flush_world() 增量固化
 
     核心方法 _flush_world():
         先获取世界级互斥锁 -> 读持久化分界线
@@ -88,7 +88,7 @@ class MemorizerWorker:
         self._checkpoint_store = StaticReadStore()
         logger.info(
             f"MemorizerWorker 启动: interval={self.interval}s, "
-            f"token_threshold={self._gatekeeper.TOKEN_THRESHOLD}"
+            f"token_threshold={self._gatekeeper.token_threshold}"
         )
 
         self._task = asyncio.current_task()

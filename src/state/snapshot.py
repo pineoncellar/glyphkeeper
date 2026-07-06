@@ -264,14 +264,24 @@ class SnapshotManager:
         state = json.loads(row["state_json"])
         return {"state": state, "known_knowledge_ids": [], "trigger_states": {}}
 
-    async def list_snapshots(self, world_id: str, limit: int = 10) -> list[dict]:
-        """列出指定世界的所有存档"""
+    async def list_snapshots(self, world_id: str = "", limit: int = 20) -> list[dict]:
+        """列出指定世界的所有存档
+
+        当 world_id 为空时列出所有世界的存档。
+        """
         conn = await self._get_conn()
-        rows = await conn.fetch(
-            "SELECT snapshot_id,world_id,version,event_version,created_at,label "
-            "FROM snapshots WHERE world_id=$1 ORDER BY version DESC LIMIT $2",
-            world_id, limit,
-        )
+        if world_id:
+            rows = await conn.fetch(
+                "SELECT snapshot_id,world_id,version,event_version,created_at,label "
+                "FROM snapshots WHERE world_id=$1 ORDER BY version DESC LIMIT $2",
+                world_id, limit,
+            )
+        else:
+            rows = await conn.fetch(
+                "SELECT snapshot_id,world_id,version,event_version,created_at,label "
+                "FROM snapshots ORDER BY created_at DESC LIMIT $1",
+                limit,
+            )
         result = []
         for r in rows:
             d = dict(r)
