@@ -718,3 +718,45 @@ class VectorStore:
         except Exception as e:
             logger.error(f"copy_workspace_from 失败: {e}")
             return False
+
+    async def drop_workspace(self, workspace: str) -> bool:
+        """清空指定 workspace 的全部 LightRAG 数据"""
+        try:
+            from src.tools.pg_manager import PgManager
+            mgr = await PgManager.get_instance()
+            if not mgr.available:
+                await mgr.start()
+            import asyncpg
+            conn = await asyncpg.connect(mgr.uri)
+            try:
+                for tbl in self._BACKUP_TABLES:
+                    exists = await conn.fetchval(
+                        "SELECT 1 FROM information_schema.tables WHERE table_name=$1",
+                        tbl.lower(),
+                    )
+                    if exists:
+                        await conn.execute(f"DELETE FROM {tbl} WHERE workspace=$1", workspace)
+                logger.info(f"drop_workspace: {workspace} 已清空")
+                return True
+            finally:
+                await conn.close()
+        except Exception as e:
+            logger.error(f"drop_workspace 失败: {e}")
+            return False
+
+    async def snapshot_workspace(self, source_workspace: str, snapshot_id: str) -> bool:
+        """将 source_workspace 的快照复制到 __snap__{id} 工作区
+
+        存档时调用，生成 PG 内可恢复的快照副本。
+        读档时通过 copy_workspace_from(__snap__{id}) 恢复。
+        """
+        target_ws = f"__snap__{snapshot_id[:8]}"
+        old_ws = self._workspace
+        self._workspace = target_ws
+        try:
+            ok = await self.copy_workspace_from(source_workspace)
+            if ok:
+                logger.info(f"snapshot_workspace: {source_workspace} → {target_ws}")
+            return ok
+        finally:
+            self._workspace = old_ws

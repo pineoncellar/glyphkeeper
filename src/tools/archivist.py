@@ -252,10 +252,10 @@ class Archivist:
         # 先发出 ClueDiscovered 事件（主流程，保证不丢）
         es = await self.event_store
         await es.append(
-            session_id=session_id,
+            world_id=session_id,
             event_type="ClueDiscovered",
             data={
-                "session_id": session_id,
+                "world_id": session_id,
                 "knowledge_id": knowledge_id,
                 "source": source,
                 "character_name": character_name,
@@ -271,7 +271,7 @@ class Archivist:
             await projector.handle({
                 "type": "ClueDiscovered",
                 "data": {
-                    "session_id": session_id,
+                    "world_id": session_id,
                     "knowledge_id": knowledge_id,
                     "source": source,
                     "character_name": character_name,

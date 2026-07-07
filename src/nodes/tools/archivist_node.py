@@ -171,7 +171,7 @@ async def archivist_node(state: GameState) -> dict:
 
     intent = state.get("intent") or {}
     intent_data = intent.get("data") or {}
-    session_id = state.get("session_id", "")
+    session_id = state.get("world_id", "")
     current_location = get_current_player(state).get("current_location", "")
     character_data = get_current_player(state).get("character") or {}
     character_name = character_data.get("name", "")

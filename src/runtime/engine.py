@@ -687,7 +687,7 @@ class GraphEngine:
             resolution = result.get("resolution") or {}
             intent_type = intent.get("type", "")
             player_input = result.get("player_input", "")
-            session_id = result.get("session_id", "")
+            session_id = result.get("world_id", "")
 
             # 始终记录 PlayerInput 事件
             await self._event_log.record_and_apply(

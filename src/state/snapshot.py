@@ -124,7 +124,7 @@ class SnapshotManager:
             ts_conn = await ts_store._get_conn()
             rows = await ts_conn.fetch(
                 "SELECT trigger_id, fired_count, fired_this_turn, is_disabled "
-                "FROM session_trigger_state WHERE session_id=$1",
+                "FROM session_trigger_state WHERE world_id=$1",
                 world_id,
             )
             for r in rows:

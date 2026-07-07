@@ -168,7 +168,7 @@ async def effect_archivist_node(state: GameState) -> dict:
     if execution_phase == "IMPROMPTU":
         pass
     elif is_success and physical_executed and execution_phase in ("NORMAL", "INVENTORY_CONSUME"):
-        session_id = state.get("session_id", "")
+        session_id = state.get("world_id", "")
         character_data = get_current_player(state).get("character") or {}
         character_name = character_data.get("name", "")
         skill_value = check.get("skill_value", 50)

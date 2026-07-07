@@ -176,7 +176,7 @@ async def db_lookup_node(state: GameState) -> dict:
 
         # 附加 WorldManager 运行时实体（兜底）
         try:
-            session_id = state.get("session_id", "")
+            session_id = state.get("world_id", "")
             world_mgr = await _get_world_manager(session_id)
             location_data = await world_mgr.load_location(session_id, current_loc)
             if location_data:

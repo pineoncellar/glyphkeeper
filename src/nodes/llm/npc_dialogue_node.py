@@ -272,7 +272,7 @@ async def npc_dialogue_node(state: GameState) -> dict:
     """
     intent = state.get("intent") or {}
     intent_data = intent.get("data") or {}
-    session_id = state.get("session_id", "default")
+    session_id = state.get("world_id", "")
     world_id = state.get("world_id", "")
     player_input = state.get("player_input", "")
     npc_relations = get_current_player(state).get("npc_relations") or {}

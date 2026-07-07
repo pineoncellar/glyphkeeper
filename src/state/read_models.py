@@ -167,16 +167,16 @@ class StaticReadStore:
             ON static_triggers(world_id)
         """)
 
-        # 触发器运行时动态状态表
+        # 触发器运行时动态状态表 — 按 world_id 隔离
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS session_trigger_state (
-                session_id      VARCHAR(64) NOT NULL,
+                world_id        VARCHAR(64) NOT NULL,
                 trigger_id      VARCHAR(64) NOT NULL,
                 fired_count     INT DEFAULT 0,
                 fired_this_turn INT DEFAULT 0,
                 is_disabled     BOOLEAN DEFAULT FALSE,
                 last_fired_at   TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                PRIMARY KEY (session_id, trigger_id)
+                PRIMARY KEY (world_id, trigger_id)
             )
         """)
 
@@ -771,7 +771,7 @@ class StaticReadStore:
             )
         return [self._normalize_jsonb_row(dict(r)) for r in rows]
 
-    async def get_trigger_states(self, session_id: str) -> dict[str, dict]:
+    async def get_trigger_states(self, world_id: str) -> dict[str, dict]:
         """查询指定会话的所有触发器运行时状态
 
         返回 {trigger_id: {...}} 映射，方便调用方随机查找。
@@ -795,7 +795,7 @@ class StaticReadStore:
         """原子更新触发器运行时状态
 
         参数:
-          session_id:       会话 ID
+          world_id:       世界 ID
           trigger_id:       触发器 ID
           increment_fired:  是否递增 fired_count 和 fired_this_turn
           disable:          是否将 is_disabled 置为 True
@@ -804,18 +804,18 @@ class StaticReadStore:
         conn = await self._get_conn()
         if increment_fired:
             await conn.execute("""
-                INSERT INTO session_trigger_state (session_id, trigger_id, fired_count, fired_this_turn, last_fired_at)
+                INSERT INTO session_trigger_state (world_id, trigger_id, fired_count, fired_this_turn, last_fired_at)
                 VALUES ($1, $2, 1, 1, CURRENT_TIMESTAMP)
-                ON CONFLICT (session_id, trigger_id) DO UPDATE SET
-                    fired_count     = session_trigger_state.fired_count + 1,
-                    fired_this_turn = session_trigger_state.fired_this_turn + 1,
+                ON CONFLICT (world_id, trigger_id) DO UPDATE SET
+                    fired_count     = sts.fired_count + 1,
+                    fired_this_turn = sts.fired_this_turn + 1,
                     last_fired_at   = CURRENT_TIMESTAMP
             """, session_id, trigger_id)
         if disable:
             await conn.execute("""
-                INSERT INTO session_trigger_state (session_id, trigger_id, is_disabled)
+                INSERT INTO session_trigger_state (world_id, trigger_id, is_disabled)
                 VALUES ($1, $2, TRUE)
-                ON CONFLICT (session_id, trigger_id) DO UPDATE SET
+                ON CONFLICT (world_id, trigger_id) DO UPDATE SET
                     is_disabled = TRUE
             """, session_id, trigger_id)
         if reset_turn_count:
@@ -825,7 +825,7 @@ class StaticReadStore:
                 WHERE session_id = $1
             """, session_id)
 
-    async def reset_all_turn_counters(self, session_id: str) -> None:
+    async def reset_all_turn_counters(self, world_id: str) -> None:
         """每轮推进结束时调用：清空本轮触发计数"""
         conn = await self._get_conn()
         await conn.execute(

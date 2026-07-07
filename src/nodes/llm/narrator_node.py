@@ -416,7 +416,7 @@ async def narrate_node(state: GameState) -> dict:
     physical_reality = state.get("physical_reality", "")
     rag_context = state.get("rag_context", "")
     narrative_history = state.get("narrative", "")
-    session_id = state.get("session_id", "")
+    session_id = state.get("world_id", "")
 
     # 从 dialogue_history 取近5轮作为对话历史上下文
     dialogue_history = state.get("dialogue_history", [])
