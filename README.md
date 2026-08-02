@@ -1,12 +1,18 @@
 ﻿# GlyphKeeper（符语者）
 
+> 本项目目前已**停止开发**。
+> 
+> 旧架构中“多 Agent 链路、事件溯源+物理仲裁引擎”的模式虽然逻辑严密，但过度限制了 LLM 的叙事灵活性，且带来了较高的维护成本与响应时延。
+>
+> 此库仅作技术与思路参考
+
+### 基于 LangGraph 图编排与事件溯源的 AI COC7版规则跑团守密人系统
+
 > **Call of Cthulhu (克苏鲁的呼唤)** is a Trademark of Chaosium Inc.
 >
 > This project is a **Fan Work** created under Chaosium's [Fan Use Policy](https://www.chaosium.com/fan-use-and-licensing/). It is not an official product and is not endorsed by Chaosium Inc.
 >
 > 本项目遵循 Chaosium 的爱好者使用政策。GlyphKeeper 仅提供**跑团辅助系统的代码逻辑**，不自带任何《克苏鲁的呼唤》规则书原文或官方模组数据。使用者需自行导入合法的规则数据。
-
-### 基于 LangGraph 图编排与事件溯源的 AI COC7版规则跑团守密人系统
 
 ## 📖 项目简介
 
