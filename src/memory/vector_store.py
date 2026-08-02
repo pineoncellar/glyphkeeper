@@ -86,7 +86,7 @@ class VectorStore:
     _lock = asyncio.Lock()
 
     def __init__(self, domain: str):
-        self.knowledge_space = domain
+        self.domain = domain
         self.rag: Optional[LightRAG] = None
         self._initialized = False
         self._world_id_override: str = ""
@@ -96,24 +96,25 @@ class VectorStore:
     @classmethod
     async def get_instance(
         cls,
-        knowledge_space: str = "world",
+        domain: str = "world",
         llm_tier: str = "standard",
         force_reinit: bool = False,
         world_id: str = "",
     ) -> "VectorStore":
-        """获取指定 knowledge_space 的 VectorStore 实例（单例）
+        """获取指定 domain 的 VectorStore 实例（单例）
 
         参数:
-            knowledge_space: 知识空间分区 ("world" / "rules")
-            llm_tier:        LLM 模型层级
-            force_reinit:    强制重新初始化
-            world_id:        世界标识（knowledge_space="world" 时必须）
+            domain:     数据域 ("world" / "rules")
+            llm_tier:   LLM 模型层级
+            force_reinit: 强制重新初始化
+            world_id:   世界标识
         """
-        cache_key = f"{knowledge_space}:{world_id}" if world_id and knowledge_space == "world" else knowledge_space
+        # 多世界缓存键：domain + world_id，确保不同世界隔离
+        cache_key = f"{domain}:{world_id}" if world_id and domain == "world" else domain
 
         async with cls._lock:
             if cache_key not in cls._instances or force_reinit:
-                instance = cls(knowledge_space)
+                instance = cls(domain)
                 instance._world_id_override = world_id
                 await instance._initialize(llm_tier)
                 cls._instances[cache_key] = instance
@@ -131,12 +132,12 @@ class VectorStore:
     async def _initialize(self, llm_tier: str = "standard"):
         """初始化 LightRAG 实例"""
         if self._initialized:
-            logger.warning(f"VectorStore({self.knowledge_space}) 已初始化，跳过")
+            logger.warning(f"VectorStore({self.domain}) 已初始化，跳过")
             return
 
         settings = get_settings()
 
-        if self.knowledge_space == "rules":
+        if self.domain == "rules":
             working_dir = PROJECT_ROOT / "data" / "rules"
             workspace = "rules"
         else:
@@ -164,9 +165,9 @@ class VectorStore:
             )
             await self.rag.initialize_storages()
             self._initialized = True
-            logger.info(f"VectorStore({self.knowledge_space}) 初始化完成: workspace={workspace}")
+            logger.info(f"VectorStore({self.domain}) 初始化完成: workspace={workspace}")
         except Exception as e:
-            logger.error(f"VectorStore({self.knowledge_space}) 初始化失败: {e}")
+            logger.error(f"VectorStore({self.domain}) 初始化失败: {e}")
             raise
 
     def _create_llm_func(self, tier: str):
@@ -388,7 +389,7 @@ class VectorStore:
             # LightRAG 没有直接的 clear 方法，通过删除工作目录实现
             import shutil
             settings = get_settings()
-            if self.knowledge_space == "rules":
+            if self.domain == "rules":
                 data_dir = PROJECT_ROOT / "data" / "rules"
             else:
                 data_dir = PROJECT_ROOT / "data" / "worlds"
@@ -421,7 +422,7 @@ class VectorStore:
     @property
     def _workspace(self) -> str:
         """获取当前实例的 workspace 名称"""
-        if self.knowledge_space == "rules":
+        if self.domain == "rules":
             return "rules"
         if not self._world_id_override:
             raise ValueError(
@@ -484,7 +485,7 @@ class VectorStore:
             await conn.close()
 
             # 拷贝 graphml 文件
-            if self.knowledge_space == "rules":
+            if self.domain == "rules":
                 graphml_dir = PROJECT_ROOT / "data" / "rules"
             else:
                 graphml_dir = PROJECT_ROOT / "data" / "worlds" / workspace
@@ -593,7 +594,7 @@ class VectorStore:
             # 恢复 graphml 文件
             backup_graphml = data_dir / "graph_chunk_entity_relation.graphml"
             if backup_graphml.exists():
-                if self.knowledge_space == "rules":
+                if self.domain == "rules":
                     target_dir = PROJECT_ROOT / "data" / "rules"
                 else:
                     target_dir = PROJECT_ROOT / "data" / "worlds" / workspace
@@ -718,45 +719,3 @@ class VectorStore:
         except Exception as e:
             logger.error(f"copy_workspace_from 失败: {e}")
             return False
-
-    async def drop_workspace(self, workspace: str) -> bool:
-        """清空指定 workspace 的全部 LightRAG 数据"""
-        try:
-            from src.tools.pg_manager import PgManager
-            mgr = await PgManager.get_instance()
-            if not mgr.available:
-                await mgr.start()
-            import asyncpg
-            conn = await asyncpg.connect(mgr.uri)
-            try:
-                for tbl in self._BACKUP_TABLES:
-                    exists = await conn.fetchval(
-                        "SELECT 1 FROM information_schema.tables WHERE table_name=$1",
-                        tbl.lower(),
-                    )
-                    if exists:
-                        await conn.execute(f"DELETE FROM {tbl} WHERE workspace=$1", workspace)
-                logger.info(f"drop_workspace: {workspace} 已清空")
-                return True
-            finally:
-                await conn.close()
-        except Exception as e:
-            logger.error(f"drop_workspace 失败: {e}")
-            return False
-
-    async def snapshot_workspace(self, source_workspace: str, snapshot_id: str) -> bool:
-        """将 source_workspace 的快照复制到 __snap__{id} 工作区
-
-        存档时调用，生成 PG 内可恢复的快照副本。
-        读档时通过 copy_workspace_from(__snap__{id}) 恢复。
-        """
-        target_ws = f"__snap__{snapshot_id[:8]}"
-        old_ws = self._workspace
-        self._workspace = target_ws
-        try:
-            ok = await self.copy_workspace_from(source_workspace)
-            if ok:
-                logger.info(f"snapshot_workspace: {source_workspace} → {target_ws}")
-            return ok
-        finally:
-            self._workspace = old_ws

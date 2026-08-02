@@ -39,8 +39,8 @@ class TestGameState:
 
     def test_create_initial_state(self):
         """初始状态应包含所有必需字段"""
-        state = create_initial_state(scenario_name="test")
-        assert state["world_id"] == ""
+        state = create_initial_state("session-1")
+        assert state["session_id"] == "session-1"
         assert state["status"] == "active"
         assert state["game_phase"] == "exploration"
         assert state["beat_counter"] == 0
@@ -53,13 +53,14 @@ class TestGameState:
 
     def test_create_state_view(self):
         """state_view 应只包含指定字段"""
-        state = create_initial_state(scenario_name="test")
+        state = create_initial_state("session-1")
         state["player_input"] = "搜索房间"
         state["game_phase"] = "investigation"
 
         view = create_state_view(state, INTENT_VIEW)
         assert "player_input" in view
         assert "game_phase" in view
+        assert "session_id" in view
         # 不应包含的非视图字段
         assert "resolution" not in view
         assert "combat_active" not in view
@@ -88,14 +89,14 @@ class TestReduceState:
     """reduce_state 合并逻辑"""
 
     def setup_method(self):
-        self.base = create_initial_state()
+        self.base = create_initial_state("session-reduce")
 
     def test_replace_field(self):
         """常规字段应直接替换"""
         result = reduce_state(self.base, {"narrative": "新叙事文本"})
         assert result["narrative"] == "新叙事文本"
         # 其他字段不变
-        assert result["scenario_name"] == ""
+        assert result["session_id"] == "session-reduce"
 
     def test_list_append(self):
         """list 字段应追加而非替换"""
@@ -237,7 +238,6 @@ class TestMergePatches:
 
 # ======== event_log.py ========
 
-@pytest.mark.pg
 class TestEventLog:
     """EventLog 记录与回放"""
 
@@ -254,7 +254,7 @@ class TestEventLog:
 
     @pytest.fixture
     async def event_store(self, pg):
-        store = EventStore()
+        store = EventStore(pg_uri=pg.uri)
         await store.clear_all()
         yield store
         await store.close()
@@ -266,7 +266,7 @@ class TestEventLog:
     @pytest.mark.asyncio
     async def test_record_and_apply(self, event_log):
         """记录事件后应返回新 state 和事件记录"""
-        current = create_initial_state()
+        current = create_initial_state("session-evt")
         new_state, event = await event_log.record_and_apply(
             current=current,
             patch={"narrative": "测试叙事", "beat_counter": "+1"},
@@ -307,7 +307,7 @@ class TestEventLog:
     @pytest.mark.asyncio
     async def test_get_events(self, event_log):
         """获取事件流应返回所有事件"""
-        current = create_initial_state()
+        current = create_initial_state("session-get")
         await event_log.record_and_apply(
             current=current, patch={}, event_type="EventA",
         )
@@ -330,7 +330,7 @@ class TestEventLog:
 
         event_log.subscribe("TestEvent", my_callback)
 
-        current = create_initial_state()
+        current = create_initial_state("session-sub")
         await event_log.record_and_apply(
             current=current, patch={}, event_type="TestEvent",
         )
@@ -351,7 +351,7 @@ class TestEventLog:
 
         event_log.subscribe("", my_callback)
 
-        current = create_initial_state()
+        current = create_initial_state("session-all")
         await event_log.record_and_apply(
             current=current, patch={}, event_type="EventX",
         )
@@ -364,7 +364,7 @@ class TestEventLog:
     @pytest.mark.asyncio
     async def test_get_latest_version(self, event_log):
         """版本号应递增"""
-        current = create_initial_state()
+        current = create_initial_state("session-ver")
         assert await event_log.get_latest_version("session-ver") == 0
 
         await event_log.record_and_apply(
@@ -380,7 +380,6 @@ class TestEventLog:
 
 # ======== snapshot.py ========
 
-@pytest.mark.pg
 class TestSnapshotManager:
     """快照创建与恢复"""
 
@@ -397,14 +396,14 @@ class TestSnapshotManager:
 
     @pytest.fixture
     async def event_store(self, pg):
-        store = EventStore()
+        store = EventStore(pg_uri=pg.uri)
         await store.clear_all()
         yield store
         await store.close()
 
     @pytest.fixture
     async def snapshot_mgr(self, event_store, pg):
-        mgr = SnapshotManager(event_store=event_store)
+        mgr = SnapshotManager(event_store=event_store, pg_uri=pg.uri)
         await mgr.clear_all()
         yield mgr
         await mgr.close()
@@ -412,7 +411,7 @@ class TestSnapshotManager:
     @pytest.mark.asyncio
     async def test_create_and_restore(self, snapshot_mgr):
         """快照创建与恢复应返回相同状态"""
-        state = create_initial_state()
+        state = create_initial_state("session-snap")
         state["narrative"] = "测试快照"
         state["game_phase"] = "combat"
 
@@ -429,7 +428,7 @@ class TestSnapshotManager:
     @pytest.mark.asyncio
     async def test_list_snapshots(self, snapshot_mgr):
         """快照列表应返回正确的元数据"""
-        state = create_initial_state()
+        state = create_initial_state("session-list")
         await snapshot_mgr.create(state, label="snap1")
         await snapshot_mgr.create(state, label="snap2")
 
@@ -453,7 +452,7 @@ class TestSnapshotManager:
     @pytest.mark.asyncio
     async def test_delete_snapshot(self, snapshot_mgr):
         """删除快照"""
-        state = create_initial_state()
+        state = create_initial_state("session-del")
         snap_id = await snapshot_mgr.create(state)
         assert await snapshot_mgr.delete(snap_id) is True
         assert await snapshot_mgr.delete(snap_id) is False
@@ -478,7 +477,6 @@ class TestSnapshotManager:
 
 # ======== 集成测试 ========
 
-@pytest.mark.pg
 class TestEventLogSnapshotIntegration:
     """EventLog + Snapshot 集成"""
 
@@ -495,7 +493,7 @@ class TestEventLogSnapshotIntegration:
 
     @pytest.fixture
     async def event_store(self, pg):
-        store = EventStore()
+        store = EventStore(pg_uri=pg.uri)
         await store.clear_all()
         yield store
         await store.close()
@@ -506,7 +504,7 @@ class TestEventLogSnapshotIntegration:
 
     @pytest.fixture
     async def snapshot_mgr(self, event_store, pg):
-        mgr = SnapshotManager(event_store=event_store)
+        mgr = SnapshotManager(event_store=event_store, pg_uri=pg.uri)
         await mgr.clear_all()
         await event_store.clear_all()
         yield mgr

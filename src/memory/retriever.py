@@ -60,7 +60,7 @@ class Retriever:
     async def vector_store(self) -> VectorStore:
         """获取 VectorStore 实例（懒加载，默认本地存储）"""
         if self._vector_store is None:
-            self._vector_store = await VectorStore.get_instance(knowledge_space="world")
+            self._vector_store = await VectorStore.get_instance(domain="world")
         return self._vector_store
 
     @property
@@ -133,7 +133,7 @@ class Retriever:
             return "（无查询内容）"
 
         try:
-            vs = await VectorStore.get_instance(knowledge_space="rules")
+            vs = await VectorStore.get_instance(domain="rules")
             result = await vs.query(question=query, top_k=top_k)
             return result if result.strip() else "（未找到相关规则）"
         except Exception as e:

@@ -1,14 +1,16 @@
 """
 @File     :   game_state.py
 @Desc     :   游戏全局状态定义 — LangGraph StateGraph 的核心 TypedDict
-@Note     :   session_id/platform/channel_id 已移出存储层，只认 world_id。
-              DEFAULT_PLAYER_ID 已移除，改用显式 get_player(state, user_id)。
+@Note     :   players dict 为多玩家预留，单玩家时以 DEFAULT_PLAYER_ID 为键
 """
 
 from __future__ import annotations
 
 from typing import TypedDict, Optional, Any
 from src.tools.time import TimeSlot
+
+DEFAULT_PLAYER_ID = "default"
+"""单玩家模式下的默认玩家 ID，多玩家时替换为真实 user_id"""
 
 
 def _default_player_entry() -> dict:
@@ -24,9 +26,13 @@ def _default_player_entry() -> dict:
     }
 
 
-def get_player(state: dict, user_id: str) -> dict:
-    """从 state 中获取指定玩家的数据"""
-    uid = user_id or "_default"
+def get_player(state: dict, user_id: str = "") -> dict:
+    """
+    从 state 中获取指定玩家的数据。
+    user_id 为空时取 DEFAULT_PLAYER_ID。
+    不存在时自动创建默认槽，保证调用方不用做 None 检查。
+    """
+    uid = user_id or DEFAULT_PLAYER_ID
     players = state.get("players", {})
     if uid not in players:
         players[uid] = _default_player_entry()
@@ -35,19 +41,11 @@ def get_player(state: dict, user_id: str) -> dict:
 
 
 def get_current_player(state: dict) -> dict:
-    """获取当前活跃玩家（单玩家模式便利函数）
-
-    取 players 中第一个存在的玩家。若 players 为空则创建默认槽。
-    多玩家支持时将退役此函数，改用显式 get_player(state, user_id)。
     """
-    players = state.get("players", {})
-    if not players:
-        players["_default"] = _default_player_entry()
-        state["players"] = players
-        return players["_default"]
-    # 取第一个玩家
-    first_uid = next(iter(players))
-    return players[first_uid]
+    获取当前活跃玩家（单玩家模式下取唯一玩家）。
+    兼容多玩家扩展：后续可根据 user_id 路由。
+    """
+    return get_player(state, DEFAULT_PLAYER_ID)
 
 
 class ActionExecutionResult(TypedDict):
@@ -68,12 +66,14 @@ class GameState(TypedDict):
 
     players: {user_id: {character, current_location, pending_dice, ...}}
     玩家独有数据在 players[uid] 内；世界共享数据在顶层。
-    注意：session_id/platform/channel_id 已移至 Adapter 层，存储层只认 world_id。
     """
 
-    # ── 世界标识（存储层唯一键） ──
-    world_id: str
+    # ── 会话标识 ──
+    session_id: str
+    platform: str
+    channel_id: str
     user_id: str
+    world_id: str
 
     # ── 会话元数据 ──
     scenario_name: str
@@ -166,20 +166,23 @@ def _fresh_player_entry(uid: str) -> dict:
 
 
 def create_initial_state(
+    session_id: str,
     scenario_name: str = "",
     time_slot: str = "MORNING",
+    platform: str = "cli",
+    channel_id: str = "",
     user_id: str = "",
     world_id: str = "",
 ) -> GameState:
-    """构建初始游戏状态，自动为当前玩家创建默认槽
-
-    注意：session_id/platform/channel_id 已移出 GameState，由适配器层管理。
-    """
+    """构建初始游戏状态，自动为当前玩家创建默认槽"""
     from datetime import datetime, timezone
 
-    uid = user_id or "_default"
+    uid = user_id or DEFAULT_PLAYER_ID
 
     return {
+        "session_id": session_id,
+        "platform": platform,
+        "channel_id": channel_id,
         "user_id": uid,
         "world_id": world_id,
         "scenario_name": scenario_name,
@@ -280,7 +283,7 @@ def rehome_player_fields(state: dict, user_id: str = "") -> dict:
 
     在 engine.run() 末尾、返回结果前调用。
     """
-    uid = user_id or "_default"
+    uid = user_id or DEFAULT_PLAYER_ID
     players = state.setdefault("players", {})
     player = players.setdefault(uid, _default_player_entry())
 

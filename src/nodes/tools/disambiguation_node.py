@@ -27,19 +27,12 @@ logger = get_logger(__name__)
 _embedding_func: Optional[Any] = None
 
 
-async def _get_embedding_func(world_id: str = ""):
-    """获取与 LightRAG 共享的 embedding 函数（复用同一管道确保维度一致）
-
-    Args:
-        world_id: 世界 ID，为空时从当前配置的 active_world 获取
-    """
+async def _get_embedding_func():
+    """获取与 LightRAG 共享的 embedding 函数（复用同一管道确保维度一致）"""
     global _embedding_func
     if _embedding_func is None:
-        if not world_id:
-            from src.tools import get_settings
-            world_id = get_settings().project.active_world
         from src.memory.vector_store import VectorStore
-        vs = await VectorStore.get_instance(knowledge_space="world", world_id=world_id)
+        vs = await VectorStore.get_instance(domain="world")
         _embedding_func = vs._create_embedding_func()
     return _embedding_func
 

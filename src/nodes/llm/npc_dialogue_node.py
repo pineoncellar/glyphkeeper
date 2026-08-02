@@ -100,12 +100,10 @@ def _get_npc_attitude(npc_name: str, npc_relations: dict) -> str:
 _retriever: Optional[Retriever] = None
 
 
-async def _get_retriever(world_id: str = "") -> Retriever:
+async def _get_retriever() -> Retriever:
     global _retriever
-    if _retriever is None or world_id:
-        from src.memory.vector_store import VectorStore
-        vs = await VectorStore.get_instance(knowledge_space="world", world_id=world_id) if world_id else None
-        _retriever = Retriever(vector_store=vs)
+    if _retriever is None:
+        _retriever = Retriever()
     return _retriever
 
 
@@ -114,14 +112,14 @@ async def _get_retriever(world_id: str = "") -> Retriever:
 # ====================================================================
 
 
-async def _retrieve_npc_profile(npc_name: str, world_id: str = "") -> str:
+async def _retrieve_npc_profile(npc_name: str) -> str:
     """从 VectorStore 检索 NPC 人设数据
 
     优先检索 source_type 包含"npc"或"entity"的记录，
     通过 NPC 名称关键词匹配。
     """
     try:
-        retriever = await _get_retriever(world_id=world_id)
+        retriever = await _get_retriever()
         vs = await retriever.vector_store
         result = await vs.query(
             question=f"NPC {npc_name} 人设 性格 对话",
@@ -135,10 +133,10 @@ async def _retrieve_npc_profile(npc_name: str, world_id: str = "") -> str:
     return f"（{npc_name} — 一位普通的 NPC，态度中立）"
 
 
-async def _retrieve_recent_context(session_id: str, npc_name: str, world_id: str = "") -> str:
+async def _retrieve_recent_context(session_id: str, npc_name: str) -> str:
     """检索与当前 NPC 相关的最近对话历史"""
     try:
-        retriever = await _get_retriever(world_id=world_id)
+        retriever = await _get_retriever()
         history = await retriever.retrieve_history(session_id, limit=15)
         if not history:
             return "（无先前对话记录）"
@@ -272,8 +270,7 @@ async def npc_dialogue_node(state: GameState) -> dict:
     """
     intent = state.get("intent") or {}
     intent_data = intent.get("data") or {}
-    session_id = state.get("world_id", "")
-    world_id = state.get("world_id", "")
+    session_id = state.get("session_id", "default")
     player_input = state.get("player_input", "")
     npc_relations = get_current_player(state).get("npc_relations") or {}
     active_tags = state.get("active_tags", [])
@@ -296,9 +293,9 @@ async def npc_dialogue_node(state: GameState) -> dict:
             "resolution": {"success": False, "error": "no_npc_target"},
         }
 
-    # 检索 NPC 人设 + 对话历史（传入 world_id 确保 VectorStore 能找到数据）
-    npc_profile, context = await _retrieve_npc_profile(npc_name, world_id=world_id), ""
-    ctx_vs = await _retrieve_recent_context(session_id, npc_name, world_id=world_id)
+    # 检索 NPC 人设 + 对话历史
+    npc_profile, context = await _retrieve_npc_profile(npc_name), ""
+    ctx_vs = await _retrieve_recent_context(session_id, npc_name)
     if ctx_vs:
         context = ctx_vs
 

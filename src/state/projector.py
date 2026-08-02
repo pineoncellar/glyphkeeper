@@ -216,7 +216,7 @@ class StateProjector:
         """
         ss = await self.session_state
         await ss.record_discovery(
-            world_id=data.get("world_id", ""),
+            session_id=data.get("session_id", "default"),
             knowledge_id=data.get("knowledge_id", ""),
             source=data.get("source", "auto"),
             character_name=data.get("character_name", ""),

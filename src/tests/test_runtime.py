@@ -401,7 +401,6 @@ class TestGraphEngine:
         assert engine.mode == ENGINE_MODE_FULL
 
     @pytest.mark.asyncio
-    @pytest.mark.pg
     async def test_create_with_components(self):
         """创建带组件的 Engine"""
         from src.graph.keeper_graph import keeper_graph
@@ -416,9 +415,9 @@ class TestGraphEngine:
             pytest.skip("pgembed 不可用")
         await mgr.start()
 
-        store = EventStore()
+        store = EventStore(pg_uri=mgr.uri)
         elog = EventLog(store)
-        snap = SnapshotManager(event_store=store)
+        snap = SnapshotManager(event_store=store, pg_uri=mgr.uri)
 
         engine = GraphEngine(
             graph=keeper_graph,

@@ -210,7 +210,7 @@ class WorldManager:
 
         if self._event_log:
             _, event = await self._event_log.record_and_apply(
-                current={"world_id": session_id},
+                current={"session_id": session_id},
                 patch=patch,
                 event_type="EntityMoved",
                 source_node=source_node,
@@ -262,7 +262,7 @@ class WorldManager:
 
         if self._event_log:
             _, event = await self._event_log.record_and_apply(
-                current={"world_id": session_id},
+                current={"session_id": session_id},
                 patch=patch,
                 event_type="LocationCreated",
                 source_node=source_node,
@@ -289,7 +289,7 @@ class WorldManager:
 
         if self._event_log:
             _, event = await self._event_log.record_and_apply(
-                current={"world_id": session_id},
+                current={"session_id": session_id},
                 patch=patch,
                 event_type="LocationUpdated",
                 source_node=source_node,
@@ -325,7 +325,7 @@ class WorldManager:
 
         if self._event_log:
             _, event = await self._event_log.record_and_apply(
-                current={"world_id": session_id},
+                current={"session_id": session_id},
                 patch=patch,
                 event_type="WorldInitialized",
                 source_node=source_node,

@@ -365,22 +365,12 @@ async def _call_llm_for_narrative_chain(
     narrative_history: str = "",
     player_input: str = "",
     dialogue_history_str: str = "",
-    known_knowledge: list[str] | None = None,
 ) -> LLMResult:
     """调用 LLM 基于 executed_actions 链生成叙事文本"""
     try:
-        # 防剧透软约束：玩家已发现的知识白名单
-        spoiler_constraint = ""
-        if known_knowledge:
-            spoiler_constraint = (
-                "\n[重要约束] 玩家当前已发现的线索如下：\n"
-                + "\n".join(f"- {k}" for k in known_knowledge)
-                + "\n未在上述列表中的信息，玩家角色目前不知道，不应在叙事中作为已知事实提及。"
-            )
-
         chain_text = _build_chain_context(actions, npc_results)
         messages = [
-            {"role": "system", "content": NARRATOR_SYSTEM_PROMPT + spoiler_constraint},
+            {"role": "system", "content": NARRATOR_SYSTEM_PROMPT},
             {"role": "system", "content": NARRATOR_CHAIN_SUPPLEMENT},
         ]
         context_parts = [chain_text]
@@ -416,7 +406,7 @@ async def narrate_node(state: GameState) -> dict:
     physical_reality = state.get("physical_reality", "")
     rag_context = state.get("rag_context", "")
     narrative_history = state.get("narrative", "")
-    session_id = state.get("world_id", "")
+    session_id = state.get("session_id", "")
 
     # 从 dialogue_history 取近5轮作为对话历史上下文
     dialogue_history = state.get("dialogue_history", [])
@@ -444,7 +434,6 @@ async def narrate_node(state: GameState) -> dict:
             narrative_history=narrative_history,
             player_input=player_input,
             dialogue_history_str=dialogue_history_str,
-            known_knowledge=known_knowledge,
         )
         if result.is_ok:
             narrative = result.text

@@ -42,7 +42,7 @@ def build_keeper_graph() -> StateGraph:
     拓扑结构:
       START → intent (意图裂变)
            → loop_guard (条件边)
-               ├── continue → db_lookup → disambiguation → rag_lookup → dispatch → reduce_iter → loop_guard
+               ├── continue → db_lookup → disambiguation → dispatch → reduce_iter → loop_guard
                └── narrate  → narrate → state_extractor → END
 
     Returns:
@@ -59,7 +59,6 @@ def build_keeper_graph() -> StateGraph:
     # ── 隔离裁决循环体 ──
     builder.add_node("db_lookup", db_lookup_node)
     builder.add_node("disambiguation", disambiguation_node)
-    builder.add_node("rag_lookup", rag_lookup_node)
     builder.add_node("dispatch", dispatch_node)
     builder.add_node("reduce_iter", reduce_iter_node)
 
@@ -80,10 +79,9 @@ def build_keeper_graph() -> StateGraph:
         {"continue": "db_lookup", "narrate": "narrate"},
     )
 
-    # 循环体：db_lookup → disambiguation → rag_lookup → dispatch → reduce_iter → 回到 loop_guard
+    # 循环体：db_lookup → disambiguation → dispatch → reduce_iter → 回到 loop_guard
     builder.add_edge("db_lookup", "disambiguation")
-    builder.add_edge("disambiguation", "rag_lookup")
-    builder.add_edge("rag_lookup", "dispatch")
+    builder.add_edge("disambiguation", "dispatch")
     builder.add_edge("dispatch", "reduce_iter")
     builder.add_edge("reduce_iter", "loop_guard")
 

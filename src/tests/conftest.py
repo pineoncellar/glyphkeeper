@@ -32,61 +32,20 @@ from src.tests.fake_llm import (
 
 
 # ====================================================================
-# CLI 选项
-# ====================================================================
-
-
-def pytest_addoption(parser: pytest.Parser):
-    """添加命令行选项"""
-    parser.addoption(
-        "--use-real-llm",
-        action="store_true",
-        default=False,
-        help="使用真实 LLM（默认使用 fake LLM）",
-    )
-    parser.addoption(
-        "--with-pg",
-        action="store_true",
-        default=False,
-        help="运行需要 PostgreSQL 的测试（默认跳过，因 PG 启停极慢）",
-    )
-
-
-# ====================================================================
-# 默认跳过 PG 测试（除非 --with-pg 指定）
-# ====================================================================
-
-
-def pytest_collection_modifyitems(config, items):
-    """默认跳过标记为 pg 的测试，除非 --with-pg 启用"""
-    if config.getoption("--with-pg"):
-        return  # 用户显式要求运行 PG 测试，不跳过
-
-    skip_pg = pytest.mark.skip(reason="需要 PostgreSQL（加 --with-pg 运行）")
-    for item in items:
-        if item.get_closest_marker("pg"):
-            item.add_marker(skip_pg)
-
-
-# ====================================================================
-# 测试数据库隔离（仅 --with-pg 时启用）
+# 测试数据库隔离 — 使用独立数据库，不污染生产数据
 # ====================================================================
 
 import asyncio as _asyncio
 
 
 def pytest_sessionstart(session):
-    """所有测试开始前：如有 --with-pg 则创建 test 数据库"""
-    config = session.config
-    if config.getoption("--with-pg"):
-        _asyncio.run(_setup_test_db())
+    """所有测试开始前：创建 test 数据库并切换"""
+    _asyncio.run(_setup_test_db())
 
 
 def pytest_sessionfinish(session, exitstatus):
-    """所有测试结束后：如有 --with-pg 则清理 test 数据库"""
-    config = session.config
-    if config.getoption("--with-pg"):
-        _asyncio.run(_teardown_test_db())
+    """所有测试结束后：恢复生产数据库并删除 test 数据库"""
+    _asyncio.run(_teardown_test_db())
 
 
 async def _setup_test_db():
@@ -101,17 +60,39 @@ async def _setup_test_db():
 
 
 async def _teardown_test_db():
-    """恢复生产数据库并删除测试数据库"""
+    """恢复生产数据库并删除测试数据库
+
+    注意：部分测试 fixture 会在结束后 stop() PG 实例，
+    导致无法连接删除。此时跳过删除，下次测试运行时
+    ensure_test_database 会自动 DROP 重建。
+    """
     from src.tools.pg_manager import PgManager
     try:
         mgr = await PgManager.get_instance()
+        # 如果 PG 已停止，跳过删除（下次运行会自动重建）
         if not mgr._started:
             return
         await mgr.drop_test_database("glyphkeeper_test")
-    except (ConnectionRefusedError, OSError):
+    except (ConnectionRefusedError, OSError) as e:
+        # PG 已停止，正常跳过
         pass
     except Exception as e:
         print(f"[conftest] 测试数据库删除失败（可忽略，下次测试会自动重建）: {e}")
+
+
+# ====================================================================
+# CLI 选项：--use-real-llm
+# ====================================================================
+
+
+def pytest_addoption(parser: pytest.Parser):
+    """添加 --use-real-llm 命令行选项"""
+    parser.addoption(
+        "--use-real-llm",
+        action="store_true",
+        default=False,
+        help="使用真实 LLM（默认使用 fake LLM）",
+    )
 
 
 # ====================================================================

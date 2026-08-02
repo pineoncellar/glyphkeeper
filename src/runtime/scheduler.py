@@ -32,13 +32,13 @@ logger = get_logger(__name__)
 
 
 # ── 会话键类型 ──
-# 存储层只认 world_id，platform/channel_id/session_id 收拢至 Adapter 层内部路由
-SessionKey = tuple[str, ...]  # (world_id,)
+# (platform, channel_id, world_id, session_id) → SessionSlot
+SessionKey = tuple[str, str, str, str]
 
 
 def _make_key(msg: InboundMessage) -> SessionKey:
-    """从入站消息构造会话键 — 只依赖 world_id"""
-    return (msg.world_id,)
+    """从入站消息构造会话键"""
+    return (msg.platform, msg.channel_id, msg.world_id, msg.session_id)
 
 
 @dataclass
@@ -52,13 +52,14 @@ class SessionSlot:
     created:  会话创建时间
     last_active: 最后活动时间
     turn_count:  已执行的轮次
-
-    注意：platform/channel_id/session_id 已移至 Adapter 层内部路由，
-    SessionSlot 只保留 world_id/user_id 供存储层访问。
+    platform/channel_id/user_id/world_id: 多通道路由元数据
     """
 
+    session_id: str
     state: GameState
     ctx: ExecutionContext
+    platform: str = "cli"
+    channel_id: str = ""
     user_id: str = ""
     world_id: str = ""
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
@@ -134,17 +135,18 @@ class InputScheduler:
             slot.last_active = time.time()
             slot.turn_count += 1
 
-            ctx = ExecutionContext(session_id=slot.world_id)
+            ctx = ExecutionContext(session_id=slot.session_id)
 
             logger.info(
-                f"Scheduler.submit: world={slot.world_id[:8]} "
+                f"Scheduler.submit: session={slot.session_id[:8]} "
+                f"world={slot.world_id} "
                 f"turn={slot.turn_count} "
                 f"input={player_input[:40]}..."
             )
 
             narrative, new_state = await self.engine.run(
                 player_input=player_input,
-                session_id=slot.world_id,
+                session_id=slot.session_id,
                 previous_state=slot.state,
                 context=ctx,
                 auto_snapshot=auto_snapshot,
@@ -182,7 +184,7 @@ class InputScheduler:
             # 会话忙，排入队列
             await slot.queue.put(player_input)
             logger.debug(
-                f"Scheduler.submit_with_queue: world={slot.world_id[:8]} "
+                f"Scheduler.submit_with_queue: session={slot.session_id[:8]} "
                 f"已入队 (queue_size≈{slot.queue.qsize()})"
             )
             return f"（输入已排入队列，位置 #{slot.queue.qsize()}）"
@@ -191,10 +193,10 @@ class InputScheduler:
             slot.last_active = time.time()
             slot.turn_count += 1
 
-            ctx = ExecutionContext(session_id=slot.world_id)
+            ctx = ExecutionContext(session_id=slot.session_id)
             narrative, new_state = await self.engine.run(
                 player_input=player_input,
-                session_id=slot.world_id,
+                session_id=slot.session_id,
                 previous_state=slot.state,
                 context=ctx,
                 world_id=slot.world_id,
@@ -222,10 +224,10 @@ class InputScheduler:
                 slot.last_active = time.time()
                 slot.turn_count += 1
 
-                ctx = ExecutionContext(session_id=slot.world_id)
+                ctx = ExecutionContext(session_id=slot.session_id)
                 _, new_state = await self.engine.run(
                     player_input=player_input,
-                    session_id=slot.world_id,
+                    session_id=slot.session_id,
                     previous_state=slot.state,
                     context=ctx,
                     world_id=slot.world_id,
@@ -245,75 +247,79 @@ class InputScheduler:
             if key in self._sessions:
                 return self._sessions[key]
 
-            # 创建新会话 — session_id/platform/channel_id 收拢至 Adapter 层
+            # 创建新会话
             state = create_initial_state(
+                session_id=msg.session_id,
+                platform=msg.platform,
+                channel_id=msg.channel_id,
                 user_id=msg.user_id,
                 world_id=msg.world_id,
             )
             slot = SessionSlot(
+                session_id=msg.session_id,
                 state=state,
-                ctx=ExecutionContext(session_id=msg.world_id),
+                ctx=ExecutionContext(session_id=msg.session_id),
+                platform=msg.platform,
+                channel_id=msg.channel_id,
                 user_id=msg.user_id,
                 world_id=msg.world_id,
             )
             self._sessions[key] = slot
             logger.info(
-                f"Scheduler: 创建新会话 world={msg.world_id[:8]} "
+                f"Scheduler: 创建新会话 session={msg.session_id[:8]} "
+                f"world={msg.world_id} "
+                f"channel={msg.channel_id} "
                 f"total_sessions={len(self._sessions)}"
             )
             return slot
 
-    def get_session(self, world_id: str) -> Optional[SessionSlot]:
-        """按 world_id 查询会话
-
-        支持多重降级匹配：
-          1. 精确 key 匹配 (world_id,)
-          2. 遍历匹配 slot.world_id
-          3. 遍历匹配 slot.ctx.session_id（兼容 CLI 传入 session_id 的用法）
-        """
-        key = (world_id,)
-        slot = self._sessions.get(key)
-        if slot is not None:
-            return slot
-        # 降级：遍历所有槽位
-        for s in self._sessions.values():
-            if s.world_id == world_id:
-                return s
-            if s.ctx and s.ctx.session_id == world_id:
-                return s
+    def _key_for_session(self, session_id: str) -> Optional[SessionKey]:
+        """通过 session_id 查找对应的会话键（遍历，用于向后兼容的 API）"""
+        for key in self._sessions:
+            if key[3] == session_id:
+                return key
         return None
 
-    def get_session_state(self, world_id: str) -> Optional[GameState]:
-        """获取指定世界的 GameState"""
-        slot = self.get_session(world_id)
+    def get_session(self, session_id: str) -> Optional[SessionSlot]:
+        """查询会话信息"""
+        key = self._key_for_session(session_id)
+        return self._sessions.get(key) if key else None
+
+    def get_session_state(self, session_id: str) -> Optional[GameState]:
+        """获取会话的 GameState"""
+        slot = self.get_session(session_id)
         return slot.state if slot else None
 
     async def restore_session_state(
         self,
-        world_id: str,
+        session_id: str,
         state: GameState,
-        user_id: str = "",
+        platform: str = "cli",
+        channel_id: str = "",
+        world_id: str = "",
     ) -> None:
         """恢复会话状态（用于读档）
 
-        直接替换指定世界的 GameState，不触发引擎执行。
+        直接替换指定会话的 GameState，不触发引擎执行。
         如果会话不存在则自动创建。
         """
         msg = InboundMessage(
             type="",
             text="",
+            session_id=session_id,
+            platform=platform,
+            channel_id=channel_id,
             world_id=world_id,
-            user_id=user_id,
         )
         slot = await self._get_or_create_session(msg)
         async with slot.lock:
             slot.state = state
             slot.last_active = time.time()
-            slot.ctx = ExecutionContext(session_id=world_id)
+            slot.ctx = ExecutionContext(session_id=session_id)
 
     async def rollback_session(
         self,
-        world_id: str,
+        session_id: str,
         target_version: int,
     ) -> bool:
         """回滚到指定事件版本，替换当前会话的状态
@@ -323,52 +329,36 @@ class InputScheduler:
         返回:
             True 回滚成功，False 失败（版本越界 / 无 event_log）
         """
-        slot = self.get_session(world_id)
+        slot = self.get_session(session_id)
         if slot is None:
-            logger.warning(f"Scheduler.rollback: 会话不存在 world={world_id[:8]}")
+            logger.warning(f"Scheduler.rollback: 会话不存在 session={session_id[:8]}")
             return False
 
-        rebuilt = await self.engine.rollback_session(world_id, target_version)
+        rebuilt = await self.engine.rollback_session(session_id, target_version)
         if rebuilt is None:
             return False
 
         async with slot.lock:
             slot.state = rebuilt
             slot.last_active = time.time()
-            slot.ctx = ExecutionContext(session_id=world_id)
+            slot.ctx = ExecutionContext(session_id=session_id)
             logger.info(
-                f"Scheduler.rollback: world={world_id[:8]} "
+                f"Scheduler.rollback: session={session_id[:8]} "
                 f"target_version={target_version} 成功"
             )
         return True
 
-    async def remove_session(self, world_id: str) -> bool:
-        """删除一个世界会话及其状态"""
-        key = (world_id,)
+    async def remove_session(self, session_id: str) -> bool:
+        """删除一个会话及其状态"""
+        key = self._key_for_session(session_id)
         async with self._lock:
-            if key in self._sessions:
+            if key and key in self._sessions:
                 del self._sessions[key]
                 logger.info(
-                    f"Scheduler: 删除会话 world={world_id[:8]} "
+                    f"Scheduler: 删除会话 session={session_id[:8]} "
                     f"remaining={len(self._sessions)}"
                 )
                 return True
-            # 降级：按 slot.world_id / ctx.session_id 匹配
-            for sk, sv in list(self._sessions.items()):
-                if sv.world_id == world_id:
-                    del self._sessions[sk]
-                    logger.info(
-                        f"Scheduler: 删除会话 (world_id fallback) world={world_id[:8]} "
-                        f"remaining={len(self._sessions)}"
-                    )
-                    return True
-                if sv.ctx and sv.ctx.session_id == world_id:
-                    del self._sessions[sk]
-                    logger.info(
-                        f"Scheduler: 删除会话 (ctx.session_id fallback) session={world_id[:8]} "
-                        f"remaining={len(self._sessions)}"
-                    )
-                    return True
             return False
 
     async def clear_all_sessions(self):
@@ -386,15 +376,15 @@ class InputScheduler:
         return len(self._sessions)
 
     @property
-    def world_ids(self) -> list[str]:
-        """所有活跃世界 ID 列表"""
-        return [k[0] for k in self._sessions.keys()]
+    def session_ids(self) -> list[str]:
+        """所有会话 ID 列表"""
+        return [k[3] for k in self._sessions.keys()]
 
     def get_sessions_by_world(self, world_id: str) -> list[SessionSlot]:
         """按世界查询所有会话"""
         return [
             s for k, s in self._sessions.items()
-            if k[0] == world_id
+            if k[2] == world_id
         ]
 
     def get_stats(self) -> dict:

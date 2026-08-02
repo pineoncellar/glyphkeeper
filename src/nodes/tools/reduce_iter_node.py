@@ -22,7 +22,7 @@ async def _emit_item_state_change(state: GameState, target_key: str):
 
     非阻塞，失败仅记警告，不影响游戏主循环。
     """
-    session_id = state.get("world_id", "")
+    session_id = state.get("session_id", "")
     if not session_id:
         return
     try:
@@ -196,7 +196,7 @@ async def _evaluate_triggers_after_reduce(state: dict, current_patch: dict) -> d
     rehome_player_fields() 执行后才搬入 players[uid]。因此 merged_state
     需做同样归位，否则触发器的 AT_LOCATION 等条件会读到 players 中的旧值。
     """
-    session_id = state.get("world_id", "")
+    session_id = state.get("session_id", "")
     world_id = state.get("world_id", "")
     module_name = state.get("scenario_name", "")
     logger.info(

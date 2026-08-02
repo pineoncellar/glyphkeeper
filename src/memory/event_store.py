@@ -2,8 +2,8 @@
 """
 @File     :   event_store.py
 @Desc     :   事件溯源存储 — 基于 pgembed 嵌入式 PostgreSQL 的不可变事件流
-@Note     :   使用 asyncpg + JSONB，通过 PgManager 连接池共享连接
-              append 写入时自动维护 version 递增。
+@Note     :   使用 asyncpg + JSONB，通过 PgManager 自动管理连接
+              append 写入时自动维护 version 递增，session_id 支持任意字符串
 """
 
 from __future__ import annotations
@@ -24,42 +24,65 @@ logger = get_logger(__name__)
 
 
 class EventStore:
-    """事件溯源存储 — 基于 asyncpg + JSONB（PgManager 连接池版）
+    """事件溯源存储 — 基于 asyncpg + JSONB
 
     append 写入不可变事件流，get_events/replay 按 version 升序读取。
-    所有连接通过 PgManager 连接池管理，不自持独立连接。
+    session_id 接受任意字符串（含非 UUID 格式），建表时自动迁移旧版 UUID 列。
     """
 
-    def __init__(self):
+    def __init__(self, pg_uri: Optional[str] = None):
+        self._uri = pg_uri or ""
         self._conn = None
-        self._inited = False
 
     # ------- 连接管理 -------
 
     async def _get_conn(self):
-        """从 PgManager 连接池获取连接，延迟建表"""
+        """获取 asyncpg 连接，延迟建表"""
         if self._conn and not self._conn.is_closed():
             return self._conn
 
-        from src.tools.pg_manager import PgManager
-        mgr = await PgManager.get_instance()
-        if not mgr.available:
-            raise RuntimeError("pgembed 不可用")
-        await mgr.start()
-        self._conn = await mgr.get_conn()
+        uri = self._uri
+        if not uri:
+            from src.tools.pg_manager import PgManager
+            mgr = await PgManager.get_instance()
+            if mgr.available:
+                await mgr.start()
+                uri = mgr.uri
+            else:
+                raise RuntimeError("pgembed 不可用")
 
-        if not self._inited:
-            await self._init_db()
-            self._inited = True
+        import asyncpg
+        self._conn = await asyncpg.connect(uri)
+        await self._init_db()
         return self._conn
 
     async def _init_db(self):
-        """幂等地创建 events 表（以 world_id 为主键域，无 session_id）"""
+        """建 events 表，自动迁移旧版 UUID 列到 TEXT，追加 world_id 列"""
         conn = await self._get_conn()
+
+        # 迁移旧版 UUID 列到 TEXT — DROP 会丢数据，ALTER 保平安
+        col_type = await conn.fetchval("""
+            SELECT data_type FROM information_schema.columns
+            WHERE table_name='events' AND column_name='session_id'
+        """)
+        if col_type and col_type == 'uuid':
+            logger.warning("EventStore: 迁移 session_id UUID->TEXT...")
+            await conn.execute("ALTER TABLE events ALTER COLUMN session_id TYPE TEXT")
+            logger.info("EventStore: session_id 迁移完成")
+
+        parent_type = await conn.fetchval("""
+            SELECT data_type FROM information_schema.columns
+            WHERE table_name='events' AND column_name='parent_event_id'
+        """)
+        if parent_type and parent_type == 'uuid':
+            logger.warning("EventStore: 迁移 parent_event_id UUID->TEXT...")
+            await conn.execute("ALTER TABLE events ALTER COLUMN parent_event_id TYPE TEXT")
+            logger.info("EventStore: parent_event_id 迁移完成")
 
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS events (
                 id UUID PRIMARY KEY,
+                session_id TEXT NOT NULL,
                 type TEXT NOT NULL,
                 data JSONB NOT NULL,
                 version INTEGER NOT NULL,
@@ -70,40 +93,53 @@ class EventStore:
             )
         """)
 
-        # 事件流索引：按 world_id + version 查询
+        # 为已有表追加 world_id 列（幂等）
+        wcol = await conn.fetchval("""
+            SELECT data_type FROM information_schema.columns
+            WHERE table_name='events' AND column_name='world_id'
+        """)
+        if not wcol:
+            logger.info("EventStore: 追加 world_id 列...")
+            await conn.execute("ALTER TABLE events ADD COLUMN world_id TEXT NOT NULL DEFAULT ''")
+
+        # 复合索引：按世界+会话查事件
         await conn.execute("""
-            CREATE INDEX IF NOT EXISTS idx_events_world_version
-            ON events(world_id, version)
+            CREATE INDEX IF NOT EXISTS idx_events_session
+            ON events(session_id, version)
+        """)
+        await conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_events_world
+            ON events(world_id, session_id, version)
         """)
 
     async def close(self):
-        """归还连接到 PgManager 连接池"""
+        """关闭数据库连接"""
         if self._conn and not self._conn.is_closed():
-            from src.tools.pg_manager import PgManager
-            mgr = await PgManager.get_instance()
-            await mgr.release_conn(self._conn)
+            await self._conn.close()
             self._conn = None
 
     # ------- 核心读写 -------
 
     async def append(
         self,
-        world_id: str,
+        session_id: str,
         event_type: str,
         data: dict,
         source_node: str = "",
         parent_event_id: Optional[str] = None,
+        world_id: str = "",
     ) -> dict:
         """追加一条新事件到事件流，自动递增 version
 
-        world_id 标识所属世界（存储层唯一键），session_id 已移除。
+        world_id 用于多世界隔离，为空时兼容旧数据。
         """
         conn = await self._get_conn()
-        version = await self.get_latest_version(world_id) + 1
+        version = await self.get_latest_version(session_id) + 1
         now = datetime.now(timezone.utc)
 
         event = {
             "id": str(uuid.uuid4()),
+            "session_id": session_id,
             "type": event_type,
             "data": data,
             "version": version,
@@ -114,9 +150,9 @@ class EventStore:
         }
 
         await conn.execute(
-            """INSERT INTO events (id, type, data, version, timestamp, source_node, parent_event_id, world_id)
-               VALUES ($1, $2, $3::jsonb, $4, $5::timestamptz, $6, $7, $8)""",
-            event["id"], event["type"],
+            """INSERT INTO events (id, session_id, type, data, version, timestamp, source_node, parent_event_id, world_id)
+               VALUES ($1, $2, $3, $4::jsonb, $5, $6::timestamptz, $7, $8, $9)""",
+            event["id"], event["session_id"], event["type"],
             json.dumps(event["data"], ensure_ascii=False, default=str),
             event["version"], now,
             event["source_node"], event["parent_event_id"],
@@ -125,52 +161,88 @@ class EventStore:
         return event
 
     async def get_events(
-        self, world_id: str, since_version: int = 0,
+        self, session_id: str, since_version: int = 0, world_id: str = "",
     ) -> list[dict]:
-        """获取指定世界的事件流（按 version 升序）"""
+        """获取指定会话的事件流（按 version 升序）
+
+        world_id 非空时过滤。
+        """
         conn = await self._get_conn()
-        rows = await conn.fetch(
-            "SELECT * FROM events WHERE world_id = $1 AND version > $2 ORDER BY version ASC",
-            world_id, since_version,
-        )
+        if world_id:
+            rows = await conn.fetch(
+                "SELECT * FROM events WHERE session_id = $1 AND version > $2 AND world_id = $3 ORDER BY version ASC",
+                session_id, since_version, world_id,
+            )
+        else:
+            rows = await conn.fetch(
+                "SELECT * FROM events WHERE session_id = $1 AND version > $2 ORDER BY version ASC",
+                session_id, since_version,
+            )
         return [self._row_to_event(row) for row in rows]
 
     async def get_events_range(
-        self, world_id: str, up_to_version: int,
+        self, session_id: str, up_to_version: int, world_id: str = "",
     ) -> list[dict]:
-        """获取指定世界在 target_version 之前（含）的事件，用于回档重建"""
+        """获取指定会话在 target_version 之前（含）的事件
+
+        用于回档重建状态。
+        """
         conn = await self._get_conn()
-        rows = await conn.fetch(
-            "SELECT * FROM events WHERE world_id = $1 AND version <= $2 ORDER BY version ASC",
-            world_id, up_to_version,
-        )
+        if world_id:
+            rows = await conn.fetch(
+                "SELECT * FROM events WHERE session_id = $1 AND version <= $2 AND world_id = $3 ORDER BY version ASC",
+                session_id, up_to_version, world_id,
+            )
+        else:
+            rows = await conn.fetch(
+                "SELECT * FROM events WHERE session_id = $1 AND version <= $2 ORDER BY version ASC",
+                session_id, up_to_version,
+            )
         return [self._row_to_event(row) for row in rows]
 
-    async def replay(self, world_id: str) -> AsyncGenerator[dict, None]:
-        """按 version 顺序回放指定世界的事件（异步生成器）"""
+    async def replay(self, session_id: str, world_id: str = "") -> AsyncGenerator[dict, None]:
+        """按 version 顺序回放事件（异步生成器）"""
         conn = await self._get_conn()
-        rows = await conn.fetch(
-            "SELECT * FROM events WHERE world_id = $1 ORDER BY version ASC",
-            world_id,
-        )
+        if world_id:
+            rows = await conn.fetch(
+                "SELECT * FROM events WHERE session_id = $1 AND world_id = $2 ORDER BY version ASC",
+                session_id, world_id,
+            )
+        else:
+            rows = await conn.fetch(
+                "SELECT * FROM events WHERE session_id = $1 ORDER BY version ASC",
+                session_id,
+            )
         for row in rows:
             yield self._row_to_event(row)
 
-    async def get_latest_version(self, world_id: str) -> int:
-        """获取指定世界的最新 version 号"""
+    async def get_latest_version(self, session_id: str, world_id: str = "") -> int:
+        """获取指定会话的最新 version 号"""
         conn = await self._get_conn()
-        val = await conn.fetchval(
-            "SELECT COALESCE(MAX(version), 0) FROM events WHERE world_id = $1",
-            world_id,
-        )
+        if world_id:
+            val = await conn.fetchval(
+                "SELECT COALESCE(MAX(version), 0) FROM events WHERE session_id = $1 AND world_id = $2",
+                session_id, world_id,
+            )
+        else:
+            val = await conn.fetchval(
+                "SELECT COALESCE(MAX(version), 0) FROM events WHERE session_id = $1",
+                session_id,
+            )
         return val or 0
 
-    async def get_event_count(self, world_id: str) -> int:
-        """获取指定世界的事件总数"""
+    async def get_event_count(self, session_id: str, world_id: str = "") -> int:
+        """获取指定会话的事件总数"""
         conn = await self._get_conn()
-        val = await conn.fetchval(
-            "SELECT COUNT(*) FROM events WHERE world_id = $1", world_id,
-        )
+        if world_id:
+            val = await conn.fetchval(
+                "SELECT COUNT(*) FROM events WHERE session_id = $1 AND world_id = $2",
+                session_id, world_id,
+            )
+        else:
+            val = await conn.fetchval(
+                "SELECT COUNT(*) FROM events WHERE session_id = $1", session_id,
+            )
         return val or 0
 
     # ------- 辅助方法 -------
@@ -179,6 +251,7 @@ class EventStore:
     def _row_to_event(row) -> dict:
         return {
             "id": str(row["id"]),
+            "session_id": str(row["session_id"]),
             "type": row["type"],
             "data": row["data"] if isinstance(row["data"], dict) else json.loads(row["data"]),
             "version": row["version"],
@@ -191,26 +264,36 @@ class EventStore:
     async def delete_module_events(self, module_name: str) -> bool:
         """删除指定模名的所有事件（用于 /module delete）
 
-        从 __seed__ world 中删除 data->>'module_name' 匹配的事件。
+        从 TEMPLATE_SESSION_ID 中删除 data->>'module_name' 匹配的事件。
         """
         conn = await self._get_conn()
+        from src.state.module_loader import TEMPLATE_SESSION_ID
         result = await conn.execute(
-            "DELETE FROM events WHERE world_id LIKE '__seed__%' AND data->>'module_name' = $1",
-            module_name,
+            "DELETE FROM events WHERE session_id = $1 AND data->>'module_name' = $2",
+            TEMPLATE_SESSION_ID, module_name,
         )
         affected = result.split()[1] if "DELETE" in result else "0"
         logger.info("delete_module_events: 已删除 %s 条事件 (module=%s)", affected, module_name)
         return int(affected) > 0
 
-    async def clear_world(self, world_id: str):
-        """清空指定世界的事件（仅用于测试）"""
+    async def clear_session(self, session_id: str, world_id: str = ""):
+        """清空指定会话的事件（仅用于测试）"""
         conn = await self._get_conn()
-        await conn.execute("DELETE FROM events WHERE world_id = $1", world_id)
+        if world_id:
+            await conn.execute(
+                "DELETE FROM events WHERE session_id = $1 AND world_id = $2",
+                session_id, world_id,
+            )
+        else:
+            await conn.execute("DELETE FROM events WHERE session_id = $1", session_id)
 
-    async def clear_all(self):
+    async def clear_all(self, world_id: str = ""):
         """清空所有事件（仅用于测试）"""
         conn = await self._get_conn()
-        await conn.execute("DELETE FROM events")
+        if world_id:
+            await conn.execute("DELETE FROM events WHERE world_id = $1", world_id)
+        else:
+            await conn.execute("DELETE FROM events")
 
 
 # ====================================================================
@@ -219,14 +302,14 @@ class EventStore:
 
 
 async def create_event_store() -> EventStore:
-    """创建 EventStore 实例（连接统一走 PgManager 连接池）
+    """创建 EventStore 实例，通过 PgManager 自动获取连接 URI
 
-    PG 可用时返回 EventStore，否则抛异常让调用方处理。
+    PG 可用时使用嵌入式 PostgreSQL，否则抛异常让调用方处理。
     不再需要区分 EventStore 与 AsyncPgEventStore — 两者已合并。
     """
     from src.tools.pg_manager import PgManager
     mgr = await PgManager.get_instance()
     if mgr.available:
         await mgr.start()
-        return EventStore()
+        return EventStore(pg_uri=mgr.uri)
     raise RuntimeError("pgembed 不可用")

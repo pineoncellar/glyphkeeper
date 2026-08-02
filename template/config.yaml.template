@@ -64,18 +64,6 @@ lightrag:
   default_top_k: 60
 
 # ============================================
-# RAG 检索三档弹性唤醒参数
-# ============================================
-# 映射 rag_lookup_node 内部的三档检索矩阵
-rag_retrieval:
-  # A 档：线索埋点硬唤醒（SQL 探针触发），宽口径捕获
-  clue_probe_top_k: 15
-  clue_probe_mode: naive
-  # B 档：主动回忆（intent needs_rag 触发），聚焦命中
-  recall_top_k: 8
-  recall_mode: naive
-
-# ============================================
 # LangSmith 调试与可观测性
 # ============================================
 # 参考: https://smith.langchain.com
@@ -89,25 +77,3 @@ langsmith:
   project: "glyphkeeper"
   # API 端点（自部署或国内镜像时修改）
   endpoint: "https://api.smith.langchain.com"
-
-# ============================================
-# Worker 后台记忆固化 — 增量轮询固化参数
-# ============================================
-# 后台 Worker 在内存中记账不持文本，判定达标后增量捞取发言刷入 LightRAG。
-# 见 src/tools/config.py WorkerConfig 的字段定义。
-worker:
-  # MemorizerWorker — 微观事实固化
-  #   token_threshold: 积压 tokens 超过此值触发刷盘（中文 ~1.5 tokens/char）
-  #   min_flush_interval: 两次刷盘的最小间隔（秒），防频繁
-  #   poll_interval: 守护循环轮询间隔（秒），仅控制唤醒频率
-  memorizer_token_threshold: 2000
-  memorizer_min_flush_interval: 180
-  memorizer_poll_interval: 60
-
-  # WorldSummarizer — 宏观编年史固化
-  summarizer_token_threshold: 4000
-  summarizer_min_flush_interval: 600
-  summarizer_poll_interval: 60
-
-  # 共有：TimeBased 兜底策略，系统静默超过此秒数触发固化
-  time_idle_threshold: 600
