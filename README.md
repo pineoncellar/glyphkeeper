@@ -4,7 +4,7 @@
 > 
 > 旧架构中“多 Agent 链路、事件溯源+物理仲裁引擎”的模式虽然逻辑严密，但过度限制了 LLM 的叙事灵活性，且带来了较高的维护成本与响应时延。
 >
-> 此库仅作技术与思路参考
+> 此库仅作技术与思路参考，如有兴趣欢迎关注[OpenCOCKeeper](https://github.com/pineoncellar/OpenCOCKeeper)
 
 ### 基于 LangGraph 图编排与事件溯源的 AI COC7版规则跑团守密人系统
 
